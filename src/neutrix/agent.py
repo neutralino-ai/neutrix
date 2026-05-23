@@ -8,7 +8,7 @@ from typing import Any
 from loguru import logger
 from openai import AsyncOpenAI
 
-from neutrix.config import Provider, get_api_key
+from neutrix.config import Slot
 from neutrix.tools import dispatch, get_schemas
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -22,14 +22,13 @@ DEFAULT_SYSTEM_PROMPT = (
 class AgentEvent:
     """Stream event yielded by Agent.stream_reply."""
 
-    kind: str  # "token" | "tool_call" | "tool_result" | "done" | "error"
+    kind: str  # "token" | "tool_call" | "tool_result" | "done" | "error" | "needs_tool"
     data: Any = None
 
 
 @dataclass
 class Agent:
-    provider: Provider
-    model: str
+    slot: Slot
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     use_tools: bool = True
     messages: list[dict[str, Any]] = field(default_factory=list)
@@ -38,20 +37,19 @@ class Agent:
     def __post_init__(self) -> None:
         if not self.messages:
             self.messages = [{"role": "system", "content": self.system_prompt}]
-        self._client = AsyncOpenAI(
-            base_url=self.provider.base_url,
-            api_key=get_api_key(self.provider),
-        )
+        self._rebuild_client()
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self.system_prompt}]
 
-    def switch(self, provider: Provider, model: str) -> None:
-        self.provider = provider
-        self.model = model
+    def switch(self, slot: Slot) -> None:
+        self.slot = slot
+        self._rebuild_client()
+
+    def _rebuild_client(self) -> None:
         self._client = AsyncOpenAI(
-            base_url=provider.base_url,
-            api_key=get_api_key(provider),
+            base_url=self.slot.base_url,
+            api_key=self.slot.api_key,
         )
 
     async def stream_reply(self, user_text: str) -> AsyncIterator[AgentEvent]:
@@ -67,12 +65,8 @@ class Agent:
                     if ev.kind == "needs_tool":
                         break
                 else:
-                    # generator exhausted naturally → done
                     yield AgentEvent("done")
                     return
-
-                # If we broke out because of tool calls, _one_round has already
-                # appended the assistant message + tool messages. Loop again.
                 continue
             except Exception as e:
                 logger.exception("agent round failed")
@@ -83,7 +77,7 @@ class Agent:
         assert self._client is not None
 
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": self.slot.model,
             "messages": self.messages,
             "stream": True,
         }
@@ -91,7 +85,6 @@ class Agent:
             kwargs["tools"] = get_schemas()
 
         content_parts: list[str] = []
-        # tool_calls[index] = {"id": str, "name": str, "arguments": str}
         tool_calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
 
@@ -158,4 +151,3 @@ class Agent:
                 )
             yield AgentEvent("needs_tool")
             return
-        # natural end — caller will yield ("done") after generator exhausts

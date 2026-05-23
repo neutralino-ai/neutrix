@@ -1,77 +1,124 @@
-"""Provider configuration: base URLs, default models, env-var key names."""
+"""YAML config loader.
+
+Single source of truth: ``~/.config/neutrix/config.yaml``. No env vars.
+"""
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
+import yaml
+
+CONFIG_PATH = Path("~/.config/neutrix/config.yaml").expanduser()
+SLOT_NAMES: tuple[str, ...] = ("fast", "strong")
+
+DEFAULT_CONFIG = """\
+# neutrix config — paste your API keys, then re-run `neutrix`.
+# Two named slots, `fast` and `strong`, point at (provider, model) pairs.
+# Switch between them inside the TUI with /fast and /strong.
+
+providers:
+  ihep:
+    base_url: https://aiapi.ihep.ac.cn/apiv2/
+    api_key: ""        # paste your IHEP gateway key
+
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: ""
+
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4/
+    api_key: ""
+
+fast:
+  provider: ihep
+  model: anthropic/claude-haiku-4-5
+
+strong:
+  provider: ihep
+  model: anthropic/claude-opus-4-7
+"""
+
+
+class ConfigError(RuntimeError):
+    """Raised when the YAML config is missing, malformed, or incomplete."""
 
 
 @dataclass(frozen=True)
-class Provider:
+class Slot:
+    """A resolved (slot, provider, model, credentials) bundle."""
+
     name: str
+    provider: str
+    model: str
     base_url: str
-    api_key_env: str
-    default_model: str
-    models: tuple[str, ...]
+    api_key: str
 
 
-PROVIDERS: dict[str, Provider] = {
-    "deepseek": Provider(
-        name="deepseek",
-        base_url="https://api.deepseek.com",
-        api_key_env="DEEPSEEK_API_KEY",
-        default_model="deepseek-chat",
-        models=("deepseek-chat", "deepseek-reasoner"),
-    ),
-    "glm": Provider(
-        name="glm",
-        base_url="https://open.bigmodel.cn/api/paas/v4/",
-        api_key_env="GLM_API_KEY",
-        default_model="glm-4.6",
-        models=("glm-4.6", "glm-4-plus", "glm-4-air", "glm-4-flash"),
-    ),
-    "claude": Provider(
-        name="claude",
-        base_url="https://api.anthropic.com/v1/",
-        api_key_env="ANTHROPIC_API_KEY",
-        default_model="claude-sonnet-4-6",
-        models=(
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5-20251001",
-        ),
-    ),
-}
+@dataclass(frozen=True)
+class Config:
+    providers: dict[str, dict[str, str]]
+    slots: dict[str, dict[str, str]]
+    path: Path
 
-
-def load_env() -> None:
-    """Load .env from current directory (no-op if absent)."""
-    load_dotenv(override=False)
-
-
-def get_provider(name: str) -> Provider:
-    key = name.lower()
-    if key not in PROVIDERS:
-        raise ValueError(
-            f"Unknown provider {name!r}. Known: {', '.join(PROVIDERS)}"
+    def slot(self, name: str) -> Slot:
+        if name not in self.slots:
+            raise ConfigError(f"unknown slot {name!r}; choose one of {SLOT_NAMES}")
+        spec = self.slots[name] or {}
+        prov_name = spec.get("provider", "")
+        model = spec.get("model", "")
+        if not prov_name or not model:
+            raise ConfigError(
+                f"slot {name!r} in {self.path} is missing provider or model"
+            )
+        if prov_name not in self.providers:
+            raise ConfigError(
+                f"slot {name!r} references unknown provider {prov_name!r} "
+                f"(known: {sorted(self.providers)})"
+            )
+        prov = self.providers[prov_name] or {}
+        base_url = (prov.get("base_url") or "").strip()
+        api_key = (prov.get("api_key") or "").strip()
+        if not base_url:
+            raise ConfigError(
+                f"provider {prov_name!r} has no base_url in {self.path}"
+            )
+        if not api_key:
+            raise ConfigError(
+                f"provider {prov_name!r} has no api_key in {self.path}; "
+                f"edit it and re-run"
+            )
+        return Slot(
+            name=name,
+            provider=prov_name,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
         )
-    return PROVIDERS[key]
 
 
-def get_api_key(provider: Provider) -> str:
-    key = os.environ.get(provider.api_key_env, "").strip()
-    if not key:
-        raise RuntimeError(
-            f"Missing API key. Set ${provider.api_key_env} in your environment or .env file."
-        )
-    return key
+def bootstrap_config(path: Path = CONFIG_PATH) -> Path:
+    """Write the default config template. Returns the path written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(DEFAULT_CONFIG, encoding="utf-8")
+    return path
 
 
-def default_provider_name() -> str:
-    return os.environ.get("NEUTRIX_PROVIDER", "deepseek").lower()
+def load_config(path: Path = CONFIG_PATH) -> Config:
+    """Load the YAML config. Raises ConfigError on missing/malformed input."""
+    if not path.exists():
+        raise ConfigError(f"config not found at {path}")
+    try:
+        payload: Any = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ConfigError(f"invalid YAML in {path}: {e}") from e
+    if not isinstance(payload, dict):
+        raise ConfigError(f"{path} top-level must be a mapping")
 
+    providers = payload.get("providers") or {}
+    if not isinstance(providers, dict):
+        raise ConfigError(f"{path}: `providers` must be a mapping")
 
-def default_model_for(provider: Provider) -> str:
-    override = os.environ.get("NEUTRIX_MODEL", "").strip()
-    return override or provider.default_model
+    slots = {name: (payload.get(name) or {}) for name in SLOT_NAMES}
+    return Config(providers=providers, slots=slots, path=path)

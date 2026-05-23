@@ -1,12 +1,13 @@
 # neutrix
 
-A simple multi-provider TUI agent for DeepSeek, GLM (Zhipu), and Claude — all
-driven through a single OpenAI SDK client.
+A simple multi-provider TUI agent for DeepSeek, GLM, and Claude (via the
+IHEP gateway), all driven through a single OpenAI SDK client.
 
 - **Textual** TUI with streaming responses
-- Switch provider/model at runtime (`/model claude claude-opus-4-7`)
+- Two named model slots — **`fast`** and **`strong`** — switch in-TUI with `/fast` / `/strong`
 - OpenAI-style **tool calling** (built-in: `read_file`, `write_file`, `list_dir`, `run_shell`)
 - Save / load conversations as JSON
+- One YAML config at `~/.config/neutrix/config.yaml`, no env vars
 - pip-installable, single `neutrix` CLI
 
 ## Install
@@ -19,47 +20,58 @@ pip install neutrix
 
 ## Configure
 
-Copy `.env.example` to `.env` and fill in keys for the providers you use:
+Run `neutrix` once — it writes a template to `~/.config/neutrix/config.yaml`
+and exits. Open the file and paste at least one provider's `api_key`, then
+re-run.
 
-```dotenv
-DEEPSEEK_API_KEY=sk-...
-GLM_API_KEY=...
-ANTHROPIC_API_KEY=sk-ant-...
-NEUTRIX_PROVIDER=deepseek     # default on startup
+```yaml
+providers:
+  ihep:
+    base_url: https://aiapi.ihep.ac.cn/apiv2/
+    api_key: ""        # paste here
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: ""
+  glm:
+    base_url: https://open.bigmodel.cn/api/paas/v4/
+    api_key: ""
+
+fast:
+  provider: ihep
+  model: anthropic/claude-haiku-4-5
+
+strong:
+  provider: ihep
+  model: anthropic/claude-opus-4-7
 ```
 
-Anthropic's OpenAI-compat layer is used for Claude, so the same SDK works for
-all three providers — only `base_url`, `api_key`, and `model` differ.
-
-| Provider  | Base URL                                  | Env var              |
-|-----------|-------------------------------------------|----------------------|
-| DeepSeek  | `https://api.deepseek.com`                | `DEEPSEEK_API_KEY`   |
-| GLM       | `https://open.bigmodel.cn/api/paas/v4/`   | `GLM_API_KEY`        |
-| Claude    | `https://api.anthropic.com/v1/`           | `ANTHROPIC_API_KEY`  |
+Rebind a slot by editing its `provider` / `model` line. Add a new provider by
+appending another entry under `providers:`.
 
 ## Run
 
 ```bash
-neutrix                                  # default provider
-neutrix -p claude -m claude-opus-4-7     # pick provider + model
-neutrix --load sessions/last.json        # resume a saved session
-neutrix --no-tools                       # disable tool calling
+neutrix                              # open TUI, fast slot active
+neutrix --load sessions/last.json    # resume a saved session
+neutrix --no-tools                   # disable tool calling
+neutrix --version
 ```
 
 ### Slash commands in the TUI
 
-| Command                       | Meaning                                       |
-|-------------------------------|-----------------------------------------------|
-| `/help`                       | list commands                                 |
-| `/model`                      | show current provider/model                   |
-| `/model PROVIDER [MODEL]`     | switch                                        |
-| `/save [PATH]`                | save session JSON (default `sessions/<ts>.json`) |
-| `/load PATH`                  | load session                                  |
-| `/clear`                      | reset conversation                            |
-| `/tools` / `/tools on\|off`   | list or toggle tool calling                   |
-| `/quit`                       | exit                                          |
+| Command                  | Meaning                                       |
+|--------------------------|-----------------------------------------------|
+| `/help`                  | list commands                                 |
+| `/fast`                  | switch to fast slot                           |
+| `/strong`                | switch to strong slot                         |
+| `/model`                 | show current slot/provider/model              |
+| `/save [PATH]`           | save session JSON (default `sessions/<ts>.json`) |
+| `/load PATH`             | load session                                  |
+| `/clear`                 | reset conversation                            |
+| `/tools` / `/tools on\|off` | list or toggle tool calling                |
+| `/quit`                  | exit                                          |
 
-`Ctrl+C` also quits.
+`Ctrl+C` quits. `Ctrl+L` clears the visible log.
 
 ## Development
 
@@ -68,6 +80,9 @@ pip install -e '.[dev]'
 pytest
 ruff check src tests
 ```
+
+Project conventions live in [`CLAUDE.md`](CLAUDE.md); the release workflow is
+in [`.claude/rules/release-workflow.md`](.claude/rules/release-workflow.md).
 
 ## License
 

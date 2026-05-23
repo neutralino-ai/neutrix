@@ -2,14 +2,14 @@
 
 Slash commands:
     /help                 show commands
-    /model [P [M]]        switch provider / model
+    /fast                 switch to the fast slot
+    /strong               switch to the strong slot
+    /model                show current slot / provider / model
     /save [PATH]          save session to JSON
     /load PATH            load session from JSON
     /clear                start a fresh conversation
-    /tools                toggle / list tools
+    /tools                list / toggle tools (on|off)
     /quit                 exit
-
-Anything else is sent to the model.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from textual.widgets import Footer, Header, Input, Static
 
 from neutrix import __version__
 from neutrix.agent import Agent, AgentEvent
-from neutrix.config import PROVIDERS, get_provider
+from neutrix.config import SLOT_NAMES, Config
 from neutrix.session import dump as session_dump
 from neutrix.session import load as session_load
 from neutrix.tools import BUILTIN_TOOLS
@@ -53,10 +53,6 @@ class Message(Static):
 
     def append(self, text: str) -> None:
         self._content += text
-        self._refresh()
-
-    def set_content(self, text: str) -> None:
-        self._content = text
         self._refresh()
 
     def _refresh(self) -> None:
@@ -94,10 +90,12 @@ class NeutrixApp(App):
         self,
         agent: Agent,
         *,
+        config: Config,
         render_markdown: bool = True,
     ) -> None:
         super().__init__()
         self.agent = agent
+        self.config = config
         self.render_markdown = render_markdown
         self._busy = False
 
@@ -110,11 +108,12 @@ class NeutrixApp(App):
 
     def on_mount(self) -> None:
         self.title = f"neutrix v{__version__}"
-        self.sub_title = f"{self.agent.provider.name} / {self.agent.model}"
+        self._refresh_subtitle()
         self.query_one("#input", Input).focus()
         self._post(
             "system",
-            f"connected to {self.agent.provider.name} ({self.agent.model}). "
+            f"connected to {self.agent.slot.name} slot — "
+            f"{self.agent.slot.provider}/{self.agent.slot.model}. "
             f"Type /help for commands.",
         )
 
@@ -122,14 +121,19 @@ class NeutrixApp(App):
 
     def _status_text(self) -> str:
         tools = "on" if self.agent.use_tools else "off"
+        s = self.agent.slot
         return (
-            f" {self.agent.provider.name} · {self.agent.model} · "
+            f" [{s.name}] {s.provider} · {s.model} · "
             f"tools:{tools} · msgs:{len(self.agent.messages)} "
         )
 
     def _refresh_status(self) -> None:
         self.query_one("#status", Static).update(self._status_text())
-        self.sub_title = f"{self.agent.provider.name} / {self.agent.model}"
+        self._refresh_subtitle()
+
+    def _refresh_subtitle(self) -> None:
+        s = self.agent.slot
+        self.sub_title = f"{s.name} · {s.provider}/{s.model}"
 
     def _post(self, role: str, content: str, *, markdown: bool = False) -> Message:
         msg = Message(role, content, markdown=markdown)
@@ -179,7 +183,6 @@ class NeutrixApp(App):
             self._post("tool", f"← {ev.data['name']}:\n{preview}")
         elif ev.kind == "error":
             self._post("error", str(ev.data))
-        # "done" and "needs_tool" are control-only
 
     # ----- slash commands -----------------------------------------------------
 
@@ -200,31 +203,38 @@ class NeutrixApp(App):
     async def _cmd_help(self, args: list[str]) -> None:
         lines = [
             "Commands:",
-            "  /help                 show this",
-            "  /model                show current",
-            "  /model PROVIDER       switch provider (deepseek|glm|claude)",
-            "  /model PROVIDER MODEL switch provider + model",
-            "  /save [PATH]          save session (default: sessions/<ts>.json)",
-            "  /load PATH            load session",
-            "  /clear                start fresh conversation",
-            "  /tools                list tools / toggle on|off",
-            "  /tools on|off         enable/disable tool calling",
-            "  /quit                 exit",
+            "  /help               show this",
+            "  /fast               switch to the fast slot",
+            "  /strong             switch to the strong slot",
+            "  /model              show current slot/provider/model",
+            "  /save [PATH]        save session (default: sessions/<ts>.json)",
+            "  /load PATH          load session",
+            "  /clear              start fresh conversation",
+            "  /tools              list tools",
+            "  /tools on|off       enable/disable tool calling",
+            "  /quit               exit",
         ]
         self._post("system", "\n".join(lines))
 
+    async def _cmd_fast(self, args: list[str]) -> None:
+        await self._switch_slot("fast")
+
+    async def _cmd_strong(self, args: list[str]) -> None:
+        await self._switch_slot("strong")
+
+    async def _switch_slot(self, name: str) -> None:
+        slot = self.config.slot(name)
+        self.agent.switch(slot)
+        self._post("system", f"switched to {name}: {slot.provider}/{slot.model}")
+
     async def _cmd_model(self, args: list[str]) -> None:
-        if not args:
-            self._post(
-                "system",
-                f"current: {self.agent.provider.name} / {self.agent.model}\n"
-                f"available providers: {', '.join(PROVIDERS)}",
-            )
-            return
-        provider = get_provider(args[0])
-        model = args[1] if len(args) > 1 else provider.default_model
-        self.agent.switch(provider, model)
-        self._post("system", f"switched to {provider.name} / {model}")
+        s = self.agent.slot
+        lines = [
+            f"current: [{s.name}] {s.provider}/{s.model}",
+            f"slots available: {', '.join(SLOT_NAMES)}",
+            "edit ~/.config/neutrix/config.yaml to change slot bindings",
+        ]
+        self._post("system", "\n".join(lines))
 
     async def _cmd_save(self, args: list[str]) -> None:
         if args:
@@ -234,8 +244,8 @@ class NeutrixApp(App):
             path = Path("sessions") / f"{ts}.json"
         out = session_dump(
             path,
-            provider=self.agent.provider.name,
-            model=self.agent.model,
+            provider=self.agent.slot.provider,
+            model=self.agent.slot.model,
             messages=self.agent.messages,
         )
         self._post("system", f"saved → {out}")
@@ -245,13 +255,11 @@ class NeutrixApp(App):
             self._post("error", "usage: /load PATH")
             return
         payload = session_load(args[0])
-        provider = get_provider(payload["provider"])
-        self.agent.switch(provider, payload["model"])
         self.agent.messages = payload["messages"]
         self._post(
             "system",
-            f"loaded {args[0]} ({len(self.agent.messages)} msgs, "
-            f"{payload['provider']}/{payload['model']})",
+            f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
+            f"current slot unchanged",
         )
 
     async def _cmd_clear(self, args: list[str]) -> None:
