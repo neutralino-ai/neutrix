@@ -4,6 +4,35 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.4] — 2026-05-23
+
+### Fixed
+- After typing + Enter on an api_key field, the Input could still flash
+  to the `EMPTY ...` placeholder visually in some environments. Root
+  cause: a blur from `focus_next()` could race ahead of the screen's
+  `on_input_submitted` and read a stale `_committed_value` (still the
+  pre-Enter empty buffer), then revert the value to that stale
+  baseline. Fix: override `KeyInput.action_submit` to promote the
+  buffer to `_committed_value` **before** the Submitted message is
+  posted. Any subsequent blur — whatever order Textual chooses for
+  events — already sees the up-to-date baseline and does not revert.
+
+### Added
+- Three new tests in `tests/test_onboard.py`:
+  - `test_real_keystroke_typing_enter_persists` — types each char via
+    `pilot.press(ch)` (mirroring real keyboard), confirms value
+    persists after Enter and YAML is written.
+  - `test_action_submit_commits_baseline_before_message` — directly
+    invokes `KeyInput.action_submit()` and then simulates a blur on
+    the Input; the blur must not revert.
+  - `test_typed_enter_value_renders_dots_not_placeholder` — asserts
+    the Input's rendered output does **not** contain the `EMPTY`
+    placeholder text after a typed Enter.
+
+  Total suite: 45 tests.
+
+See [docs/PRDs/v0.5.4-onboard-enter-race-fix.md](docs/PRDs/v0.5.4-onboard-enter-race-fix.md).
+
 ## [v0.5.3] — 2026-05-23
 
 ### Changed

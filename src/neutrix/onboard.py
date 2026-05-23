@@ -180,12 +180,26 @@ class KeyInput(Input):
     - Enter with a non-empty buffer is treated as the new committed value.
 
     `_committed_value` is the source of truth for the saved key; the
-    visible `value` is just the editing buffer.
+    visible `value` is just the editing buffer. We commit the baseline
+    inside `action_submit` *before* posting the Submitted message so
+    any blur that races ahead of `on_input_submitted` reads an
+    already-up-to-date `_committed_value` and doesn't revert.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._committed_value: str = self.value
+
+    async def action_submit(self) -> None:  # type: ignore[override]
+        buf = self.value.strip()
+        if buf:
+            # Promote typed buffer to committed baseline *before* the
+            # Submitted message is posted, so the inevitable blur from
+            # the screen calling focus_next() can't revert against a
+            # stale baseline.
+            self._committed_value = buf
+        # Post the standard Submitted message (mirrors Input.action_submit).
+        self.post_message(self.Submitted(self, self.value, None))
 
     def on_focus(self, event: events.Focus) -> None:
         # Fresh editing buffer; committed value restored on blur / empty Enter.
@@ -464,10 +478,8 @@ class OnboardScreen(Screen[bool]):
             self.focus_next()
             return
 
-        # Commit baseline FIRST — any blur racing from focus_next() below
-        # must see the up-to-date value, or it will revert to the old buffer.
-        if isinstance(event.input, KeyInput):
-            event.input._committed_value = new_key
+        # The Input itself promoted _committed_value during action_submit
+        # (so an early blur doesn't revert). We just ensure value matches.
         event.input.value = new_key
 
         state = self.provider_state[provider]
@@ -484,8 +496,8 @@ class OnboardScreen(Screen[bool]):
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
         self._notify(f"saved {provider} api_key", "success")
         # Advance focus so the saved indicator is visible and the user
-        # is unblocked. _committed_value is already current, so the
-        # outgoing blur on the Input won't revert.
+        # is unblocked. _committed_value is already current (set by
+        # action_submit), so the outgoing blur on the Input won't revert.
         self.focus_next()
 
     def _persist_yaml(

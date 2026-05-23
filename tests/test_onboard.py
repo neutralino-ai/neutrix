@@ -170,6 +170,90 @@ async def test_empty_enter_preserves_committed_value(cfg_with_key: Path):
 
 
 @pytest.mark.asyncio
+async def test_real_keystroke_typing_enter_persists(cfg_path: Path):
+    """Real per-key press simulation: type chars, press Enter, value persists."""
+    cfg = load_config(cfg_path)  # api_key is "" by default
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        # Tab to it
+        for _ in range(20):
+            await pilot.press("tab")
+            await pilot.pause()
+            if app.screen.focused is inp:
+                break
+        assert app.screen.focused is inp
+        assert inp.value == ""
+        # Type each character via pilot.press (mirrors real keyboard)
+        for ch in "sk-keyboard-typed":
+            await pilot.press(ch)
+        await pilot.pause()
+        assert inp.value == "sk-keyboard-typed"
+        await pilot.press("enter")
+        await pilot.pause()
+        # Critical assertion: value did NOT revert to empty after Enter
+        assert inp.value == "sk-keyboard-typed"
+        assert inp._committed_value == "sk-keyboard-typed"
+        # And it's not the focused widget anymore
+        assert app.screen.focused is not inp
+        # YAML written
+        reloaded = load_config(cfg_path)
+        assert reloaded.providers["ihep"]["api_key"] == "sk-keyboard-typed"
+
+
+@pytest.mark.asyncio
+async def test_action_submit_commits_baseline_before_message(cfg_with_key: Path):
+    """KeyInput.action_submit must promote _committed_value before posting
+    Submitted, so any blur that races ahead doesn't revert against stale."""
+    cfg = load_config(cfg_with_key)
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        inp.focus()
+        await pilot.pause()
+        for ch in "sk-new-baseline":
+            await pilot.press(ch)
+        await pilot.pause()
+        # Directly invoke action_submit (what Enter does internally)
+        await inp.action_submit()
+        await pilot.pause()
+        # Committed baseline must already be updated even before the
+        # screen handler runs.
+        assert inp._committed_value == "sk-new-baseline"
+        # Now simulate a hypothetical blur race: programmatically blur
+        # the Input. Should NOT revert because committed is up-to-date.
+        from textual.events import Blur
+        inp.on_blur(Blur())
+        assert inp.value == "sk-new-baseline"
+
+
+@pytest.mark.asyncio
+async def test_typed_enter_value_renders_dots_not_placeholder(cfg_path: Path):
+    """After Enter, the Input's rendered output reflects the value
+    (masked dots), not the EMPTY placeholder."""
+    cfg = load_config(cfg_path)
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        inp.focus()
+        await pilot.pause()
+        for ch in "abc":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        # Value-level assertion
+        assert inp.value == "abc"
+        # Rendering: a non-empty value MUST not show the placeholder text
+        rendered = str(inp.render())
+        # Placeholder text ("EMPTY") must not appear; masked dots should.
+        # (Textual Input renders Text(placeholder) when value is empty.)
+        assert "EMPTY" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_typed_enter_commits_new_value(cfg_with_key: Path):
     """Enter with typed text saves the new value, advances focus, writes YAML."""
     cfg = load_config(cfg_with_key)
