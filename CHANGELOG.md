@@ -4,6 +4,24 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.5] - 2026-05-24
+
+### Changed
+- Retuned the rendered main chat spacing after inspecting a Textual SVG
+  screenshot: the unframed system prompt now has a one-column horizontal
+  inset instead of starting at terminal column 0.
+- The draft editor now auto-sizes to its content from one to six visible
+  rows, so a one-line draft no longer leaves extra empty rows inside the user
+  block.
+
+### Added
+- Regression coverage for the system prompt inset and draft editor height
+  behavior.
+
+  Total suite: 62 tests.
+
+See [docs/PRDs/v0.6.5-main-chat-spacing-retune.md](docs/PRDs/v0.6.5-main-chat-spacing-retune.md).
+
 ## [v0.6.4] - 2026-05-24
 
 ### Changed

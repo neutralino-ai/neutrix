@@ -65,6 +65,8 @@ NOTICE_STYLE = {
 class DraftInput(TextArea):
     """Multiline chat draft that keeps Enter as submit."""
 
+    MAX_VISIBLE_LINES: ClassVar[int] = 6
+
     @dataclass
     class Submitted(TextualMessage):
         draft: DraftInput
@@ -84,6 +86,7 @@ class DraftInput(TextArea):
             show_line_numbers=False,
             soft_wrap=True,
         )
+        self._sync_height()
 
     @property
     def value(self) -> str:
@@ -92,6 +95,15 @@ class DraftInput(TextArea):
     @value.setter
     def value(self, value: str) -> None:
         self.load_text(value)
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        lines = max(1, self.text.count("\n") + 1)
+        self.styles.height = min(lines, self.MAX_VISIBLE_LINES)
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area is self:
+            self._sync_height()
 
     async def _on_key(self, event: events.Key) -> None:
         if self.disabled or self.read_only:
@@ -177,7 +189,8 @@ class NeutrixApp(App):
         display: block;
     }
     #input {
-        height: 3;
+        height: 1;
+        max-height: 6;
         border: none;
         padding: 0;
         background: $surface;
@@ -215,6 +228,7 @@ class NeutrixApp(App):
     }
     .role-system {
         border: none;
+        padding: 0 1;
         background: $background;
         color: $warning;
     }

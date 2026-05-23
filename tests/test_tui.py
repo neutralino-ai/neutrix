@@ -123,8 +123,11 @@ async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
         assert messages[0].border_title in (None, "")
         assert messages[0].has_class("block")
         assert messages[0].has_class("role-system")
+        assert messages[0].styles.padding.left == 1
+        assert messages[0].styles.padding.right == 1
         assert input_box.parent is composer
         assert input_box.highlight_cursor_line is False
+        assert input_box.styles.height.value == 1
         assert composer.parent is app.query_one("#blocks")
         assert composer.has_class("block")
         assert composer.has_class("role-user")
@@ -217,6 +220,7 @@ async def test_draft_newline_shortcuts_insert_linebreak(
         await pilot.pause()
 
         assert input_box.value == "line one\n"
+        assert input_box.styles.height.value == 2
 
 
 @pytest.mark.asyncio
@@ -228,6 +232,8 @@ async def test_draft_enter_submits_multiline_text(tmp_path: Path):
         await pilot.pause()
         input_box = app.query_one("#input", DraftInput)
         input_box.value = "line one\nline two"
+        await pilot.pause()
+        assert input_box.styles.height.value == 2
         await pilot.press("enter")
         for _ in range(20):
             await pilot.pause()
@@ -235,6 +241,19 @@ async def test_draft_enter_submits_multiline_text(tmp_path: Path):
                 break
 
         assert agent.streamed_texts == ["line one\nline two"]
+
+
+@pytest.mark.asyncio
+async def test_draft_height_caps_at_six_visible_lines(tmp_path: Path):
+    app = NeutrixApp(SpyAgent(), config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        input_box.value = "\n".join(str(index) for index in range(10))
+        await pilot.pause()
+
+        assert input_box.styles.height.value == 6
 
 
 @pytest.mark.asyncio
