@@ -9,6 +9,7 @@ from textual.widgets import Input, Static
 
 from neutrix.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentEvent
 from neutrix.config import Config, Slot
+from neutrix.onboard import KeyInput
 from neutrix.tui import Message, NeutrixApp
 
 
@@ -28,6 +29,22 @@ def _config(tmp_path: Path) -> Config:
         slots={
             "fast": {"provider": "test", "model": "test-model"},
             "strong": {"provider": "test", "model": "test-model"},
+        },
+        path=tmp_path / "config.yaml",
+    )
+
+
+def _onboard_config(tmp_path: Path) -> Config:
+    return Config(
+        providers={
+            "ihep": {
+                "base_url": "https://aiapi.ihep.ac.cn/apiv2/",
+                "api_key": "",
+            }
+        },
+        slots={
+            "fast": {"provider": "ihep", "model": "anthropic/claude-haiku-4-5"},
+            "strong": {"provider": "ihep", "model": "anthropic/claude-opus-4-7"},
         },
         path=tmp_path / "config.yaml",
     )
@@ -63,6 +80,17 @@ class StreamingAgent:
         await self.release.wait()
         yield AgentEvent("token", " world")
         self.messages.append({"role": "assistant", "content": "hello world"})
+
+
+class SpyAgent(StreamingAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.streamed_texts: list[str] = []
+
+    async def stream_reply(self, user_text: str):
+        self.streamed_texts.append(user_text)
+        if False:
+            yield AgentEvent("token", "")
 
 
 @pytest.mark.asyncio
@@ -113,3 +141,29 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         messages = list(app.query(Message))
         assert [message.role for message in messages] == ["user", "assistant"]
         assert messages[-1]._content == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_onboard_key_submit_does_not_become_chat_message(tmp_path: Path):
+    agent = SpyAgent()
+    app = NeutrixApp(agent, config=_onboard_config(tmp_path), render_markdown=False)
+    secret = "sk-test-secret-do-not-echo"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", Input)
+        input_box.value = "/onboard"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        key_input = app.screen.query_one("#key-ihep", KeyInput)
+        key_input.focus()
+        await pilot.pause()
+        key_input.value = secret
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert key_input._committed_value == secret
+        assert all(secret not in message._content for message in app.query(Message))
+        assert all(secret not in str(message) for message in agent.messages)
+        assert agent.streamed_texts == []

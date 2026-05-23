@@ -4,6 +4,23 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.1] - 2026-05-23
+
+### Fixed
+- API keys submitted inside `/onboard` no longer bubble into the main
+  chat app as user messages. Onboarding now stops handled key-submit
+  events, and the chat app only accepts submissions from its own
+  composer input.
+- This prevents onboarding secrets from being rendered in the chat log,
+  appended to `agent.messages`, or sent to the model.
+
+### Added
+- Regression coverage that opens onboarding from the main app, submits
+  a sentinel API key, and asserts it never reaches the chat transcript
+  or model streaming path.
+
+See [docs/PRDs/v0.6.1-onboard-key-submit-isolation.md](docs/PRDs/v0.6.1-onboard-key-submit-isolation.md).
+
 ## [v0.6.0] - 2026-05-23
 
 ### Changed

@@ -292,9 +292,18 @@ class NeutrixApp(App):
             return
         self._thinking_tick += 1
 
+    def _is_chat_input(self, input_widget: Input) -> bool:
+        try:
+            composer = self.query_one("#composer", Vertical)
+        except NoMatches:
+            return False
+        return input_widget.id == "input" and input_widget.parent is composer
+
     # ----- input handler ------------------------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if not self._is_chat_input(event.input):
+            return
         text = event.value.strip()
         if not text or self._busy:
             return

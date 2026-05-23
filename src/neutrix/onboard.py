@@ -506,6 +506,7 @@ class OnboardScreen(Screen[bool]):
         provider = event.input.id.removeprefix("key-") if event.input.id else ""
         if provider not in self.provider_state:
             return
+        event.stop()
         new_key = event.value.strip()
 
         # Empty Enter = "no change". Restore the visible buffer to the
