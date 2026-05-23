@@ -13,6 +13,17 @@ import yaml
 CONFIG_PATH = Path("~/.config/neutrix/config.yaml").expanduser()
 SLOT_NAMES: tuple[str, ...] = ("fast", "strong")
 
+PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
+    "ihep": [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-opus-4-7",
+        "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-v3",
+    ],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "glm": ["glm-4.6", "glm-4-plus", "glm-4-flash"],
+}
+
 DEFAULT_CONFIG = """\
 # neutrix config — paste your API keys, then re-run `neutrix`.
 # Two named slots, `fast` and `strong`, point at (provider, model) pairs.
@@ -122,3 +133,38 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
 
     slots = {name: (payload.get(name) or {}) for name in SLOT_NAMES}
     return Config(providers=providers, slots=slots, path=path)
+
+
+def save_config(
+    config: Config,
+    *,
+    fast: dict[str, str] | None = None,
+    strong: dict[str, str] | None = None,
+    path: Path | None = None,
+) -> Path:
+    """Round-trippable YAML write-back. Loses any comments in the existing file."""
+    out = path or config.path
+    data: dict[str, Any] = {
+        "providers": {
+            name: {
+                "base_url": (prov or {}).get("base_url", ""),
+                "api_key": (prov or {}).get("api_key", ""),
+            }
+            for name, prov in config.providers.items()
+        },
+        "fast": fast if fast is not None else (config.slots.get("fast") or {}),
+        "strong": strong if strong is not None else (config.slots.get("strong") or {}),
+    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return out
+
+
+def resolve_initial_slot(config: Config) -> tuple[Slot | None, Slot | None]:
+    """Resolve (fast, strong) without raising. Either or both may be None."""
+    def _try(name: str) -> Slot | None:
+        try:
+            return config.slot(name)
+        except ConfigError:
+            return None
+    return _try("fast"), _try("strong")

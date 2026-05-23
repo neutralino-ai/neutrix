@@ -4,6 +4,25 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.3.0] — 2026-05-23
+
+### Added
+- First-run onboarding TUI: when neither `fast` nor `strong` resolves
+  (both bound providers have empty `api_key`), `neutrix` opens an inline
+  onboarding screen instead of exiting with an error. The user pastes a
+  key, verifies a model with one keystroke (1-token API call), assigns
+  it to a slot, saves, and drops straight into the chat TUI.
+- `PROVIDER_DEFAULT_MODELS` catalog in `config.py` — curated model list
+  per known provider, shown in onboarding.
+- `save_config()` in `config.py` — round-trippable YAML write-back.
+- `onboard.py` module hosting the onboarding Textual app.
+
+### Changed
+- `cli.py` slot-resolve order: try `fast`, then fall back to `strong`,
+  then onboarding. Previously `fast` failure was a hard exit.
+
+See [docs/PRDs/v0.3.0-onboarding-tui.md](docs/PRDs/v0.3.0-onboarding-tui.md).
+
 ## [v0.2.0] — 2026-05-23
 
 ### Added

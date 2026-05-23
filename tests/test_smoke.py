@@ -6,10 +6,13 @@ import pytest
 from neutrix import __version__
 from neutrix.config import (
     DEFAULT_CONFIG,
+    PROVIDER_DEFAULT_MODELS,
     SLOT_NAMES,
     ConfigError,
     bootstrap_config,
     load_config,
+    resolve_initial_slot,
+    save_config,
 )
 from neutrix.session import dump, load
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
@@ -113,6 +116,81 @@ def test_slot_unknown_name(tmp_path):
 
 def test_slot_names_constant():
     assert SLOT_NAMES == ("fast", "strong")
+
+
+def test_provider_default_models_covers_template():
+    """Every provider shipped in the default template has a model catalog."""
+    cfg = bootstrap_config_to_tmp()
+    for name in cfg.providers:
+        assert name in PROVIDER_DEFAULT_MODELS, name
+        assert PROVIDER_DEFAULT_MODELS[name], name
+
+
+def bootstrap_config_to_tmp():
+    import tempfile
+    from pathlib import Path
+    path = Path(tempfile.mkdtemp()) / "config.yaml"
+    bootstrap_config(path)
+    return load_config(path)
+
+
+def test_save_config_roundtrips(tmp_path):
+    """save_config writes YAML that load_config + slot() can resolve."""
+    path = tmp_path / "config.yaml"
+    bootstrap_config(path)
+    cfg = load_config(path)
+    cfg.providers["ihep"]["api_key"] = "sk-roundtrip"
+    saved = save_config(
+        cfg,
+        fast={"provider": "ihep", "model": "anthropic/claude-haiku-4-5"},
+        strong={"provider": "ihep", "model": "anthropic/claude-opus-4-7"},
+        path=path,
+    )
+    assert saved == path
+    reloaded = load_config(path)
+    fast = reloaded.slot("fast")
+    assert fast.provider == "ihep"
+    assert fast.api_key == "sk-roundtrip"
+    assert fast.model == "anthropic/claude-haiku-4-5"
+    strong = reloaded.slot("strong")
+    assert strong.model == "anthropic/claude-opus-4-7"
+
+
+def test_resolve_initial_slot_both_missing_keys(tmp_path):
+    """When both slot providers have empty api_keys, both come back None."""
+    path = tmp_path / "config.yaml"
+    bootstrap_config(path)  # template has empty api_keys
+    cfg = load_config(path)
+    fast, strong = resolve_initial_slot(cfg)
+    assert fast is None
+    assert strong is None
+
+
+def test_resolve_initial_slot_one_works(tmp_path):
+    """When fast has a key but strong doesn't, fast resolves and strong is None."""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """\
+providers:
+  ihep:
+    base_url: https://aiapi.ihep.ac.cn/apiv2/
+    api_key: sk-good
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: ""
+fast:
+  provider: ihep
+  model: anthropic/claude-haiku-4-5
+strong:
+  provider: deepseek
+  model: deepseek-chat
+"""
+    )
+    cfg = load_config(path)
+    fast, strong = resolve_initial_slot(cfg)
+    assert fast is not None
+    assert fast.api_key == "sk-good"
+    assert strong is None
 
 
 # ----- tools -----------------------------------------------------------------

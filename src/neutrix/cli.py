@@ -13,6 +13,7 @@ from neutrix.config import (
     ConfigError,
     bootstrap_config,
     load_config,
+    resolve_initial_slot,
 )
 from neutrix.session import load as session_load
 
@@ -58,10 +59,34 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         config = load_config()
-        slot = config.slot("fast")
     except ConfigError as e:
         print(f"neutrix: {e}", file=sys.stderr)
         return 1
+
+    fast_slot, strong_slot = resolve_initial_slot(config)
+    if fast_slot is None and strong_slot is None:
+        from neutrix.onboard import run_onboarding
+
+        launched = run_onboarding(config)
+        if not launched:
+            print("neutrix: onboarding cancelled.", file=sys.stderr)
+            return 0
+        try:
+            config = load_config()
+        except ConfigError as e:
+            print(f"neutrix: {e}", file=sys.stderr)
+            return 1
+        fast_slot, strong_slot = resolve_initial_slot(config)
+        if fast_slot is None and strong_slot is None:
+            print(
+                "neutrix: no slot is usable after onboarding; check "
+                f"{config.path}.",
+                file=sys.stderr,
+            )
+            return 1
+
+    slot = fast_slot or strong_slot
+    assert slot is not None  # for type-checker; guarded above
 
     agent = Agent(slot=slot, use_tools=not args.no_tools)
 
