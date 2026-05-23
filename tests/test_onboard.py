@@ -230,9 +230,9 @@ async def test_action_submit_commits_baseline_before_message(cfg_with_key: Path)
 
 
 @pytest.mark.asyncio
-async def test_typed_enter_value_renders_dots_not_placeholder(cfg_path: Path):
+async def test_typed_enter_value_renders_mask_not_placeholder(cfg_path: Path):
     """After Enter, the Input's rendered output reflects the value
-    (masked dots), not the EMPTY placeholder."""
+    (password mask), not the EMPTY placeholder."""
     cfg = load_config(cfg_path)
     app = OnboardApp(cfg)
     async with app.run_test() as pilot:
@@ -246,11 +246,43 @@ async def test_typed_enter_value_renders_dots_not_placeholder(cfg_path: Path):
         await pilot.pause()
         # Value-level assertion
         assert inp.value == "abc"
-        # Rendering: a non-empty value MUST not show the placeholder text
-        rendered = str(inp.render())
-        # Placeholder text ("EMPTY") must not appear; masked dots should.
-        # (Textual Input renders Text(placeholder) when value is empty.)
+        # Rendering: a non-empty value MUST not show the placeholder text.
+        rendered = inp.render_line(0).text
         assert "EMPTY" not in rendered
+        assert rendered.startswith("***")
+
+
+@pytest.mark.asyncio
+async def test_late_empty_buffer_after_enter_restores_committed_mask(cfg_path: Path):
+    """If a late Textual focus/editing event empties the buffer after submit,
+    the screen restores the committed key display."""
+    cfg = load_config(cfg_path)
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        inp.focus()
+        await pilot.pause()
+        for ch in "abc":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert inp._committed_value == "abc"
+        assert app.screen.focused is not inp
+
+        # Simulate the bad terminal ordering the user sees: after the key
+        # is saved and focus moves, the visible editing buffer becomes empty.
+        inp.value = ""
+        assert "EMPTY" in inp.render_line(0).text
+
+        app.screen._restore_key_display_after_focus(inp)
+        await pilot.pause()
+
+        assert inp.value == "abc"
+        rendered = inp.render_line(0).text
+        assert "EMPTY" not in rendered
+        assert rendered.startswith("***")
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,26 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.5] — 2026-05-23
+
+### Fixed
+- Onboarding api_key fields now restore the committed password mask after
+  Enter and the subsequent focus move. This covers the interactive case
+  where the key saved correctly but the blurred field could still look
+  empty because a late focus/editing event left the visible buffer blank.
+- Password fields now render committed secrets with `*` masks, matching
+  the expected `****` terminal convention.
+
+### Added
+- A regression test that inspects the actual rendered input line after
+  typed Enter and requires a mask instead of the `EMPTY` placeholder.
+- A regression test that simulates a late empty buffer after submit and
+  verifies the onboarding screen restores the committed masked display.
+
+  Total suite: 46 tests.
+
+See [docs/PRDs/v0.5.5-onboard-key-mask-after-enter.md](docs/PRDs/v0.5.5-onboard-key-mask-after-enter.md).
+
 ## [v0.5.4] — 2026-05-23
 
 ### Fixed

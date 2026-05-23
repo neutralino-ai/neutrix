@@ -19,6 +19,7 @@ from typing import ClassVar
 
 from loguru import logger
 from openai import AsyncOpenAI
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -178,6 +179,7 @@ class KeyInput(Input):
     - Tab / Up / Down without Enter restores the committed value on blur.
     - Enter with an empty buffer is treated as "no change" by the screen.
     - Enter with a non-empty buffer is treated as the new committed value.
+    - After blur, the visible field always returns to the committed masked value.
 
     `_committed_value` is the source of truth for the saved key; the
     visible `value` is just the editing buffer. We commit the baseline
@@ -190,6 +192,13 @@ class KeyInput(Input):
         super().__init__(*args, **kwargs)
         self._committed_value: str = self.value
 
+    @property
+    def _value(self) -> Text:
+        """Render password content as the conventional `****` mask."""
+        if self.password:
+            return Text("*" * len(self.value), no_wrap=True, overflow="ignore", end="")
+        return super()._value
+
     async def action_submit(self) -> None:  # type: ignore[override]
         buf = self.value.strip()
         if buf:
@@ -198,6 +207,8 @@ class KeyInput(Input):
             # the screen calling focus_next() can't revert against a
             # stale baseline.
             self._committed_value = buf
+            if self.value != buf:
+                self.value = buf
         # Post the standard Submitted message (mirrors Input.action_submit).
         self.post_message(self.Submitted(self, self.value, None))
 
@@ -205,10 +216,31 @@ class KeyInput(Input):
         # Fresh editing buffer; committed value restored on blur / empty Enter.
         if self.value:
             self.value = ""
+        self.cursor_position = 0
+        self.scroll_home(
+            animate=False,
+            force=True,
+            immediate=True,
+            y_axis=False,
+        )
 
-    def on_blur(self, event: events.Blur) -> None:
+    def restore_committed_display(self, *, force: bool = False) -> None:
+        """Show the committed key whenever this field is no longer editing."""
+        if self.has_focus and not force:
+            return
         if self.value != self._committed_value:
             self.value = self._committed_value
+        self.cursor_position = len(self.value)
+        self.scroll_home(
+            animate=False,
+            force=True,
+            immediate=True,
+            y_axis=False,
+        )
+        self.refresh()
+
+    def on_blur(self, event: events.Blur) -> None:
+        self.restore_committed_display(force=True)
 
     def on_key(self, event: events.Key) -> None:
         _navigate_focus(self, event)
@@ -464,6 +496,12 @@ class OnboardScreen(Screen[bool]):
 
     # ----- inline api_key persistence ----------------------------------------
 
+    def _restore_key_display_after_focus(self, input_widget: Input) -> None:
+        if not isinstance(input_widget, KeyInput):
+            return
+        input_widget.restore_committed_display(force=True)
+        self.call_after_refresh(input_widget.restore_committed_display, force=True)
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         provider = event.input.id.removeprefix("key-") if event.input.id else ""
         if provider not in self.provider_state:
@@ -476,6 +514,7 @@ class OnboardScreen(Screen[bool]):
             if isinstance(event.input, KeyInput):
                 event.input.value = event.input._committed_value
             self.focus_next()
+            self._restore_key_display_after_focus(event.input)
             return
 
         # The Input itself promoted _committed_value during action_submit
@@ -499,6 +538,7 @@ class OnboardScreen(Screen[bool]):
         # is unblocked. _committed_value is already current (set by
         # action_submit), so the outgoing blur on the Input won't revert.
         self.focus_next()
+        self._restore_key_display_after_focus(event.input)
 
     def _persist_yaml(
         self,
