@@ -18,10 +18,14 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "anthropic/claude-haiku-4-5",
         "anthropic/claude-opus-4-7",
         "anthropic/claude-sonnet-4-6",
-        "deepseek/deepseek-v3",
+        "openai/gpt-5.5",
+        "deepseek-ai/deepseek-v4-pro",
+        "deepseek-ai/deepseek-v4-flash",
+        "zhipu/glm-5.1",
+        "kimi/kimi-k2.6",
     ],
-    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-    "glm": ["glm-4.6", "glm-4-plus", "glm-4-flash"],
+    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
+    "glm": ["glm-5.1", "glm-5.1-highspeed"],
 }
 
 DEFAULT_CONFIG = """\

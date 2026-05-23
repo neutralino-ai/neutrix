@@ -183,7 +183,7 @@ fast:
   model: anthropic/claude-haiku-4-5
 strong:
   provider: deepseek
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """
     )
     cfg = load_config(path)

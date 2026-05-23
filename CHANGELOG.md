@@ -4,6 +4,24 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.4.2] — 2026-05-23
+
+### Changed
+- `PROVIDER_DEFAULT_MODELS` refreshed to names the upstreams actually
+  serve today:
+  - `deepseek`: `deepseek-v4-flash`, `deepseek-v4-pro` (was
+    `deepseek-chat`, `deepseek-reasoner` — both retired).
+  - `glm`: `glm-5.1`, `glm-5.1-highspeed` (was the 4.x line).
+  - `ihep`: claude haiku/opus/sonnet 4.x kept; deepseek path renamed
+    to `deepseek-ai/deepseek-v4-{pro,flash}`; added
+    `openai/gpt-5.5`, `zhipu/glm-5.1`, `kimi/kimi-k2.6`.
+
+Existing user YAML is not migrated — only the onboarding catalog
+changes. Default bootstrap slots (`anthropic/claude-haiku-4-5` /
+`anthropic/claude-opus-4-7`) are unchanged.
+
+See [docs/PRDs/v0.4.2-deepseek-model-names.md](docs/PRDs/v0.4.2-deepseek-model-names.md).
+
 ## [v0.4.1] — 2026-05-23
 
 ### Fixed
