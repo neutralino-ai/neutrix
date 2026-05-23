@@ -298,14 +298,11 @@ class NeutrixApp(App):
         except ConfigError as e:
             self._post("error", f"config reload failed: {e}")
             return
-        if saved:
-            self._post(
-                "system",
-                "onboarding saved. Use /fast or /strong to switch to the "
-                "new binding; current slot unchanged.",
-            )
-        else:
-            self._post("system", "onboarding cancelled.")
+        self._post(
+            "system",
+            "back from onboarding. Use /fast or /strong to switch to a "
+            "newly-bound slot; current slot unchanged.",
+        )
         self._refresh_status()
 
     async def _cmd_quit(self, args: list[str]) -> None:

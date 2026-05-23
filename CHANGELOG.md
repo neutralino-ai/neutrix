@@ -4,6 +4,42 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.1] — 2026-05-23
+
+### Added
+- Onboarding now auto-saves on every committing user action: `v`
+  (verify), `v` on the `(all)` row (verify-all), `f` / `g` (slot
+  assign), and `Enter` in the api_key Input. No more `s` "save and
+  launch" step.
+- Inline message bar at the bottom of the onboarding screen — single
+  line, severity-coloured (`info` dim, `warning` yellow, `error` red,
+  `success` green). Replaces the floating toast notifications that
+  popped up in the corner.
+
+### Changed
+- Onboarding `Ctrl+C` (×2) now **hard-exits the entire app**, not
+  just the onboarding screen. When reached via `/onboard` from chat,
+  the chat exits too — treat it like SIGINT. `q` keeps its "soft
+  done" semantic (dismisses back to chat; auto-save means no data
+  is at risk).
+- Verification (single + verify-all) runs as a background worker via
+  `self.run_worker(...)`. The screen no longer freezes while waiting
+  for the upstream API; focus navigation, additional verifies, and
+  api_key edits stay responsive.
+- api_key Input is borderless and single-line — no more bottom border
+  bleeding onto the row below the api_key. Width is `1fr` (grows
+  with the card); focus tints the background `$accent 30%`.
+- `q` now dismisses with `True` unconditionally (everything's
+  auto-saved). The chat-side toast updated to "back from onboarding."
+- Removed the `s` keybinding and `action_save_and_launch`.
+
+### Fixed
+- `KeyInput` reverts to the last `Enter`-committed value on blur, so
+  a half-typed key the user navigates away from never lands in YAML
+  and never sticks around as garbage in the Input.
+
+See [docs/PRDs/v0.5.1-onboard-row-and-quit.md](docs/PRDs/v0.5.1-onboard-row-and-quit.md).
+
 ## [v0.5.0] — 2026-05-23
 
 ### Added

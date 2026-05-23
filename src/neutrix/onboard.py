@@ -172,11 +172,19 @@ class VerifyAllRow(Static):
 
 
 class KeyInput(Input):
-    """Single-line Input that lets up/down navigate focus instead of bubbling
-    to FocusScroll's scroll handlers."""
+    """Single-line Input that lets up/down navigate focus, and reverts to
+    the last Enter-committed value when focus leaves without an Enter."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._committed_value: str = self.value
 
     def on_key(self, event: events.Key) -> None:
         _navigate_focus(self, event)
+
+    def on_blur(self, event: events.Blur) -> None:
+        if self.value != self._committed_value:
+            self.value = self._committed_value
 
 
 class ProviderSection(Vertical):
@@ -251,11 +259,19 @@ class OnboardScreen(Screen[bool]):
         content-align: left middle;
     }
     ProviderSection > .key-row > .api-key {
-        width: 56;
+        border: none;
+        background: $surface;
+        padding: 0 1;
+        height: 1;
+        min-height: 1;
+        width: 1fr;
         margin: 0 1;
     }
+    ProviderSection > .key-row > .api-key:focus {
+        background: $accent 30%;
+    }
     ProviderSection > .key-row > .saved-tag {
-        width: 1fr;
+        width: auto;
         content-align: left middle;
     }
     ProviderSection > .models-label {
@@ -270,6 +286,12 @@ class OnboardScreen(Screen[bool]):
         background: $accent 25%;
     }
 
+    #message {
+        dock: bottom;
+        height: 1;
+        padding: 0 2;
+        background: $boost;
+    }
     #status {
         dock: bottom;
         height: 1;
@@ -283,9 +305,8 @@ class OnboardScreen(Screen[bool]):
         Binding("v", "verify", "Verify"),
         Binding("f", "set_fast", "Set fast"),
         Binding("g", "set_strong", "Set strong"),
-        Binding("s", "save_and_launch", "Save"),
-        Binding("q", "quit_onboard", "Quit"),
-        Binding("ctrl+c", "confirm_quit", "Quit (Ctrl+C x2)", priority=True),
+        Binding("q", "quit_onboard", "Done"),
+        Binding("ctrl+c", "confirm_quit", "Exit app (Ctrl+C x2)", priority=True),
         Binding("escape", "cancel_quit", "Cancel quit", show=False, priority=True),
     ]
 
@@ -307,20 +328,22 @@ class OnboardScreen(Screen[bool]):
         self.strong_choice: dict[str, str] | None = None
         self._quit_pending: bool = False
         self._quit_timer: Timer | None = None
+        self._msg_timer: Timer | None = None
 
     # ----- compose ------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static(
-            "[b]Onboarding.[/b]  Paste an api key and press [b]Enter[/b] to save."
-            "  Focus a model row, press [b]v[/b] to verify (or [b]v[/b] on [b](all)[/b] for parallel)."
-            "  [b]f[/b]/[b]g[/b] assign to fast/strong. [b]s[/b] saves and returns.",
+            "[b]Onboarding.[/b]  Paste an api key, [b]Enter[/b] saves it."
+            "  Focus a model row, [b]v[/b] verifies (or [b]v[/b] on [b](all)[/b] for parallel)."
+            "  [b]f[/b]/[b]g[/b] assign fast/strong. Everything auto-saves; [b]q[/b] when done.",
             id="intro",
         )
         with FocusScroll(id="scroll"):
             for state in self.provider_state.values():
                 yield ProviderSection(state)
+        yield Static("", id="message")
         yield Static(self._status_text(), id="status")
         yield Footer()
 
@@ -356,6 +379,35 @@ class OnboardScreen(Screen[bool]):
         except Exception:
             pass
 
+    # ----- inline message bar -------------------------------------------------
+
+    _MSG_COLORS: ClassVar[dict[str, str]] = {
+        "info": "$text-muted",
+        "warning": "$warning",
+        "error": "$error",
+        "success": "$success",
+    }
+
+    def _notify(self, text: str, severity: str = "info", *, persistent: bool = False) -> None:
+        color = self._MSG_COLORS.get(severity, "$text-muted")
+        try:
+            bar = self.query_one("#message", Static)
+        except Exception:
+            return
+        bar.update(f"[{color}]{text}[/{color}]")
+        if self._msg_timer is not None:
+            self._msg_timer.stop()
+            self._msg_timer = None
+        if not persistent:
+            self._msg_timer = self.set_timer(4.0, self._clear_message)
+
+    def _clear_message(self) -> None:
+        try:
+            self.query_one("#message", Static).update("")
+        except Exception:
+            pass
+        self._msg_timer = None
+
     # ----- inline api_key persistence ----------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -375,13 +427,13 @@ class OnboardScreen(Screen[bool]):
         state.key_saved = bool(new_key)
         # Defensive: keep the Input showing the value we just read.
         event.input.value = new_key
+        # Promote the typed buffer to the committed baseline (blur won't revert).
+        if isinstance(event.input, KeyInput):
+            event.input._committed_value = new_key
         self._set_saved_indicator(provider, state.key_saved)
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
         if new_key:
-            self.notify(
-                f"saved {provider} api_key to {self.config.path}",
-                severity="information",
-            )
+            self._notify(f"saved {provider} api_key", "success")
 
     def _persist_yaml(
         self,
@@ -415,21 +467,23 @@ class OnboardScreen(Screen[bool]):
     def _focused_all(self) -> VerifyAllRow | None:
         return self.focused if isinstance(self.focused, VerifyAllRow) else None
 
-    async def action_verify(self) -> None:
+    def action_verify(self) -> None:
         all_row = self._focused_all()
         if all_row is not None:
-            await self._verify_all(all_row.provider)
+            self.run_worker(self._verify_all(all_row.provider), exclusive=False)
             return
         row = self._focused_row()
         if row is None:
-            self.notify(
-                "focus a model row or the (all) row first", severity="warning"
-            )
+            self._notify("focus a model row or the (all) row first", "warning")
             return
         state = self.provider_state[row.provider]
         if not state.api_key:
-            self.notify(f"set {row.provider}'s api_key first", severity="warning")
+            self._notify(f"set {row.provider}'s api_key first", "warning")
             return
+        self.run_worker(self._verify_one(row), exclusive=False)
+
+    async def _verify_one(self, row: ModelRow) -> None:
+        state = self.provider_state[row.provider]
         row.status = VERIFYING
         row._refresh()
         ok = await verify_model(state.base_url, state.api_key, row.model)
@@ -437,11 +491,15 @@ class OnboardScreen(Screen[bool]):
         state.model_status[row.model] = row.status
         row._refresh()
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
+        self._notify(
+            f"{row.provider}/{row.model}: {row.status}",
+            "success" if ok else "error",
+        )
 
     async def _verify_all(self, provider: str) -> None:
         state = self.provider_state[provider]
         if not state.api_key:
-            self.notify(f"set {provider}'s api_key first", severity="warning")
+            self._notify(f"set {provider}'s api_key first", "warning")
             return
         rows = [r for r in self.query(ModelRow) if r.provider == provider]
         if not rows:
@@ -449,14 +507,23 @@ class OnboardScreen(Screen[bool]):
         for r in rows:
             r.status = VERIFYING
             r._refresh()
+        self._notify(f"verifying {len(rows)} models for {provider}…", "info")
         results = await verify_models(
             state.base_url, state.api_key, [r.model for r in rows]
         )
+        passed = 0
         for r in rows:
-            r.status = VERIFIED if results[r.model] else FAILED
+            ok = results[r.model]
+            r.status = VERIFIED if ok else FAILED
             state.model_status[r.model] = r.status
             r._refresh()
+            if ok:
+                passed += 1
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
+        self._notify(
+            f"{provider}: {passed}/{len(rows)} verified",
+            "success" if passed == len(rows) else "warning",
+        )
 
     def action_set_fast(self) -> None:
         self._assign("fast")
@@ -467,7 +534,7 @@ class OnboardScreen(Screen[bool]):
     def _assign(self, slot_name: str) -> None:
         row = self._focused_row()
         if row is None or row.status != VERIFIED:
-            self.notify("focus a verified (✓) model first", severity="warning")
+            self._notify("focus a verified (✓) model first", "warning")
             return
         choice = {"provider": row.provider, "model": row.model}
         if slot_name == "fast":
@@ -476,6 +543,10 @@ class OnboardScreen(Screen[bool]):
             self.strong_choice = choice
         self._refresh_slot_tags()
         self._refresh_status()
+        self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
+        self._notify(
+            f"{slot_name} → {row.provider}/{row.model}", "success"
+        )
 
     def _refresh_slot_tags(self) -> None:
         for row in self.query(ModelRow):
@@ -495,32 +566,23 @@ class OnboardScreen(Screen[bool]):
             row.slot_tags = tags
             row._refresh()
 
-    def action_save_and_launch(self) -> None:
-        if self.fast_choice is None and self.strong_choice is None:
-            self.notify(
-                "assign at least one slot first (f or g on a verified ✓ model)",
-                severity="error",
-            )
-            return
-        fast = self.fast_choice or self.strong_choice
-        strong = self.strong_choice or self.fast_choice
-        self._persist_yaml(fast=fast, strong=strong)
-        self.dismiss(True)
-
     def action_quit_onboard(self) -> None:
-        self.dismiss(False)
+        # Everything is auto-saved; "done" just returns to whatever is below.
+        self.dismiss(True)
 
     # ----- two-tap Ctrl+C quit ------------------------------------------------
 
     def action_confirm_quit(self) -> None:
         if self._quit_pending:
-            self.dismiss(False)
+            # Hard exit — terminates the whole app, including the chat
+            # when onboarding was reached via /onboard.
+            self.app.exit()
             return
         self._quit_pending = True
-        self.notify(
-            "press Ctrl+C again to quit, Esc to cancel",
-            severity="warning",
-            timeout=5,
+        self._notify(
+            "press Ctrl+C again to exit the app, Esc to cancel",
+            "warning",
+            persistent=True,
         )
         if self._quit_timer is not None:
             self._quit_timer.stop()
@@ -529,13 +591,14 @@ class OnboardScreen(Screen[bool]):
     def action_cancel_quit(self) -> None:
         if self._quit_pending:
             self._reset_quit_pending()
-            self.notify("quit cancelled")
+            self._notify("quit cancelled", "info")
 
     def _reset_quit_pending(self) -> None:
         self._quit_pending = False
         if self._quit_timer is not None:
             self._quit_timer.stop()
             self._quit_timer = None
+        self._clear_message()
 
 
 class OnboardApp(App[bool]):
