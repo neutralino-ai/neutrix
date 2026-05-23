@@ -4,6 +4,22 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.4.0] — 2026-05-23
+
+### Added
+- `/onboard` slash command in the chat TUI — re-enters the same
+  onboarding surface used on first run, so the user can rotate keys,
+  add providers, or re-verify models without leaving the chat.
+
+### Changed
+- Refactored `OnboardApp` into `OnboardScreen` (Textual `Screen[bool]`)
+  plus a thin `OnboardApp` wrapper. Both first-run (`cli.py`) and
+  mid-chat (`/onboard`) paths share the same screen. After dismissal,
+  `/onboard` reloads the YAML but leaves the live agent on its current
+  slot — use `/fast` or `/strong` to adopt new bindings.
+
+See [docs/PRDs/v0.4.0-onboard-slash-command.md](docs/PRDs/v0.4.0-onboard-slash-command.md).
+
 ## [v0.3.1] — 2026-05-23
 
 ### Added

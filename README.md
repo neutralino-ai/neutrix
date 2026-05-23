@@ -65,6 +65,7 @@ neutrix --version
 | `/fast`                  | switch to fast slot                           |
 | `/strong`                | switch to strong slot                         |
 | `/model`                 | show current slot/provider/model              |
+| `/onboard`               | re-enter onboarding (manage keys / slots)     |
 | `/save [PATH]`           | save session JSON (default `sessions/<ts>.json`) |
 | `/load PATH`             | load session                                  |
 | `/clear`                 | reset conversation                            |

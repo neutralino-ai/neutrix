@@ -5,6 +5,7 @@ Slash commands:
     /fast                 switch to the fast slot
     /strong               switch to the strong slot
     /model                show current slot / provider / model
+    /onboard              re-enter the onboarding TUI to manage keys/slots
     /save [PATH]          save session to JSON
     /load PATH            load session from JSON
     /clear                start a fresh conversation
@@ -27,7 +28,7 @@ from textual.widgets import Footer, Header, Input, Static
 
 from neutrix import __version__
 from neutrix.agent import Agent, AgentEvent
-from neutrix.config import SLOT_NAMES, Config
+from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
 from neutrix.session import dump as session_dump
 from neutrix.session import load as session_load
 from neutrix.tools import BUILTIN_TOOLS
@@ -207,6 +208,7 @@ class NeutrixApp(App):
             "  /fast               switch to the fast slot",
             "  /strong             switch to the strong slot",
             "  /model              show current slot/provider/model",
+            "  /onboard            re-enter onboarding (manage keys / slots)",
             "  /save [PATH]        save session (default: sessions/<ts>.json)",
             "  /load PATH          load session",
             "  /clear              start fresh conversation",
@@ -282,6 +284,29 @@ class NeutrixApp(App):
             lines.append(f"  • {t.name} — {t.description}")
         lines.append(f"status: {'on' if self.agent.use_tools else 'off'}")
         self._post("system", "\n".join(lines))
+
+    async def _cmd_onboard(self, args: list[str]) -> None:
+        from neutrix.onboard import OnboardScreen
+
+        self.push_screen(
+            OnboardScreen(self.config), callback=self._on_onboard_done
+        )
+
+    def _on_onboard_done(self, saved: bool | None) -> None:
+        try:
+            self.config = load_config(self.config.path)
+        except ConfigError as e:
+            self._post("error", f"config reload failed: {e}")
+            return
+        if saved:
+            self._post(
+                "system",
+                "onboarding saved. Use /fast or /strong to switch to the "
+                "new binding; current slot unchanged.",
+            )
+        else:
+            self._post("system", "onboarding cancelled.")
+        self._refresh_status()
 
     async def _cmd_quit(self, args: list[str]) -> None:
         self.exit()

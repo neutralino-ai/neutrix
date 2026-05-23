@@ -1,9 +1,16 @@
-"""First-run onboarding TUI.
+"""Onboarding TUI — set api_keys, verify models, bind fast/strong slots.
 
-Triggered from `cli.py` when neither the `fast` nor `strong` slot resolves
-(both bound providers have empty api_key). Lets the user paste an api_key
-inline, verify a model with one keystroke, and assign verified models to
-the fast/strong slots — all without leaving the terminal.
+Two entry points share the same `OnboardScreen`:
+
+- **First-run** (`cli.py`): `run_onboarding(config)` boots `OnboardApp`,
+  which pushes `OnboardScreen` as its initial screen. Used when neither
+  the `fast` nor the `strong` slot resolves.
+- **Mid-chat** (`tui.py`): `/onboard` slash command calls
+  `await self.push_screen(OnboardScreen(self.config), wait_for_dismiss=True)`
+  so the user can rotate keys / add providers without leaving the chat.
+
+`OnboardScreen.dismiss(True)` means "saved and ready to use the YAML";
+`dismiss(False)` means the user backed out.
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ from openai import AsyncOpenAI
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Static
 
@@ -94,11 +102,11 @@ class ProviderSection(Vertical):
             yield ModelRow(self.state.name, m)
 
 
-class OnboardApp(App[bool]):
-    """Returns True if the user saved+launched, False if they quit."""
+class OnboardScreen(Screen[bool]):
+    """Onboarding screen. dismiss(True) = saved; dismiss(False) = cancelled."""
 
     CSS = """
-    Screen { layout: vertical; }
+    OnboardScreen { layout: vertical; }
     #intro {
         padding: 0 1;
         color: $text;
@@ -130,7 +138,7 @@ class OnboardApp(App[bool]):
         Binding("v", "verify", "Verify"),
         Binding("f", "set_fast", "Set fast"),
         Binding("g", "set_strong", "Set strong"),
-        Binding("s", "save_and_launch", "Save & launch"),
+        Binding("s", "save_and_launch", "Save"),
         Binding("q", "quit_onboard", "Quit"),
         Binding("up", "focus_previous", "Up", show=False, priority=True),
         Binding("down", "focus_next", "Down", show=False, priority=True),
@@ -160,10 +168,10 @@ class OnboardApp(App[bool]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static(
-            "Welcome to neutrix. Paste at least one api_key (Enter to save),"
+            "Onboarding. Paste at least one api_key (Enter to save),"
             " focus a model row and press [b]v[/b] to verify,"
             " then [b]f[/b]/[b]g[/b] to assign fast/strong,"
-            " then [b]s[/b] to launch the chat.",
+            " then [b]s[/b] to save & return.",
             id="intro",
         )
         with VerticalScroll(id="scroll"):
@@ -173,7 +181,6 @@ class OnboardApp(App[bool]):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = f"neutrix v{__version__} · onboarding"
         self.sub_title = str(self.config.path)
         rows = list(self.query(ModelRow))
         if rows:
@@ -297,16 +304,16 @@ class OnboardApp(App[bool]):
         fast = self.fast_choice or self.strong_choice
         strong = self.strong_choice or self.fast_choice
         self._persist_yaml(fast=fast, strong=strong)
-        self.exit(True)
+        self.dismiss(True)
 
     def action_quit_onboard(self) -> None:
-        self.exit(False)
+        self.dismiss(False)
 
     # ----- two-tap Ctrl+C quit ------------------------------------------------
 
     def action_confirm_quit(self) -> None:
         if self._quit_pending:
-            self.exit(False)
+            self.dismiss(False)
             return
         self._quit_pending = True
         self.notify(
@@ -328,6 +335,21 @@ class OnboardApp(App[bool]):
         if self._quit_timer is not None:
             self._quit_timer.stop()
             self._quit_timer = None
+
+
+class OnboardApp(App[bool]):
+    """Standalone wrapper used on first-run from `cli.py`."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self._config = config
+
+    def on_mount(self) -> None:
+        self.title = f"neutrix v{__version__} · onboarding"
+        self.push_screen(OnboardScreen(self._config), callback=self._on_done)
+
+    def _on_done(self, result: bool | None) -> None:
+        self.exit(bool(result))
 
 
 def run_onboarding(config: Config) -> bool:
