@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import Header, Static
 
 from neutrix.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentEvent
 from neutrix.config import Config, Slot
@@ -116,23 +116,103 @@ async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
 
         input_box = app.query_one("#input", DraftInput)
         composer = app.query_one("#composer")
+        blocks = app.query_one("#blocks")
+        status = app.query_one("#messages-status", Static)
         messages = list(app.query(Message))
 
+        assert app.title == ""
+        assert app.sub_title == ""
+        assert not list(app.query(Header))
+        assert not list(app.query("#messages-title"))
+        assert "test-model" in _render_text(status)
+        assert "tools:off" in _render_text(status)
+        assert "[" not in _render_text(status)
+        assert str(blocks.styles.border) == "Edges()"
+        assert status.styles.color.hex == "#E8E2D6"
         assert [message.role for message in messages] == ["system"]
         assert DEFAULT_SYSTEM_PROMPT in messages[0]._content
         assert messages[0].border_title in (None, "")
         assert messages[0].has_class("block")
         assert messages[0].has_class("role-system")
+        assert messages[0].styles.padding.top == 0
+        assert messages[0].styles.padding.bottom == 0
         assert messages[0].styles.padding.left == 1
         assert messages[0].styles.padding.right == 1
+        assert str(messages[0].styles.border) == "Edges()"
         assert input_box.parent is composer
+        assert input_box.styles.background.hex == "#1E1C18"
         assert input_box.highlight_cursor_line is False
         assert input_box.styles.height.value == 1
         assert composer.parent is app.query_one("#blocks")
         assert composer.has_class("block")
         assert composer.has_class("role-user")
         assert composer.has_class("draft")
-        assert composer.border_title == "User"
+        assert composer.border_title in (None, "")
+        assert composer.styles.padding == messages[0].styles.padding
+        assert str(composer.styles.border) == "Edges()"
+
+
+@pytest.mark.asyncio
+async def test_block_keyboard_navigation_moves_focus(tmp_path: Path):
+    agent = StreamingAgent()
+    agent.messages.extend(
+        [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ]
+    )
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        messages = list(app.query(Message))
+
+        assert input_box.has_focus
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert messages[-1].has_focus
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert messages[-2].has_focus
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert messages[-1].has_focus
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert input_box.has_focus
+
+
+@pytest.mark.asyncio
+async def test_block_keyboard_navigation_pages_by_many_blocks(tmp_path: Path):
+    agent = StreamingAgent()
+    for index in range(20):
+        agent.messages.append({"role": "user", "content": f"user {index}"})
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        messages = list(app.query(Message))
+
+        assert input_box.has_focus
+
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        focused_index = next(
+            index for index, message in enumerate(messages) if message.has_focus
+        )
+
+        assert focused_index < len(messages) - 2
+
+        await pilot.press("ctrl+down")
+        await pilot.pause()
+
+        assert input_box.has_focus
 
 
 @pytest.mark.asyncio
@@ -197,9 +277,17 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         assert messages[1]._content == "hi"
         assert messages[1].has_class("block")
         assert messages[1].has_class("role-user")
-        assert messages[1].border_title == "User"
+        assert messages[1].border_title in (None, "")
+        assert messages[1].styles.padding == messages[0].styles.padding
+        assert str(messages[1].styles.border) == "Edges()"
         assert messages[-1]._content == "hello world"
-        assert messages[-1].border_title == "LLM"
+        assert messages[-1].border_title in (None, "")
+        assert messages[-1].styles.padding == messages[0].styles.padding
+        assert str(messages[-1].styles.border) == "Edges()"
+        assert messages[-1].styles.background == messages[0].styles.background
+        assert messages[-1].styles.background.hex == "#2A2824"
+        assert messages[1].styles.background.hex == "#1E1C18"
+        assert messages[1].styles.background != messages[0].styles.background
         assert app.query_one("#composer").has_class("role-user")
 
 
@@ -280,7 +368,7 @@ async def test_final_only_assistant_event_renders_llm_block(tmp_path: Path):
             "assistant",
         ]
         assert messages[-1]._content == "final only"
-        assert messages[-1].border_title == "LLM"
+        assert messages[-1].border_title in (None, "")
 
 
 @pytest.mark.asyncio

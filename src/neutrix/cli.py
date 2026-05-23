@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    slot = fast_slot or strong_slot
+    slot = strong_slot or fast_slot
     assert slot is not None  # for type-checker; guarded above
 
     agent = Agent(slot=slot, use_tools=not args.no_tools)
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     from neutrix.tui import NeutrixApp
 
     app = NeutrixApp(agent, config=config, render_markdown=not args.no_markdown)
-    app.run()
+    app.run(mouse=False)
     return 0
 
 

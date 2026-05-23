@@ -4,6 +4,32 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.6] - 2026-05-24
+
+### Changed
+- Main chat blocks are now fully borderless and titleless: system prompt,
+  user messages/draft, and LLM responses share the same compact block spacing
+  and only differ by role color.
+- The main chat no longer renders a top header/title/subtitle. Provider,
+  model, tool state, and message count now live only on the plain bottom
+  status line.
+- The main chat now defaults to the strong slot when configured, reserving
+  the fast slot as a fallback.
+- The dark chat palette now uses warmer ink/graphite surfaces instead of the
+  previous blue-toned panel.
+- The repository agent workflow now requires a user-based acceptance test
+  confirmation before CHANGELOG updates.
+
+### Added
+- Keyboard block navigation: Up/Down moves focus by one block, while
+  Ctrl+Up/Ctrl+Down moves by a page-sized group of blocks.
+- Regression coverage for titleless chat chrome, shared block spacing,
+  strong-slot default launch, disabled mouse reporting, and block navigation.
+
+  Total suite: 65 tests.
+
+See [docs/PRDs/v0.6.6-main-chat-borderless-blocks.md](docs/PRDs/v0.6.6-main-chat-borderless-blocks.md) and [docs/PRDs/v0.6.6-agent-workflow-user-acceptance.md](docs/PRDs/v0.6.6-agent-workflow-user-acceptance.md).
+
 ## [v0.6.5] - 2026-05-24
 
 ### Changed

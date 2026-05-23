@@ -3,12 +3,14 @@ import json
 
 import pytest
 
-from neutrix import __version__
+from neutrix import __version__, cli
 from neutrix.config import (
     DEFAULT_CONFIG,
     PROVIDER_DEFAULT_MODELS,
     SLOT_NAMES,
+    Config,
     ConfigError,
+    Slot,
     bootstrap_config,
     load_config,
     resolve_initial_slot,
@@ -21,6 +23,51 @@ from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 def test_version_string():
     assert isinstance(__version__, str)
     assert __version__
+
+
+def test_cli_launches_main_tui_without_mouse_reporting(monkeypatch, tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("ok")
+    fast_slot = Slot(
+        name="fast",
+        provider="test",
+        model="fast-model",
+        base_url="https://example.test/v1",
+        api_key="sk-test",
+    )
+    strong_slot = Slot(
+        name="strong",
+        provider="test",
+        model="strong-model",
+        base_url="https://example.test/v1",
+        api_key="sk-test",
+    )
+    config = Config(
+        providers={"test": {"base_url": fast_slot.base_url, "api_key": fast_slot.api_key}},
+        slots={
+            "fast": {"provider": "test", "model": fast_slot.model},
+            "strong": {"provider": "test", "model": strong_slot.model},
+        },
+        path=path,
+    )
+    seen: dict[str, object] = {}
+
+    class DummyApp:
+        def __init__(self, *args, **kwargs):
+            seen["init"] = (args, kwargs)
+
+        def run(self, **kwargs):
+            seen["run"] = kwargs
+
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "resolve_initial_slot", lambda _config: (fast_slot, strong_slot))
+    monkeypatch.setattr("neutrix.tui.NeutrixApp", DummyApp)
+
+    assert cli.main([]) == 0
+    assert seen["run"] == {"mouse": False}
+    args, _kwargs = seen["init"]
+    assert args[0].slot is strong_slot
 
 
 # ----- config ----------------------------------------------------------------

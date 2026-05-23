@@ -29,9 +29,8 @@ from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
 from textual.timer import Timer
-from textual.widgets import Footer, Header, Static, TextArea
+from textual.widgets import Static, TextArea
 
-from neutrix import __version__
 from neutrix.agent_loop import Agent, AgentEvent
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
 from neutrix.session import dump as session_dump
@@ -47,8 +46,8 @@ ROLE_STYLE = {
 }
 
 ROLE_LABEL = {
-    "user": "User",
-    "assistant": "LLM",
+    "user": "",
+    "assistant": "",
     "system": "",
     "tool": "Tool",
     "error": "Error",
@@ -110,6 +109,20 @@ class DraftInput(TextArea):
             await super()._on_key(event)
             return
 
+        if event.key in {"up", "down", "ctrl+up", "ctrl+down"}:
+            event.stop()
+            event.prevent_default()
+            app = self.app
+            if event.key == "up":
+                app.action_focus_block(-1)
+            elif event.key == "down":
+                app.action_focus_block(1)
+            elif event.key == "ctrl+up":
+                app.action_focus_block_page(-1)
+            else:
+                app.action_focus_block_page(1)
+            return
+
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -127,6 +140,8 @@ class DraftInput(TextArea):
 
 class Message(Static):
     """Single message bubble; updated in-place during streaming."""
+
+    can_focus = True
 
     def __init__(self, role: str, content: str = "", *, markdown: bool = False) -> None:
         super().__init__(classes=f"block message role-{role}")
@@ -151,10 +166,13 @@ class Message(Static):
 
 
 class NeutrixApp(App):
+    TITLE = ""
+    SUB_TITLE = ""
+
     CSS = """
     Screen {
         layout: vertical;
-        background: $background;
+        background: #10100e;
     }
 
     #chat {
@@ -167,23 +185,35 @@ class NeutrixApp(App):
     #blocks {
         height: 1fr;
         width: 1fr;
-        padding: 0;
+        padding: 0 0;
+        border: none;
+        background: #10100e;
+    }
+
+    #messages-status {
+        height: 1;
+        margin: 0 1;
+        color: #e8e2d6;
     }
 
     .block {
         width: 1fr;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0;
-        border: solid $surface;
-        background: $surface;
+        padding: 0 1;
+        border: none;
+        background: #1e1c18;
+        color: #e8e2d6;
+    }
+    .message:focus {
+        background: #363129;
     }
 
     #thinking {
         display: none;
         height: 1;
         margin: 0;
-        color: $warning;
+        color: #d6a01d;
     }
     #thinking.active {
         display: block;
@@ -193,54 +223,65 @@ class NeutrixApp(App):
         max-height: 6;
         border: none;
         padding: 0;
-        background: $surface;
+        background: #1e1c18;
+        color: #e8e2d6;
     }
     #input:focus {
-        background: $surface;
+        background: #1e1c18;
     }
     #input:disabled {
-        color: $text-muted;
-        background: $surface;
+        color: #9a9284;
+        background: #1e1c18;
     }
     #input .text-area--cursor-line {
-        background: $surface;
+        background: #1e1c18;
     }
     #notice {
         min-height: 1;
         max-height: 8;
         margin: 0 1;
-        color: $text-muted;
-    }
-    #status {
-        height: 1;
-        margin: 0 1;
-        color: $text-muted;
+        color: #9a9284;
     }
 
     .role-user {
-        border: solid $boost;
-        background: $surface;
+        background: #1e1c18;
+        color: #e8e2d6;
     }
     .role-assistant {
-        border: solid $primary;
-        background: $panel;
-        color: $text;
+        background: #2a2824;
+        color: #e8e2d6;
     }
     .role-system {
-        border: none;
-        padding: 0 1;
-        background: $background;
-        color: $warning;
+        background: #2a2824;
+        color: #d6a01d;
     }
     .role-tool {
-        border: solid $warning;
+        background: #2a2824;
+        color: #d6a01d;
     }
     .role-error {
-        border: solid $error;
+        background: #1e1c18;
+        color: #c65a4a;
     }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
+        Binding("up", "focus_block(-1)", "Previous block", show=False, priority=True),
+        Binding("down", "focus_block(1)", "Next block", show=False, priority=True),
+        Binding(
+            "ctrl+up",
+            "focus_block_page(-1)",
+            "Previous page",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "ctrl+down",
+            "focus_block_page(1)",
+            "Next page",
+            show=False,
+            priority=True,
+        ),
         Binding("ctrl+c", "quit", "Quit", show=True),
         Binding("ctrl+l", "clear_log", "Notice", show=True),
     ]
@@ -261,23 +302,20 @@ class NeutrixApp(App):
         self._thinking_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
         with Vertical(id="chat"):
             with VerticalScroll(id="blocks"):
-                with Vertical(id="composer", classes="block role-user draft") as composer:
-                    composer.border_title = ROLE_LABEL["user"]
+                with Vertical(id="composer", classes="block role-user draft"):
                     yield Static("", id="thinking")
                     yield DraftInput(
                         placeholder="Message the assistant  (/help for commands)",
                         id="input",
                     )
         yield Static("", id="notice")
-        yield Static(self._status_text(), id="status")
-        yield Footer()
+        yield Static(self._status_text(), id="messages-status")
 
     def on_mount(self) -> None:
-        self.title = f"neutrix v{__version__}"
-        self._refresh_subtitle()
+        self.title = ""
+        self.sub_title = ""
         self._render_model_blocks()
         self.query_one("#input", DraftInput).focus()
 
@@ -287,17 +325,43 @@ class NeutrixApp(App):
         tools = "on" if self.agent.use_tools else "off"
         s = self.agent.slot
         return (
-            f" [{s.name}] {s.provider} · {s.model} · "
-            f"tools:{tools} · msgs:{len(self.agent.messages)} "
+            f" {s.provider} · {s.model} · tools:{tools} · "
+            f"msgs:{len(self.agent.messages)} "
         )
 
     def _refresh_status(self) -> None:
-        self.query_one("#status", Static).update(self._status_text())
-        self._refresh_subtitle()
+        self.query_one("#messages-status", Static).update(self._status_text())
 
-    def _refresh_subtitle(self) -> None:
-        s = self.agent.slot
-        self.sub_title = f"{s.name} · {s.provider}/{s.model}"
+    def _block_focus_targets(self) -> list[Message | DraftInput]:
+        targets: list[Message | DraftInput] = list(self.query(Message))
+        try:
+            targets.append(self.query_one("#input", DraftInput))
+        except NoMatches:
+            pass
+        return targets
+
+    def _focused_block_index(self, targets: list[Message | DraftInput]) -> int:
+        focused = self.focused
+        if focused in targets:
+            return targets.index(focused)
+        return len(targets) - 1
+
+    def action_focus_block(self, delta: int) -> None:
+        targets = self._block_focus_targets()
+        if not targets:
+            return
+        index = max(0, min(len(targets) - 1, self._focused_block_index(targets) + delta))
+        target = targets[index]
+        target.focus()
+        target.scroll_visible(animate=False)
+
+    def action_focus_block_page(self, delta: int) -> None:
+        try:
+            blocks = self.query_one("#blocks", VerticalScroll)
+            page = max(1, blocks.size.height // 3)
+        except NoMatches:
+            page = 6
+        self.action_focus_block(delta * page)
 
     def _message_content(self, message: dict[str, object]) -> str:
         content = message.get("content")
