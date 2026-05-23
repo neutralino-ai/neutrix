@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neutrix"
+dynamic = ["version"]
+description = "A simple multi-provider TUI agent (DeepSeek, GLM, Claude) over the OpenAI SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Xuefeng Ding", email = "xuefeng.ding.physics@gmail.com" }]
+keywords = ["llm", "agent", "tui", "openai", "deepseek", "glm", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+dependencies = [
+    "openai>=1.50.0",
+    "textual>=0.80.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "rich>=13.7.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6.0",
+]
+dev = [
+    "neutrix[test]",
+    "textual-dev>=1.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/xuefeng-ding/neutrix"
+Issues = "https://github.com/xuefeng-ding/neutrix/issues"
+
+[project.scripts]
+neutrix = "neutrix.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/neutrix/_version.py"
+fallback_version = "0.0.0"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
