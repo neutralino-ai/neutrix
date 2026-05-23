@@ -172,19 +172,32 @@ class VerifyAllRow(Static):
 
 
 class KeyInput(Input):
-    """Single-line Input that lets up/down navigate focus, and reverts to
-    the last Enter-committed value when focus leaves without an Enter."""
+    """Single-line Input with explicit edit semantics:
+
+    - Focus clears the visible buffer (committed value preserved internally).
+    - Tab / Up / Down without Enter restores the committed value on blur.
+    - Enter with an empty buffer is treated as "no change" by the screen.
+    - Enter with a non-empty buffer is treated as the new committed value.
+
+    `_committed_value` is the source of truth for the saved key; the
+    visible `value` is just the editing buffer.
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._committed_value: str = self.value
 
-    def on_key(self, event: events.Key) -> None:
-        _navigate_focus(self, event)
+    def on_focus(self, event: events.Focus) -> None:
+        # Fresh editing buffer; committed value restored on blur / empty Enter.
+        if self.value:
+            self.value = ""
 
     def on_blur(self, event: events.Blur) -> None:
         if self.value != self._committed_value:
             self.value = self._committed_value
+
+    def on_key(self, event: events.Key) -> None:
+        _navigate_focus(self, event)
 
 
 class ProviderSection(Vertical):
@@ -442,6 +455,15 @@ class OnboardScreen(Screen[bool]):
         if provider not in self.provider_state:
             return
         new_key = event.value.strip()
+
+        # Empty Enter = "no change". Restore the visible buffer to the
+        # committed value, advance focus, leave state and YAML alone.
+        if not new_key:
+            if isinstance(event.input, KeyInput):
+                event.input.value = event.input._committed_value
+            self.focus_next()
+            return
+
         # Commit baseline FIRST — any blur racing from focus_next() below
         # must see the up-to-date value, or it will revert to the old buffer.
         if isinstance(event.input, KeyInput):
@@ -457,11 +479,10 @@ class OnboardScreen(Screen[bool]):
                     row.status = UNKNOWN
                     row._refresh()
         state.api_key = new_key
-        state.key_saved = bool(new_key)
-        self._set_saved_indicator(provider, state.key_saved)
+        state.key_saved = True
+        self._set_saved_indicator(provider, True)
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
-        if new_key:
-            self._notify(f"saved {provider} api_key", "success")
+        self._notify(f"saved {provider} api_key", "success")
         # Advance focus so the saved indicator is visible and the user
         # is unblocked. _committed_value is already current, so the
         # outgoing blur on the Input won't revert.

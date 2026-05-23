@@ -4,6 +4,32 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.3] — 2026-05-23
+
+### Changed
+- `KeyInput` now clears its visible buffer on focus, so Tabbing to an
+  api_key field with a saved key gives a fresh blank to type into
+  (the saved value is preserved internally in `_committed_value` and
+  restored on blur). Matches the "ready to enter a new key" mental
+  model.
+- Enter on an empty api_key field is now treated as "no change":
+  the field restores to the committed value, focus advances, and the
+  YAML is not touched. Removes the v0.5.2 footgun where Enter on a
+  cleared field erased the saved key.
+
+### Added
+- Three new tests in `tests/test_onboard.py`:
+  - `test_focus_clears_visible_value` — focus blanks the visible
+    buffer; `_committed_value` retains the saved key.
+  - `test_empty_enter_preserves_committed_value` — empty Enter
+    restores, advances focus, leaves YAML unchanged.
+  - `test_typed_enter_commits_new_value` — typed Enter saves the new
+    value, advances focus, writes YAML.
+
+  Total suite: 42 tests.
+
+See [docs/PRDs/v0.5.3-onboard-key-edit-semantics.md](docs/PRDs/v0.5.3-onboard-key-edit-semantics.md).
+
 ## [v0.5.2] — 2026-05-23
 
 ### Added

@@ -19,7 +19,6 @@ from neutrix.onboard import (
     VerifyAllRow,
 )
 
-
 # ----- fixtures --------------------------------------------------------------
 
 
@@ -126,6 +125,69 @@ async def test_api_key_enter_persists_and_advances_focus(cfg_path: Path):
         # YAML written
         reloaded = load_config(cfg_path)
         assert reloaded.providers["ihep"]["api_key"] == "sk-new"
+
+
+@pytest.mark.asyncio
+async def test_focus_clears_visible_value(cfg_with_key: Path):
+    """Focus on a key Input with a saved key clears the visible buffer;
+    _committed_value retains the saved key for restore-on-blur."""
+    cfg = load_config(cfg_with_key)
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        assert inp._committed_value == "sk-test"
+        # Pre-condition: value matches committed at mount time
+        assert inp.value == "sk-test"
+        inp.focus()
+        await pilot.pause()
+        # After focus, visible buffer is empty; committed preserved.
+        assert inp.value == ""
+        assert inp._committed_value == "sk-test"
+
+
+@pytest.mark.asyncio
+async def test_empty_enter_preserves_committed_value(cfg_with_key: Path):
+    """Enter on an empty field: restore committed, advance focus, no YAML change."""
+    cfg = load_config(cfg_with_key)
+    yaml_before = cfg_with_key.read_text()
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        inp.focus()
+        await pilot.pause()
+        assert inp.value == ""
+        # Press Enter without typing
+        await pilot.press("enter")
+        await pilot.pause()
+        # Value restored to the committed (saved) one
+        assert inp.value == "sk-test"
+        # Focus advanced
+        assert app.screen.focused is not inp
+        # YAML unchanged
+        assert cfg_with_key.read_text() == yaml_before
+
+
+@pytest.mark.asyncio
+async def test_typed_enter_commits_new_value(cfg_with_key: Path):
+    """Enter with typed text saves the new value, advances focus, writes YAML."""
+    cfg = load_config(cfg_with_key)
+    app = OnboardApp(cfg)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        inp = app.screen.query_one("#key-ihep", KeyInput)
+        inp.focus()
+        await pilot.pause()
+        # Focus cleared the buffer; type fresh
+        inp.value = "sk-replacement"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert inp.value == "sk-replacement"
+        assert inp._committed_value == "sk-replacement"
+        assert app.screen.focused is not inp
+        reloaded = load_config(cfg_with_key)
+        assert reloaded.providers["ihep"]["api_key"] == "sk-replacement"
 
 
 @pytest.mark.asyncio
