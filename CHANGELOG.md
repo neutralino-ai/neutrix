@@ -4,6 +4,38 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.2] — 2026-05-23
+
+### Added
+- `tests/test_onboard.py` — 19 headless `OnboardApp.run_test()` tests
+  covering every user-facing behavior: api_key Enter persistence and
+  focus-advance, blur-revert without Enter, stale-status clear on
+  key change, background verify, parallel verify-all, model_status
+  YAML round-trip, slot tags rendering from YAML on reopen,
+  auto-assign on first verify, auto-assign-never-overrides, q
+  dismiss, Ctrl+C×2 hard exit, Esc cancel, arrow nav, and inline
+  notify routing. Total suite is now 39 tests.
+- Auto-assignment: after any verify, if `fast` / `strong` are unset,
+  the first verified model is bound to `fast` (and to `strong`, or
+  to a different verified model if available). Never overwrites an
+  existing slot binding. Persisted to YAML in the same step.
+
+### Changed
+- `OnboardScreen.__init__` now loads `fast` / `strong` from
+  `config.slots` so reopening `/onboard` shows the previously-bound
+  models with `▸ fast` / `▸ strong` tags and the correct status-bar
+  text. Previously both were always `None` on init.
+- `on_input_submitted` commits the Input's `_committed_value` baseline
+  **before** any other work, then calls `self.focus_next()` so the
+  saved indicator becomes visible and the user is unblocked. The race
+  where a blur from focus-move read a stale baseline (and reverted to
+  empty `EMPTY` placeholder) is gone.
+- Overrode `OnboardScreen.notify(...)` to route any Textual-internal
+  or future-code call through the inline `#message` bar. No more
+  floating toasts on the onboarding screen, period.
+
+See [docs/PRDs/v0.5.2-onboard-state-and-focus.md](docs/PRDs/v0.5.2-onboard-state-and-focus.md).
+
 ## [v0.5.1] — 2026-05-23
 
 ### Added

@@ -324,11 +324,18 @@ class OnboardScreen(Screen[bool]):
                 model_status=dict(prov.get("model_status") or {}),
                 key_saved=bool(prov.get("api_key")),
             )
-        self.fast_choice: dict[str, str] | None = None
-        self.strong_choice: dict[str, str] | None = None
+        self.fast_choice: dict[str, str] | None = self._slot_choice("fast")
+        self.strong_choice: dict[str, str] | None = self._slot_choice("strong")
         self._quit_pending: bool = False
         self._quit_timer: Timer | None = None
         self._msg_timer: Timer | None = None
+
+    def _slot_choice(self, name: str) -> dict[str, str] | None:
+        spec = self.config.slots.get(name) or {}
+        p, m = spec.get("provider"), spec.get("model")
+        if p and m:
+            return {"provider": p, "model": m}
+        return None
 
     # ----- compose ------------------------------------------------------------
 
@@ -349,6 +356,8 @@ class OnboardScreen(Screen[bool]):
 
     def on_mount(self) -> None:
         self.sub_title = str(self.config.path)
+        self._refresh_slot_tags()
+        self._refresh_status()
         first = self.query(ModelRow).first()
         if first is not None:
             first.focus()
@@ -408,6 +417,24 @@ class OnboardScreen(Screen[bool]):
             pass
         self._msg_timer = None
 
+    # Suppress Textual's floating toasts on this screen — route any caller
+    # (framework, workers, future code) through the inline bar instead.
+    def notify(  # type: ignore[override]
+        self,
+        message,
+        *,
+        title: str = "",
+        severity: str = "information",
+        timeout=None,
+        markup: bool = True,
+    ) -> None:
+        sev_map = {
+            "information": "info",
+            "warning": "warning",
+            "error": "error",
+        }
+        self._notify(str(message), sev_map.get(severity, "info"))
+
     # ----- inline api_key persistence ----------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -415,6 +442,12 @@ class OnboardScreen(Screen[bool]):
         if provider not in self.provider_state:
             return
         new_key = event.value.strip()
+        # Commit baseline FIRST — any blur racing from focus_next() below
+        # must see the up-to-date value, or it will revert to the old buffer.
+        if isinstance(event.input, KeyInput):
+            event.input._committed_value = new_key
+        event.input.value = new_key
+
         state = self.provider_state[provider]
         # If key changed, drop stale verification statuses.
         if new_key != state.api_key:
@@ -425,15 +458,14 @@ class OnboardScreen(Screen[bool]):
                     row._refresh()
         state.api_key = new_key
         state.key_saved = bool(new_key)
-        # Defensive: keep the Input showing the value we just read.
-        event.input.value = new_key
-        # Promote the typed buffer to the committed baseline (blur won't revert).
-        if isinstance(event.input, KeyInput):
-            event.input._committed_value = new_key
         self._set_saved_indicator(provider, state.key_saved)
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
         if new_key:
             self._notify(f"saved {provider} api_key", "success")
+        # Advance focus so the saved indicator is visible and the user
+        # is unblocked. _committed_value is already current, so the
+        # outgoing blur on the Input won't revert.
+        self.focus_next()
 
     def _persist_yaml(
         self,
@@ -495,6 +527,7 @@ class OnboardScreen(Screen[bool]):
             f"{row.provider}/{row.model}: {row.status}",
             "success" if ok else "error",
         )
+        self._maybe_auto_assign()
 
     async def _verify_all(self, provider: str) -> None:
         state = self.provider_state[provider]
@@ -524,6 +557,7 @@ class OnboardScreen(Screen[bool]):
             f"{provider}: {passed}/{len(rows)} verified",
             "success" if passed == len(rows) else "warning",
         )
+        self._maybe_auto_assign()
 
     def action_set_fast(self) -> None:
         self._assign("fast")
@@ -547,6 +581,36 @@ class OnboardScreen(Screen[bool]):
         self._notify(
             f"{slot_name} → {row.provider}/{row.model}", "success"
         )
+
+    def _maybe_auto_assign(self) -> None:
+        """If a slot is unset, bind it to the first verified model. Never
+        overwrites a user choice."""
+        verified = [
+            {"provider": r.provider, "model": r.model}
+            for r in self.query(ModelRow)
+            if r.status == VERIFIED
+        ]
+        if not verified:
+            return
+        changed = False
+        if self.fast_choice is None:
+            self.fast_choice = verified[0]
+            changed = True
+        if self.strong_choice is None:
+            self.strong_choice = next(
+                (v for v in verified if v != self.fast_choice),
+                self.fast_choice,
+            )
+            changed = True
+        if changed:
+            self._refresh_slot_tags()
+            self._refresh_status()
+            self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
+            self._notify(
+                f"auto-assigned fast → {self.fast_choice['model']}, "
+                f"strong → {self.strong_choice['model']}",
+                "info",
+            )
 
     def _refresh_slot_tags(self) -> None:
         for row in self.query(ModelRow):
