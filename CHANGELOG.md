@@ -4,6 +4,35 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.3] - 2026-05-23
+
+### Changed
+- Main chat transcript blocks now expand to the full terminal width instead
+  of a fixed narrow column.
+- System, user, and LLM blocks now share the same block shape and differ by
+  semantic theme styling. The editable draft uses the same user-block surface
+  as committed user messages, with only the inner input focusable/editable.
+- The agent internals now follow an onion split:
+  `tui.py` owns the view, `agent_loop.py` owns append-only conversation and
+  tool continuation, and `llm.py` owns one OpenAI-compatible streaming
+  request.
+
+### Fixed
+- Model turn failures now surface as error blocks/notices and always restore
+  the draft input to an enabled, focused state, avoiding the apparent stuck
+  state after submitting a message.
+
+### Added
+- Agent-loop tests for plain assistant replies and tool-call follow-up
+  sampling.
+- LLM adapter coverage for token streaming and final assistant/tool-call
+  assembly.
+- TUI regression coverage for user/draft block parity and error recovery.
+
+  Total suite: 55 tests.
+
+See [docs/PRDs/v0.6.3-main-onion-blocks.md](docs/PRDs/v0.6.3-main-onion-blocks.md).
+
 ## [v0.6.2] - 2026-05-23
 
 ### Changed

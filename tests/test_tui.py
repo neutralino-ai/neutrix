@@ -93,6 +93,12 @@ class SpyAgent(StreamingAgent):
             yield AgentEvent("token", "")
 
 
+class ErrorAgent(StreamingAgent):
+    async def stream_reply(self, user_text: str):
+        self.messages.append({"role": "user", "content": user_text})
+        yield AgentEvent("error", "model failed")
+
+
 @pytest.mark.asyncio
 async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
     app = NeutrixApp(StreamingAgent(), config=_config(tmp_path))
@@ -106,10 +112,14 @@ async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
 
         assert [message.role for message in messages] == ["system"]
         assert DEFAULT_SYSTEM_PROMPT in messages[0]._content
+        assert messages[0].border_title == "System"
+        assert messages[0].has_class("block")
         assert input_box.parent is composer
         assert composer.parent is app.query_one("#blocks")
+        assert composer.has_class("block")
+        assert composer.has_class("role-user")
         assert composer.has_class("draft")
-        assert "User draft" in _render_text(composer.query_one(".block-label", Static))
+        assert composer.border_title == "User"
 
 
 @pytest.mark.asyncio
@@ -163,6 +173,7 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         assert not app._busy
         assert not input_box.disabled
         assert not thinking.has_class("active")
+        assert input_box.has_focus
 
         messages = list(app.query(Message))
         assert [message.role for message in messages] == [
@@ -171,7 +182,41 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
             "assistant",
         ]
         assert messages[1]._content == "hi"
+        assert messages[1].has_class("block")
+        assert messages[1].has_class("role-user")
+        assert messages[1].border_title == "User"
         assert messages[-1]._content == "hello world"
+        assert messages[-1].border_title == "LLM"
+        assert app.query_one("#composer").has_class("role-user")
+
+
+@pytest.mark.asyncio
+async def test_model_error_restores_editable_draft(tmp_path: Path):
+    agent = ErrorAgent()
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", Input)
+        input_box.value = "hi"
+
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if not app._busy:
+                break
+
+        assert not app._busy
+        assert not input_box.disabled
+        assert input_box.has_focus
+        messages = list(app.query(Message))
+        assert [message.role for message in messages] == [
+            "system",
+            "user",
+            "error",
+        ]
+        assert messages[-1]._content == "model failed"
+        assert "model failed" in _render_text(app.query_one("#notice", Static))
 
 
 @pytest.mark.asyncio

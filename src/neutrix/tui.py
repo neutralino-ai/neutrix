@@ -29,18 +29,26 @@ from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Static
 
 from neutrix import __version__
-from neutrix.agent import Agent, AgentEvent
+from neutrix.agent_loop import Agent, AgentEvent
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
 from neutrix.session import dump as session_dump
 from neutrix.session import load as session_load
 from neutrix.tools import BUILTIN_TOOLS
 
 ROLE_STYLE = {
-    "user": "bold cyan",
-    "assistant": "bold green",
+    "user": "",
+    "assistant": "",
     "tool": "bold yellow",
-    "system": "dim",
+    "system": "bold yellow",
     "error": "bold red",
+}
+
+ROLE_LABEL = {
+    "user": "User",
+    "assistant": "LLM",
+    "system": "System",
+    "tool": "Tool",
+    "error": "Error",
 }
 
 NOTICE_STYLE = {
@@ -55,11 +63,11 @@ class Message(Static):
     """Single message bubble; updated in-place during streaming."""
 
     def __init__(self, role: str, content: str = "", *, markdown: bool = False) -> None:
-        super().__init__(classes=f"message role-{role}")
+        super().__init__(classes=f"block message role-{role}")
         self.role = role
         self._content = content
         self._markdown = markdown
-        self.border_title = role.title()
+        self.border_title = ROLE_LABEL.get(role, role.title())
         self._refresh()
 
     def append(self, text: str) -> None:
@@ -83,34 +91,24 @@ class NeutrixApp(App):
 
     #chat {
         height: 1fr;
-        padding: 1 2;
-        align: center top;
+        width: 1fr;
+        padding: 1 0;
+        align: left top;
     }
 
     #blocks {
         height: 1fr;
-        width: 88;
-        max-width: 100%;
+        width: 1fr;
         padding: 0 0 1 0;
     }
 
-    #composer {
+    .block {
         width: 1fr;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0 1 1 1;
-        border: round $accent;
-        background: $boost;
-    }
-
-    .block-label {
-        height: 1;
-        margin: 0 0 1 0;
-        text-style: bold;
-    }
-
-    #composer .block-label {
-        color: $accent;
+        padding: 0 1;
+        border: solid $surface;
+        background: $surface;
     }
 
     #thinking {
@@ -124,15 +122,14 @@ class NeutrixApp(App):
     }
     #input {
         height: 3;
-        border: tall $accent;
-        background: $boost;
+        border: none;
+        background: $surface;
         padding: 0 1;
     }
     #input:focus {
-        border: tall $primary;
+        background: $boost;
     }
     #input:disabled {
-        border: tall $warning;
         color: $text-muted;
     }
     #notice {
@@ -147,30 +144,25 @@ class NeutrixApp(App):
         color: $text-muted;
     }
 
-    Message {
-        width: 1fr;
-        height: auto;
-        margin: 0 0 1 0;
-        padding: 0 1;
-        border: round $surface;
+    .role-user {
+        border: solid $boost;
         background: $surface;
     }
-    Message.role-user {
-        border: round $accent;
-        background: $boost;
+    .role-assistant {
+        border: solid $primary;
+        background: $panel;
+        color: $text;
     }
-    Message.role-assistant {
-        border: round $primary;
+    .role-system {
+        border: solid $warning;
+        background: $panel;
+        color: $warning;
     }
-    Message.role-system {
-        border: round $boost;
-        color: $text-muted;
+    .role-tool {
+        border: solid $warning;
     }
-    Message.role-tool {
-        border: round $warning;
-    }
-    Message.role-error {
-        border: round $error;
+    .role-error {
+        border: solid $error;
     }
     """
 
@@ -198,8 +190,8 @@ class NeutrixApp(App):
         yield Header(show_clock=False)
         with Vertical(id="chat"):
             with VerticalScroll(id="blocks"):
-                with Vertical(id="composer", classes="role-user draft"):
-                    yield Static("User draft", classes="block-label")
+                with Vertical(id="composer", classes="block role-user draft") as composer:
+                    composer.border_title = ROLE_LABEL["user"]
                     yield Static("", id="thinking")
                     yield Input(
                         placeholder="Message the assistant  (/help for commands)",
@@ -307,6 +299,7 @@ class NeutrixApp(App):
             self._thinking_timer = None
         thinking.remove_class("active")
         thinking.update("")
+        input_box.focus()
 
     def _tick_thinking(self) -> None:
         dots = "." * ((self._thinking_tick % 3) + 1)
@@ -349,6 +342,10 @@ class NeutrixApp(App):
         try:
             async for ev in self.agent.stream_reply(text):
                 assistant = self._handle_event(ev, assistant)
+        except Exception as exc:
+            logger.exception("model worker failed")
+            self._post("error", str(exc))
+            self._notice(str(exc), severity="error")
         finally:
             if assistant is not None and not assistant._content:
                 assistant.remove()
@@ -375,7 +372,9 @@ class NeutrixApp(App):
             self._post("tool", f"← {ev.data['name']}:\n{preview}")
             return None
         elif ev.kind == "error":
-            self._notice(str(ev.data), severity="error")
+            content = str(ev.data)
+            self._post("error", content)
+            self._notice(content, severity="error")
         return assistant
 
     # ----- slash commands -----------------------------------------------------

@@ -1,0 +1,148 @@
+"""Tests for the model/tool continuation loop."""
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from neutrix.agent_loop import Agent
+from neutrix.config import Slot
+from neutrix.llm import LLMEvent, LLMResponse
+
+
+def _slot() -> Slot:
+    return Slot(
+        name="fast",
+        provider="test",
+        model="test-model",
+        base_url="https://example.test/v1",
+        api_key="sk-test",
+    )
+
+
+class FakeLLM:
+    def __init__(self, rounds: list[list[LLMEvent]]) -> None:
+        self.rounds = rounds
+        self.calls: list[dict[str, Any]] = []
+        self.switched_to: Slot | None = None
+
+    def switch(self, slot: Slot) -> None:
+        self.switched_to = slot
+
+    async def stream_response(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ):
+        self.calls.append(
+            {
+                "model": model,
+                "messages": [dict(message) for message in messages],
+                "tools": tools,
+            }
+        )
+        for event in self.rounds.pop(0):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_appends_user_and_assistant_once():
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent("token", "hello"),
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "hello"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ]
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=False, llm=llm)
+
+    events = [event async for event in agent.stream_reply("hi")]
+
+    assert [event.kind for event in events] == ["token", "done"]
+    assert [message["role"] for message in agent.messages] == [
+        "system",
+        "user",
+        "assistant",
+    ]
+    assert agent.messages[1]["content"] == "hi"
+    assert agent.messages[2]["content"] == "hello"
+    assert llm.calls[0]["messages"][-1] == {"role": "user", "content": "hi"}
+    assert llm.calls[0]["tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_runs_tools_then_samples_follow_up(monkeypatch):
+    monkeypatch.setattr(
+        "neutrix.agent_loop.get_schemas",
+        lambda: [{"type": "function", "function": {"name": "echo"}}],
+    )
+    monkeypatch.setattr(
+        "neutrix.agent_loop.dispatch",
+        lambda name, arguments: f"{name}:{arguments}",
+    )
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "echo",
+                                        "arguments": '{"x": 1}',
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason="tool_calls",
+                    ),
+                )
+            ],
+            [
+                LLMEvent("token", "done"),
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "done"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ],
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=True, llm=llm)
+
+    events = [event async for event in agent.stream_reply("hi")]
+
+    assert [event.kind for event in events] == [
+        "tool_call",
+        "tool_result",
+        "token",
+        "done",
+    ]
+    assert [message["role"] for message in agent.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert agent.messages[3]["tool_call_id"] == "call_1"
+    assert agent.messages[3]["content"] == 'echo:{"x": 1}'
+    assert len(llm.calls) == 2
+    assert llm.calls[1]["messages"][-1]["role"] == "tool"
