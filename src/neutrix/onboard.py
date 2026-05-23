@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Static
 
 from neutrix import __version__
@@ -131,6 +132,10 @@ class OnboardApp(App[bool]):
         Binding("g", "set_strong", "Set strong"),
         Binding("s", "save_and_launch", "Save & launch"),
         Binding("q", "quit_onboard", "Quit"),
+        Binding("up", "focus_previous", "Up", show=False, priority=True),
+        Binding("down", "focus_next", "Down", show=False, priority=True),
+        Binding("ctrl+c", "confirm_quit", "Quit (Ctrl+C x2)", priority=True),
+        Binding("escape", "cancel_quit", "Cancel quit", show=False, priority=True),
     ]
 
     def __init__(self, config: Config) -> None:
@@ -147,6 +152,8 @@ class OnboardApp(App[bool]):
         }
         self.fast_choice: dict[str, str] | None = None
         self.strong_choice: dict[str, str] | None = None
+        self._quit_pending: bool = False
+        self._quit_timer: Timer | None = None
 
     # ----- compose ------------------------------------------------------------
 
@@ -294,6 +301,33 @@ class OnboardApp(App[bool]):
 
     def action_quit_onboard(self) -> None:
         self.exit(False)
+
+    # ----- two-tap Ctrl+C quit ------------------------------------------------
+
+    def action_confirm_quit(self) -> None:
+        if self._quit_pending:
+            self.exit(False)
+            return
+        self._quit_pending = True
+        self.notify(
+            "press Ctrl+C again to quit, Esc to cancel",
+            severity="warning",
+            timeout=5,
+        )
+        if self._quit_timer is not None:
+            self._quit_timer.stop()
+        self._quit_timer = self.set_timer(5.0, self._reset_quit_pending)
+
+    def action_cancel_quit(self) -> None:
+        if self._quit_pending:
+            self._reset_quit_pending()
+            self.notify("quit cancelled")
+
+    def _reset_quit_pending(self) -> None:
+        self._quit_pending = False
+        if self._quit_timer is not None:
+            self._quit_timer.stop()
+            self._quit_timer = None
 
 
 def run_onboarding(config: Config) -> bool:

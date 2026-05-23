@@ -4,6 +4,18 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.3.1] — 2026-05-23
+
+### Added
+- Onboarding TUI: `Up` / `Down` arrow keys move focus between api_key
+  Inputs and model rows (same widgets `Tab` traverses).
+- Onboarding TUI: `Ctrl+C` is now the universal quit, with two-tap
+  confirm — first press toasts "press Ctrl+C again to quit, Esc to
+  cancel" and arms a 5 s window; second `Ctrl+C` exits, `Esc` cancels,
+  or the window simply expires.
+
+See [docs/PRDs/v0.3.1-onboarding-arrow-nav.md](docs/PRDs/v0.3.1-onboarding-arrow-nav.md).
+
 ## [v0.3.0] — 2026-05-23
 
 ### Added
