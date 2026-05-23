@@ -23,7 +23,9 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Vertical, VerticalScroll
+from textual.css.query import NoMatches
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Static
 
 from neutrix import __version__
@@ -46,10 +48,11 @@ class Message(Static):
     """Single message bubble; updated in-place during streaming."""
 
     def __init__(self, role: str, content: str = "", *, markdown: bool = False) -> None:
-        super().__init__()
+        super().__init__(classes=f"message role-{role}")
         self.role = role
         self._content = content
         self._markdown = markdown
+        self.border_title = role.title()
         self._refresh()
 
     def append(self, text: str) -> None:
@@ -58,28 +61,108 @@ class Message(Static):
 
     def _refresh(self) -> None:
         style = ROLE_STYLE.get(self.role, "white")
-        prefix = Text(f"{self.role}: ", style=style)
         if self._markdown and self.role == "assistant":
-            self.update(Markdown(self._content) if self._content else prefix)
+            self.update(Markdown(self._content) if self._content else Text(""))
         else:
-            body = Text(self._content)
-            self.update(prefix + body)
+            self.update(Text(self._content, style=style if self.role == "error" else ""))
 
 
 class NeutrixApp(App):
     CSS = """
-    Screen { layout: vertical; }
-    #log {
+    Screen {
+        layout: vertical;
+        background: $background;
+    }
+
+    #chat {
         height: 1fr;
+        padding: 1 2;
+        align: center middle;
+    }
+    #chat.started {
+        align: center top;
+    }
+
+    #log {
+        display: none;
+        height: auto;
+        max-height: 1fr;
+        width: 1fr;
+        padding: 0 0 1 0;
+    }
+    #chat.started #log {
+        display: block;
+    }
+
+    #composer {
+        width: 88;
+        max-width: 100%;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $boost;
+    }
+    #chat.started #composer {
+        margin: 1 0 0 0;
+    }
+
+    #system-prompt {
+        margin: 0 0 1 0;
+        color: $text-muted;
+    }
+    #thinking {
+        display: none;
+        height: 1;
+        margin: 0 0 1 0;
+        color: $warning;
+    }
+    #thinking.active {
+        display: block;
+    }
+    #input {
+        height: 3;
+        border: tall $primary;
+        background: $surface;
         padding: 0 1;
+        margin: 0 0 1 0;
+    }
+    #input:focus {
+        border: tall $accent;
+    }
+    #input:disabled {
+        border: tall $warning;
+        color: $text-muted;
+    }
+    #status {
+        height: 1;
+        color: $text-muted;
+    }
+
+    Message {
+        width: 1fr;
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        border: round $surface;
+        background: $surface;
+    }
+    Message.role-user {
+        border: round $accent;
+        background: $boost;
+    }
+    Message.role-assistant {
         border: round $primary;
     }
-    Message {
-        margin: 0 0 1 0;
-        padding: 0;
+    Message.role-system {
+        border: round $boost;
+        color: $text-muted;
     }
-    #input { dock: bottom; }
-    #status { dock: bottom; height: 1; background: $boost; padding: 0 1; }
+    Message.role-tool {
+        border: round $warning;
+    }
+    Message.role-error {
+        border: round $error;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -99,24 +182,29 @@ class NeutrixApp(App):
         self.config = config
         self.render_markdown = render_markdown
         self._busy = False
+        self._thinking_tick = 0
+        self._thinking_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield VerticalScroll(id="log")
-        yield Static(self._status_text(), id="status")
-        yield Input(placeholder="Send a message  (/help for commands)", id="input")
+        with Vertical(id="chat"):
+            yield VerticalScroll(id="log")
+            with Vertical(id="composer"):
+                yield Static(id="system-prompt")
+                yield Static("", id="thinking")
+                yield Input(
+                    placeholder="Message the assistant  (/help for commands)",
+                    id="input",
+                )
+                yield Static(self._status_text(), id="status")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = f"neutrix v{__version__}"
         self._refresh_subtitle()
+        self._refresh_system_prompt()
+        self._render_existing_messages()
         self.query_one("#input", Input).focus()
-        self._post(
-            "system",
-            f"connected to {self.agent.slot.name} slot — "
-            f"{self.agent.slot.provider}/{self.agent.slot.model}. "
-            f"Type /help for commands.",
-        )
 
     # ----- UI helpers ---------------------------------------------------------
 
@@ -136,28 +224,91 @@ class NeutrixApp(App):
         s = self.agent.slot
         self.sub_title = f"{s.name} · {s.provider}/{s.model}"
 
+    def _system_prompt(self) -> str:
+        for message in self.agent.messages:
+            if message.get("role") == "system":
+                return str(message.get("content") or "")
+        return str(getattr(self.agent, "system_prompt", ""))
+
+    def _refresh_system_prompt(self) -> None:
+        prompt = self._system_prompt()
+        text = Text("System: ", style="bold")
+        text.append(prompt, style="dim")
+        self.query_one("#system-prompt", Static).update(text)
+
+    def _render_existing_messages(self) -> None:
+        for message in self.agent.messages:
+            role = str(message.get("role") or "")
+            if role == "system":
+                continue
+            content = message.get("content")
+            if content:
+                self._post(role, str(content), markdown=role == "assistant")
+
     def _post(self, role: str, content: str, *, markdown: bool = False) -> Message:
         msg = Message(role, content, markdown=markdown)
+        self.query_one("#chat", Vertical).add_class("started")
         log = self.query_one("#log", VerticalScroll)
         log.mount(msg)
         log.scroll_end(animate=False)
         return msg
 
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        try:
+            input_box = self.query_one("#input", Input)
+            thinking = self.query_one("#thinking", Static)
+        except NoMatches:
+            return
+
+        input_box.disabled = busy
+        input_box.placeholder = (
+            "Assistant is responding..."
+            if busy
+            else "Message the assistant  (/help for commands)"
+        )
+
+        if busy:
+            self._thinking_tick = 0
+            thinking.add_class("active")
+            self._tick_thinking()
+            if self._thinking_timer is None:
+                self._thinking_timer = self.set_interval(0.4, self._tick_thinking)
+            return
+
+        if self._thinking_timer is not None:
+            self._thinking_timer.stop()
+            self._thinking_timer = None
+        thinking.remove_class("active")
+        thinking.update("")
+
+    def _tick_thinking(self) -> None:
+        dots = "." * ((self._thinking_tick % 3) + 1)
+        try:
+            self.query_one("#thinking", Static).update(
+                f"assistant is responding{dots}"
+            )
+        except NoMatches:
+            return
+        self._thinking_tick += 1
+
     # ----- input handler ------------------------------------------------------
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        event.input.value = ""
         if not text or self._busy:
             return
+        event.input.value = ""
         if text.startswith("/"):
             await self._run_command(text)
             return
         self._post("user", text)
+        self._set_busy(True)
         self.run_worker(self._send_to_model(text), exclusive=True)
 
     async def _send_to_model(self, text: str) -> None:
-        self._busy = True
+        if not self._busy:
+            self._set_busy(True)
         assistant = self._post("assistant", "", markdown=self.render_markdown)
         try:
             async for ev in self.agent.stream_reply(text):
@@ -169,7 +320,7 @@ class NeutrixApp(App):
         finally:
             if not assistant._content:
                 assistant.remove()
-            self._busy = False
+            self._set_busy(False)
             self._refresh_status()
 
     def _handle_event(self, ev: AgentEvent, assistant: Message) -> None:
@@ -258,6 +409,7 @@ class NeutrixApp(App):
             return
         payload = session_load(args[0])
         self.agent.messages = payload["messages"]
+        self._refresh_system_prompt()
         self._post(
             "system",
             f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
@@ -266,6 +418,7 @@ class NeutrixApp(App):
 
     async def _cmd_clear(self, args: list[str]) -> None:
         self.agent.reset()
+        self._refresh_system_prompt()
         log = self.query_one("#log", VerticalScroll)
         for child in list(log.children):
             child.remove()

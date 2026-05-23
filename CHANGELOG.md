@@ -4,6 +4,28 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.0] - 2026-05-23
+
+### Changed
+- Main chat now opens with a centered composer block instead of a
+  bottom-docked full-width input. After the first posted message, the
+  composer moves into the chat flow directly under the message list.
+- The default system prompt is now the simple chatbot prompt:
+  `You are a helpful assistant. Keep it simple.`
+- Chat messages now render as compact role-labelled blocks with
+  distinct styling for user, assistant, system, tool, and error output.
+
+### Added
+- The active system prompt is shown on screen inside the composer.
+- Streaming replies now show an animated "assistant is responding"
+  indicator and disable the input until the model finishes.
+- Headless TUI tests for the visible system prompt, composer placement,
+  user submission, assistant streaming, and busy indicator behavior.
+
+  Total suite: 49 tests.
+
+See [docs/PRDs/v0.6.0-main-chat-polish.md](docs/PRDs/v0.6.0-main-chat-polish.md).
+
 ## [v0.5.5] — 2026-05-23
 
 ### Fixed

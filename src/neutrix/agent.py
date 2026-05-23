@@ -11,11 +11,7 @@ from openai import AsyncOpenAI
 from neutrix.config import Slot
 from neutrix.tools import dispatch, get_schemas
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are neutrix, a concise terminal coding assistant. "
-    "When the user asks you to read, write, or run things, prefer using the "
-    "provided tools. Keep replies short."
-)
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Keep it simple."
 
 
 @dataclass
