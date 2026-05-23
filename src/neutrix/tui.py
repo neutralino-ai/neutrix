@@ -1,4 +1,4 @@
-"""Textual TUI: scrollable chat log + input + status bar.
+"""Textual TUI: model-visible block list + input + status bar.
 
 Slash commands:
     /help                 show commands
@@ -43,6 +43,13 @@ ROLE_STYLE = {
     "error": "bold red",
 }
 
+NOTICE_STYLE = {
+    "info": "dim",
+    "success": "green",
+    "warning": "yellow",
+    "error": "bold red",
+}
+
 
 class Message(Static):
     """Single message bubble; updated in-place during streaming."""
@@ -77,39 +84,35 @@ class NeutrixApp(App):
     #chat {
         height: 1fr;
         padding: 1 2;
-        align: center middle;
-    }
-    #chat.started {
         align: center top;
     }
 
-    #log {
-        display: none;
-        height: auto;
-        max-height: 1fr;
-        width: 1fr;
+    #blocks {
+        height: 1fr;
+        width: 88;
+        max-width: 100%;
         padding: 0 0 1 0;
-    }
-    #chat.started #log {
-        display: block;
     }
 
     #composer {
-        width: 88;
-        max-width: 100%;
+        width: 1fr;
         height: auto;
-        padding: 1 2;
-        border: round $primary;
+        margin: 0 0 1 0;
+        padding: 0 1 1 1;
+        border: round $accent;
         background: $boost;
     }
-    #chat.started #composer {
-        margin: 1 0 0 0;
+
+    .block-label {
+        height: 1;
+        margin: 0 0 1 0;
+        text-style: bold;
     }
 
-    #system-prompt {
-        margin: 0 0 1 0;
-        color: $text-muted;
+    #composer .block-label {
+        color: $accent;
     }
+
     #thinking {
         display: none;
         height: 1;
@@ -121,20 +124,26 @@ class NeutrixApp(App):
     }
     #input {
         height: 3;
-        border: tall $primary;
-        background: $surface;
+        border: tall $accent;
+        background: $boost;
         padding: 0 1;
-        margin: 0 0 1 0;
     }
     #input:focus {
-        border: tall $accent;
+        border: tall $primary;
     }
     #input:disabled {
         border: tall $warning;
         color: $text-muted;
     }
+    #notice {
+        min-height: 1;
+        max-height: 8;
+        margin: 0 2;
+        color: $text-muted;
+    }
     #status {
         height: 1;
+        margin: 0 2;
         color: $text-muted;
     }
 
@@ -167,7 +176,7 @@ class NeutrixApp(App):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+c", "quit", "Quit", show=True),
-        Binding("ctrl+l", "clear_log", "Clear", show=True),
+        Binding("ctrl+l", "clear_log", "Notice", show=True),
     ]
 
     def __init__(
@@ -188,22 +197,22 @@ class NeutrixApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical(id="chat"):
-            yield VerticalScroll(id="log")
-            with Vertical(id="composer"):
-                yield Static(id="system-prompt")
-                yield Static("", id="thinking")
-                yield Input(
-                    placeholder="Message the assistant  (/help for commands)",
-                    id="input",
-                )
-                yield Static(self._status_text(), id="status")
+            with VerticalScroll(id="blocks"):
+                with Vertical(id="composer", classes="role-user draft"):
+                    yield Static("User draft", classes="block-label")
+                    yield Static("", id="thinking")
+                    yield Input(
+                        placeholder="Message the assistant  (/help for commands)",
+                        id="input",
+                    )
+        yield Static("", id="notice")
+        yield Static(self._status_text(), id="status")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = f"neutrix v{__version__}"
         self._refresh_subtitle()
-        self._refresh_system_prompt()
-        self._render_existing_messages()
+        self._render_model_blocks()
         self.query_one("#input", Input).focus()
 
     # ----- UI helpers ---------------------------------------------------------
@@ -224,33 +233,50 @@ class NeutrixApp(App):
         s = self.agent.slot
         self.sub_title = f"{s.name} · {s.provider}/{s.model}"
 
-    def _system_prompt(self) -> str:
-        for message in self.agent.messages:
-            if message.get("role") == "system":
-                return str(message.get("content") or "")
-        return str(getattr(self.agent, "system_prompt", ""))
+    def _message_content(self, message: dict[str, object]) -> str:
+        content = message.get("content")
+        if content:
+            return str(content)
 
-    def _refresh_system_prompt(self) -> None:
-        prompt = self._system_prompt()
-        text = Text("System: ", style="bold")
-        text.append(prompt, style="dim")
-        self.query_one("#system-prompt", Static).update(text)
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return ""
 
-    def _render_existing_messages(self) -> None:
+        lines: list[str] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name") or "unknown"
+            arguments = function.get("arguments") or ""
+            lines.append(f"tool call: {name}({arguments})")
+        return "\n".join(lines)
+
+    def _clear_model_blocks(self) -> None:
+        for child in list(self.query(Message)):
+            child.remove()
+
+    def _render_model_blocks(self) -> None:
+        self._clear_model_blocks()
         for message in self.agent.messages:
             role = str(message.get("role") or "")
-            if role == "system":
-                continue
-            content = message.get("content")
+            content = self._message_content(message)
             if content:
                 self._post(role, str(content), markdown=role == "assistant")
+        self.query_one("#blocks", VerticalScroll).scroll_end(animate=False)
+
+    def _notice(self, content: str, *, severity: str = "info") -> None:
+        style = NOTICE_STYLE.get(severity, NOTICE_STYLE["info"])
+        self.query_one("#notice", Static).update(Text(content, style=style))
 
     def _post(self, role: str, content: str, *, markdown: bool = False) -> Message:
         msg = Message(role, content, markdown=markdown)
-        self.query_one("#chat", Vertical).add_class("started")
-        log = self.query_one("#log", VerticalScroll)
-        log.mount(msg)
-        log.scroll_end(animate=False)
+        blocks = self.query_one("#blocks", VerticalScroll)
+        composer = self.query_one("#composer", Vertical)
+        blocks.mount(msg, before=composer)
+        blocks.scroll_end(animate=False)
         return msg
 
     def _set_busy(self, busy: bool) -> None:
@@ -304,6 +330,7 @@ class NeutrixApp(App):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if not self._is_chat_input(event.input):
             return
+        event.stop()
         text = event.value.strip()
         if not text or self._busy:
             return
@@ -318,32 +345,38 @@ class NeutrixApp(App):
     async def _send_to_model(self, text: str) -> None:
         if not self._busy:
             self._set_busy(True)
-        assistant = self._post("assistant", "", markdown=self.render_markdown)
+        assistant: Message | None = None
         try:
             async for ev in self.agent.stream_reply(text):
-                self._handle_event(ev, assistant)
-                if ev.kind in ("tool_call", "tool_result"):
-                    assistant = self._post(
-                        "assistant", "", markdown=self.render_markdown
-                    )
+                assistant = self._handle_event(ev, assistant)
         finally:
-            if not assistant._content:
+            if assistant is not None and not assistant._content:
                 assistant.remove()
             self._set_busy(False)
             self._refresh_status()
 
-    def _handle_event(self, ev: AgentEvent, assistant: Message) -> None:
+    def _handle_event(
+        self, ev: AgentEvent, assistant: Message | None
+    ) -> Message | None:
         if ev.kind == "token":
+            if assistant is None:
+                assistant = self._post(
+                    "assistant", "", markdown=self.render_markdown
+                )
             assistant.append(ev.data)
-            self.query_one("#log", VerticalScroll).scroll_end(animate=False)
+            self.query_one("#blocks", VerticalScroll).scroll_end(animate=False)
+            return assistant
         elif ev.kind == "tool_call":
             self._post("tool", f"→ {ev.data['name']}({ev.data['arguments']})")
+            return None
         elif ev.kind == "tool_result":
             result = ev.data["result"]
             preview = result if len(result) < 800 else result[:800] + "\n…(truncated)"
             self._post("tool", f"← {ev.data['name']}:\n{preview}")
+            return None
         elif ev.kind == "error":
-            self._post("error", str(ev.data))
+            self._notice(str(ev.data), severity="error")
+        return assistant
 
     # ----- slash commands -----------------------------------------------------
 
@@ -353,12 +386,14 @@ class NeutrixApp(App):
         try:
             handler = getattr(self, f"_cmd_{cmd}", None)
             if handler is None:
-                self._post("error", f"unknown command: /{cmd}. Try /help.")
+                self._notice(
+                    f"unknown command: /{cmd}. Try /help.", severity="error"
+                )
                 return
             await handler(args)
         except Exception as e:
             logger.exception("command /{} failed", cmd)
-            self._post("error", f"/{cmd} failed: {e}")
+            self._notice(f"/{cmd} failed: {e}", severity="error")
         self._refresh_status()
 
     async def _cmd_help(self, args: list[str]) -> None:
@@ -376,7 +411,7 @@ class NeutrixApp(App):
             "  /tools on|off       enable/disable tool calling",
             "  /quit               exit",
         ]
-        self._post("system", "\n".join(lines))
+        self._notice("\n".join(lines))
 
     async def _cmd_fast(self, args: list[str]) -> None:
         await self._switch_slot("fast")
@@ -387,7 +422,10 @@ class NeutrixApp(App):
     async def _switch_slot(self, name: str) -> None:
         slot = self.config.slot(name)
         self.agent.switch(slot)
-        self._post("system", f"switched to {name}: {slot.provider}/{slot.model}")
+        self._notice(
+            f"switched to {name}: {slot.provider}/{slot.model}",
+            severity="success",
+        )
 
     async def _cmd_model(self, args: list[str]) -> None:
         s = self.agent.slot
@@ -396,7 +434,7 @@ class NeutrixApp(App):
             f"slots available: {', '.join(SLOT_NAMES)}",
             "edit ~/.config/neutrix/config.yaml to change slot bindings",
         ]
-        self._post("system", "\n".join(lines))
+        self._notice("\n".join(lines))
 
     async def _cmd_save(self, args: list[str]) -> None:
         if args:
@@ -410,42 +448,39 @@ class NeutrixApp(App):
             model=self.agent.slot.model,
             messages=self.agent.messages,
         )
-        self._post("system", f"saved → {out}")
+        self._notice(f"saved → {out}", severity="success")
 
     async def _cmd_load(self, args: list[str]) -> None:
         if not args:
-            self._post("error", "usage: /load PATH")
+            self._notice("usage: /load PATH", severity="error")
             return
         payload = session_load(args[0])
         self.agent.messages = payload["messages"]
-        self._refresh_system_prompt()
-        self._post(
-            "system",
+        self._render_model_blocks()
+        self._notice(
             f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
             f"current slot unchanged",
+            severity="success",
         )
 
     async def _cmd_clear(self, args: list[str]) -> None:
         self.agent.reset()
-        self._refresh_system_prompt()
-        log = self.query_one("#log", VerticalScroll)
-        for child in list(log.children):
-            child.remove()
-        self._post("system", "conversation cleared")
+        self._render_model_blocks()
+        self._notice("conversation cleared", severity="success")
 
     async def _cmd_tools(self, args: list[str]) -> None:
         if args and args[0] in ("on", "off"):
             self.agent.use_tools = args[0] == "on"
-            self._post(
-                "system",
+            self._notice(
                 f"tool calling {'enabled' if self.agent.use_tools else 'disabled'}",
+                severity="success",
             )
             return
         lines = ["available tools:"]
         for t in BUILTIN_TOOLS.values():
             lines.append(f"  • {t.name} — {t.description}")
         lines.append(f"status: {'on' if self.agent.use_tools else 'off'}")
-        self._post("system", "\n".join(lines))
+        self._notice("\n".join(lines))
 
     async def _cmd_onboard(self, args: list[str]) -> None:
         from neutrix.onboard import OnboardScreen
@@ -458,12 +493,12 @@ class NeutrixApp(App):
         try:
             self.config = load_config(self.config.path)
         except ConfigError as e:
-            self._post("error", f"config reload failed: {e}")
+            self._notice(f"config reload failed: {e}", severity="error")
             return
-        self._post(
-            "system",
+        self._notice(
             "back from onboarding. Use /fast or /strong to switch to a "
             "newly-bound slot; current slot unchanged.",
+            severity="success",
         )
         self._refresh_status()
 
@@ -473,6 +508,4 @@ class NeutrixApp(App):
     # ----- bindings -----------------------------------------------------------
 
     def action_clear_log(self) -> None:
-        log = self.query_one("#log", VerticalScroll)
-        for child in list(log.children):
-            child.remove()
+        self._notice("")

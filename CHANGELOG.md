@@ -4,6 +4,26 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.2] - 2026-05-23
+
+### Changed
+- Main chat now renders the model-visible context as one block list:
+  system prompt, committed user turns, assistant turns, and tool output.
+- The composer is now styled as a draft user block inside that same
+  list, so typing happens where the next model-visible message will
+  appear.
+- App-only slash commands and their feedback, including `/onboard`, no
+  longer render as transcript blocks. Command feedback now lives in the
+  notice line, and `Ctrl+L` clears that notice line.
+
+### Added
+- Headless TUI coverage for command feedback staying outside the
+  model-visible block list.
+- `AGENTS.md` with the required PRD -> code -> changelog -> release
+  workflow for implementation tasks.
+
+See [docs/PRDs/v0.6.2-main-visible-block-list.md](docs/PRDs/v0.6.2-main-visible-block-list.md).
+
 ## [v0.6.1] - 2026-05-23
 
 ### Fixed

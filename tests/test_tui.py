@@ -100,12 +100,39 @@ async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        system_prompt = app.query_one("#system-prompt", Static)
         input_box = app.query_one("#input", Input)
+        composer = app.query_one("#composer")
+        messages = list(app.query(Message))
 
-        assert DEFAULT_SYSTEM_PROMPT in _render_text(system_prompt)
-        assert input_box.parent is app.query_one("#composer")
-        assert not app.query_one("#chat").has_class("started")
+        assert [message.role for message in messages] == ["system"]
+        assert DEFAULT_SYSTEM_PROMPT in messages[0]._content
+        assert input_box.parent is composer
+        assert composer.parent is app.query_one("#blocks")
+        assert composer.has_class("draft")
+        assert "User draft" in _render_text(composer.query_one(".block-label", Static))
+
+
+@pytest.mark.asyncio
+async def test_slash_command_feedback_stays_outside_model_blocks(tmp_path: Path):
+    agent = StreamingAgent()
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", Input)
+        input_box.value = "/help"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        messages = list(app.query(Message))
+        assert [message.role for message in messages] == ["system"]
+        assert all("/help" not in message._content for message in messages)
+        assert all("Commands:" not in message._content for message in messages)
+        assert "Commands:" in _render_text(app.query_one("#notice", Static))
+        assert agent.messages == [
+            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT}
+        ]
 
 
 @pytest.mark.asyncio
@@ -123,7 +150,6 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         await pilot.pause()
 
         thinking = app.query_one("#thinking", Static)
-        assert app.query_one("#chat").has_class("started")
         assert input_box.disabled
         assert thinking.has_class("active")
         assert "assistant is responding" in _render_text(thinking)
@@ -139,7 +165,12 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         assert not thinking.has_class("active")
 
         messages = list(app.query(Message))
-        assert [message.role for message in messages] == ["user", "assistant"]
+        assert [message.role for message in messages] == [
+            "system",
+            "user",
+            "assistant",
+        ]
+        assert messages[1]._content == "hi"
         assert messages[-1]._content == "hello world"
 
 
@@ -164,6 +195,7 @@ async def test_onboard_key_submit_does_not_become_chat_message(tmp_path: Path):
         await pilot.pause()
 
         assert key_input._committed_value == secret
+        assert all("/onboard" not in message._content for message in app.query(Message))
         assert all(secret not in message._content for message in app.query(Message))
         assert all(secret not in str(message) for message in agent.messages)
         assert agent.streamed_texts == []

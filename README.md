@@ -72,7 +72,7 @@ neutrix --version
 | `/tools` / `/tools on\|off` | list or toggle tool calling                |
 | `/quit`                  | exit                                          |
 
-`Ctrl+C` quits. `Ctrl+L` clears the visible log.
+`Ctrl+C` quits. `Ctrl+L` clears the command notice line.
 
 ## Development
 
