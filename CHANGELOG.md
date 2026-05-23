@@ -4,6 +4,19 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.4.1] — 2026-05-23
+
+### Fixed
+- Onboarding TUI: `Up` / `Down` arrow-key focus navigation regressed in
+  v0.4.0 when `OnboardApp` was refactored to `OnboardScreen`. Screen-
+  level `priority=True` bindings do not preempt `VerticalScroll`'s own
+  arrow-key scroll handling. Switched to widget-level `on_key` handlers
+  on `ModelRow` and a new `KeyInput(Input)` subclass — they run first
+  in the focus chain and reliably consume the event. `PgUp/PgDn` and
+  mouse-wheel scrolling are unaffected.
+
+See [docs/PRDs/v0.4.1-onboard-arrow-nav-fix.md](docs/PRDs/v0.4.1-onboard-arrow-nav-fix.md).
+
 ## [v0.4.0] — 2026-05-23
 
 ### Added

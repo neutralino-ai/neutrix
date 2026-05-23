@@ -20,6 +20,7 @@ from typing import ClassVar
 
 from loguru import logger
 from openai import AsyncOpenAI
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -62,6 +63,19 @@ async def verify_model(base_url: str, api_key: str, model: str) -> bool:
         return False
 
 
+def _navigate_focus(widget: Static | Input, event: events.Key) -> bool:
+    """Translate up/down key events into screen focus navigation. Returns True if handled."""
+    if event.key == "down":
+        widget.screen.focus_next()
+        event.stop()
+        return True
+    if event.key == "up":
+        widget.screen.focus_previous()
+        event.stop()
+        return True
+    return False
+
+
 class ModelRow(Static):
     """Focusable row showing one model's status and slot assignments."""
 
@@ -79,6 +93,17 @@ class ModelRow(Static):
         tags = f"  [b yellow]{'/'.join(self.slot_tags)}[/b yellow]" if self.slot_tags else ""
         self.update(f"    [{self.status}] {self.model}{tags}")
 
+    def on_key(self, event: events.Key) -> None:
+        _navigate_focus(self, event)
+
+
+class KeyInput(Input):
+    """Single-line Input that lets up/down navigate focus instead of bubbling
+    to VerticalScroll for scrolling."""
+
+    def on_key(self, event: events.Key) -> None:
+        _navigate_focus(self, event)
+
 
 class ProviderSection(Vertical):
     """Header + base_url + api_key Input + list of ModelRow per provider."""
@@ -90,7 +115,7 @@ class ProviderSection(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(f"[b cyan]{self.state.name}[/b cyan]")
         yield Static(f"  base_url: [dim]{self.state.base_url}[/dim]")
-        yield Input(
+        yield KeyInput(
             value=self.state.api_key,
             placeholder="EMPTY  —  paste api_key here and press Enter",
             password=True,
@@ -140,8 +165,6 @@ class OnboardScreen(Screen[bool]):
         Binding("g", "set_strong", "Set strong"),
         Binding("s", "save_and_launch", "Save"),
         Binding("q", "quit_onboard", "Quit"),
-        Binding("up", "focus_previous", "Up", show=False, priority=True),
-        Binding("down", "focus_next", "Down", show=False, priority=True),
         Binding("ctrl+c", "confirm_quit", "Quit (Ctrl+C x2)", priority=True),
         Binding("escape", "cancel_quit", "Cancel quit", show=False, priority=True),
     ]
