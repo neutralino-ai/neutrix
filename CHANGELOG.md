@@ -4,6 +4,43 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.5.0] — 2026-05-23
+
+### Added
+- Onboarding now **persists model verification status** in
+  `~/.config/neutrix/config.yaml` per provider, under a new optional
+  `model_status: {model: verified|failed}` map. Reopening `/onboard`
+  resumes from the last known statuses instead of resetting to `?`.
+  Changing an api_key clears its provider's `model_status` (stale).
+- **Verify-all in parallel**: each provider now has an `(all)` row at
+  the top of its model list. Press `v` on it to verify every model
+  via a single `asyncio.gather` (one shared `AsyncOpenAI` client per
+  batch). Statuses are written to YAML in one save at the end.
+- "saved" indicator next to each api_key Input — lights up after a
+  successful submit so the user can see the key is committed.
+
+### Changed
+- Onboarding UI redesigned: each provider sits in a rounded bordered
+  card; status icons are colour-coded (`○` dim, `✓` green, `✗` red,
+  `…` yellow); slot tags render as accent-coloured `▸ fast` / `▸ strong`
+  badges; padding generous; intro line trimmed. Uses Textual design
+  tokens (`$primary`, `$success`, `$error`, `$accent`, `$text-muted`,
+  `$boost`) so the theme follows the user's terminal palette.
+
+### Fixed
+- Onboarding arrow nav no longer escapes scope: previously pressing
+  `Up`/`Down` past the first/last focusable could land focus on the
+  surrounding `VerticalScroll`, whose own `up`/`down` BINDINGS hijacked
+  the keys for scrolling. Replaced with a `FocusScroll(VerticalScroll)`
+  subclass that sets `can_focus = False`; focus now wraps within the
+  ModelRow/KeyInput/VerifyAllRow set as expected. PgUp/PgDn and
+  mouse-wheel scrolling are unaffected.
+- The api_key Input no longer appears to lose its value after `Enter`
+  — defensive re-assign of `event.input.value` and the new "saved"
+  affordance remove the ambiguity from password-masked rendering.
+
+See [docs/PRDs/v0.5.0-onboard-polish.md](docs/PRDs/v0.5.0-onboard-polish.md).
+
 ## [v0.4.2] — 2026-05-23
 
 ### Changed

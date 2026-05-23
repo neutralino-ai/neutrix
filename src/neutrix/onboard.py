@@ -1,13 +1,12 @@
-"""Onboarding TUI — set api_keys, verify models, bind fast/strong slots.
+"""Onboarding TUI — manage api keys, verify models, bind fast/strong slots.
 
 Two entry points share the same `OnboardScreen`:
 
 - **First-run** (`cli.py`): `run_onboarding(config)` boots `OnboardApp`,
   which pushes `OnboardScreen` as its initial screen. Used when neither
   the `fast` nor the `strong` slot resolves.
-- **Mid-chat** (`tui.py`): `/onboard` slash command calls
-  `await self.push_screen(OnboardScreen(self.config), wait_for_dismiss=True)`
-  so the user can rotate keys / add providers without leaving the chat.
+- **Mid-chat** (`tui.py`): `/onboard` slash command pushes
+  `OnboardScreen` directly onto the chat App's screen stack.
 
 `OnboardScreen.dismiss(True)` means "saved and ready to use the YAML";
 `dismiss(False)` means the user backed out.
@@ -23,7 +22,7 @@ from openai import AsyncOpenAI
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Footer, Header, Input, Static
@@ -35,6 +34,27 @@ from neutrix.config import (
     save_config,
 )
 
+# ----- status labels --------------------------------------------------------
+
+UNKNOWN = "unknown"
+VERIFIED = "verified"
+FAILED = "failed"
+VERIFYING = "verifying"
+
+_STATUS_ICON = {
+    UNKNOWN: "[dim]○[/dim]",
+    VERIFIED: "[b $success]✓[/b $success]",
+    FAILED: "[b $error]✗[/b $error]",
+    VERIFYING: "[b $warning]…[/b $warning]",
+}
+
+_STATUS_LABEL = {
+    UNKNOWN: "[dim]unknown[/dim]",
+    VERIFIED: "[$success]verified[/$success]",
+    FAILED: "[$error]failed[/$error]",
+    VERIFYING: "[$warning]verifying…[/$warning]",
+}
+
 
 @dataclass
 class _ProviderState:
@@ -42,12 +62,14 @@ class _ProviderState:
     base_url: str
     api_key: str
     models: list[str]
-    statuses: dict[str, str] = field(default_factory=dict)  # model -> '?' | '✓' | '✗' | '…'
+    model_status: dict[str, str] = field(default_factory=dict)
+    key_saved: bool = False
 
 
-async def verify_model(base_url: str, api_key: str, model: str) -> bool:
-    """Send a 1-token request to confirm (base_url, api_key, model) work."""
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+# ----- verification ---------------------------------------------------------
+
+
+async def _check_one(client: AsyncOpenAI, model: str) -> bool:
     try:
         await asyncio.wait_for(
             client.chat.completions.create(
@@ -63,8 +85,24 @@ async def verify_model(base_url: str, api_key: str, model: str) -> bool:
         return False
 
 
+async def verify_model(base_url: str, api_key: str, model: str) -> bool:
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    return await _check_one(client, model)
+
+
+async def verify_models(
+    base_url: str, api_key: str, models: list[str]
+) -> dict[str, bool]:
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    results = await asyncio.gather(*(_check_one(client, m) for m in models))
+    return dict(zip(models, results, strict=True))
+
+
+# ----- shared focus nav helper ---------------------------------------------
+
+
 def _navigate_focus(widget: Static | Input, event: events.Key) -> bool:
-    """Translate up/down key events into screen focus navigation. Returns True if handled."""
+    """Translate up/down into screen focus navigation. Returns True if handled."""
     if event.key == "down":
         widget.screen.focus_next()
         event.stop()
@@ -76,22 +114,58 @@ def _navigate_focus(widget: Static | Input, event: events.Key) -> bool:
     return False
 
 
+# ----- widgets --------------------------------------------------------------
+
+
+class FocusScroll(VerticalScroll):
+    """VerticalScroll that doesn't grab focus, so arrows never get trapped
+    in scroll mode. Textual still auto-scrolls to keep the focused child
+    visible, and mouse wheel / PgUp / PgDn still scroll."""
+
+    can_focus = False
+
+
 class ModelRow(Static):
-    """Focusable row showing one model's status and slot assignments."""
+    """Focusable row: status icon · model name · status label · slot tags."""
 
     can_focus = True
 
-    def __init__(self, provider: str, model: str) -> None:
+    def __init__(self, provider: str, model: str, status: str = UNKNOWN) -> None:
         super().__init__(classes="model-row")
         self.provider = provider
         self.model = model
-        self.status = "?"
+        self.status = status
         self.slot_tags: list[str] = []
         self._refresh()
 
     def _refresh(self) -> None:
-        tags = f"  [b yellow]{'/'.join(self.slot_tags)}[/b yellow]" if self.slot_tags else ""
-        self.update(f"    [{self.status}] {self.model}{tags}")
+        icon = _STATUS_ICON[self.status]
+        label = _STATUS_LABEL[self.status]
+        tags = (
+            "  " + " ".join(f"[b $accent]▸ {t}[/b $accent]" for t in self.slot_tags)
+            if self.slot_tags
+            else ""
+        )
+        # model name padded so labels line up roughly
+        self.update(f" {icon}  {self.model:<42} {label}{tags}")
+
+    def on_key(self, event: events.Key) -> None:
+        _navigate_focus(self, event)
+
+
+class VerifyAllRow(Static):
+    """Focusable special row: press `v` to verify every model in the provider
+    in parallel."""
+
+    can_focus = True
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(classes="model-row all-row")
+        self.provider = provider
+        self.update(
+            " [b $accent]▶[/b $accent]  [b](all)[/b]                                  "
+            "[dim]press v to verify all in parallel[/dim]"
+        )
 
     def on_key(self, event: events.Key) -> None:
         _navigate_focus(self, event)
@@ -99,64 +173,110 @@ class ModelRow(Static):
 
 class KeyInput(Input):
     """Single-line Input that lets up/down navigate focus instead of bubbling
-    to VerticalScroll for scrolling."""
+    to FocusScroll's scroll handlers."""
 
     def on_key(self, event: events.Key) -> None:
         _navigate_focus(self, event)
 
 
 class ProviderSection(Vertical):
-    """Header + base_url + api_key Input + list of ModelRow per provider."""
+    """One bordered card per provider: title, base_url, api_key row, models."""
 
     def __init__(self, state: _ProviderState) -> None:
-        super().__init__(classes="provider")
+        super().__init__(classes="provider-card")
         self.state = state
+        self.border_title = state.name
 
     def compose(self) -> ComposeResult:
-        yield Static(f"[b cyan]{self.state.name}[/b cyan]")
-        yield Static(f"  base_url: [dim]{self.state.base_url}[/dim]")
-        yield KeyInput(
-            value=self.state.api_key,
-            placeholder="EMPTY  —  paste api_key here and press Enter",
-            password=True,
-            id=f"key-{self.state.name}",
-            classes="api-key",
+        yield Static(
+            f"[dim]{self.state.base_url}[/dim]",
+            classes="base-url",
         )
-        yield Static("  models:")
+        with Horizontal(classes="key-row"):
+            yield Static("[b]api key[/b]", classes="key-label")
+            yield KeyInput(
+                value=self.state.api_key,
+                placeholder="EMPTY — paste api_key and press Enter",
+                password=True,
+                id=f"key-{self.state.name}",
+                classes="api-key",
+            )
+            yield Static(
+                "[$success]saved[/$success]" if self.state.api_key else "",
+                id=f"saved-{self.state.name}",
+                classes="saved-tag",
+            )
+        yield Static("[b]Models[/b]", classes="models-label")
+        yield VerifyAllRow(self.state.name)
         for m in self.state.models:
-            yield ModelRow(self.state.name, m)
+            status = self.state.model_status.get(m, UNKNOWN)
+            yield ModelRow(self.state.name, m, status=status)
+
+
+# ----- screen ---------------------------------------------------------------
 
 
 class OnboardScreen(Screen[bool]):
     """Onboarding screen. dismiss(True) = saved; dismiss(False) = cancelled."""
 
     CSS = """
-    OnboardScreen { layout: vertical; }
+    OnboardScreen { layout: vertical; background: $background; }
+
     #intro {
-        padding: 0 1;
-        color: $text;
+        padding: 1 2 0 2;
+        color: $text-muted;
     }
+
     #scroll {
         height: 1fr;
-        padding: 1;
-        border: round $primary;
+        padding: 1 2;
     }
+
     ProviderSection {
-        margin: 0 0 1 0;
         height: auto;
+        margin: 0 0 1 0;
+        padding: 1 2;
+        border: round $primary;
+        background: $boost;
     }
-    .api-key {
-        margin: 0 0 0 2;
-        width: 80;
+    ProviderSection > .base-url {
+        margin: 0 0 1 0;
+    }
+    ProviderSection > .key-row {
+        height: 1;
+        margin: 0 0 1 0;
+    }
+    ProviderSection > .key-row > .key-label {
+        width: 9;
+        content-align: left middle;
+    }
+    ProviderSection > .key-row > .api-key {
+        width: 56;
+        margin: 0 1;
+    }
+    ProviderSection > .key-row > .saved-tag {
+        width: 1fr;
+        content-align: left middle;
+    }
+    ProviderSection > .models-label {
+        margin: 0 0 0 0;
+        color: $text-muted;
     }
     .model-row {
-        padding: 0;
+        padding: 0 0 0 1;
+        height: 1;
     }
-    ModelRow:focus {
-        background: $accent 30%;
-        color: $text;
+    .model-row:focus {
+        background: $accent 25%;
     }
-    #status { dock: bottom; height: 1; background: $boost; padding: 0 1; }
+
+    #status {
+        dock: bottom;
+        height: 1;
+        background: $boost;
+        padding: 0 2;
+        color: $text-muted;
+    }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -172,15 +292,17 @@ class OnboardScreen(Screen[bool]):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
-        self.provider_state: dict[str, _ProviderState] = {
-            name: _ProviderState(
+        self.provider_state: dict[str, _ProviderState] = {}
+        for name, prov in config.providers.items():
+            prov = prov or {}
+            self.provider_state[name] = _ProviderState(
                 name=name,
-                base_url=(prov or {}).get("base_url", ""),
-                api_key=(prov or {}).get("api_key", ""),
+                base_url=prov.get("base_url", ""),
+                api_key=prov.get("api_key", ""),
                 models=list(PROVIDER_DEFAULT_MODELS.get(name, [])),
+                model_status=dict(prov.get("model_status") or {}),
+                key_saved=bool(prov.get("api_key")),
             )
-            for name, prov in config.providers.items()
-        }
         self.fast_choice: dict[str, str] | None = None
         self.strong_choice: dict[str, str] | None = None
         self._quit_pending: bool = False
@@ -191,13 +313,12 @@ class OnboardScreen(Screen[bool]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield Static(
-            "Onboarding. Paste at least one api_key (Enter to save),"
-            " focus a model row and press [b]v[/b] to verify,"
-            " then [b]f[/b]/[b]g[/b] to assign fast/strong,"
-            " then [b]s[/b] to save & return.",
+            "[b]Onboarding.[/b]  Paste an api key and press [b]Enter[/b] to save."
+            "  Focus a model row, press [b]v[/b] to verify (or [b]v[/b] on [b](all)[/b] for parallel)."
+            "  [b]f[/b]/[b]g[/b] assign to fast/strong. [b]s[/b] saves and returns.",
             id="intro",
         )
-        with VerticalScroll(id="scroll"):
+        with FocusScroll(id="scroll"):
             for state in self.provider_state.values():
                 yield ProviderSection(state)
         yield Static(self._status_text(), id="status")
@@ -205,19 +326,35 @@ class OnboardScreen(Screen[bool]):
 
     def on_mount(self) -> None:
         self.sub_title = str(self.config.path)
-        rows = list(self.query(ModelRow))
-        if rows:
-            rows[0].focus()
+        first = self.query(ModelRow).first()
+        if first is not None:
+            first.focus()
 
     # ----- status -------------------------------------------------------------
 
     def _status_text(self) -> str:
-        fast = f"{self.fast_choice['provider']}/{self.fast_choice['model']}" if self.fast_choice else "—"
-        strong = f"{self.strong_choice['provider']}/{self.strong_choice['model']}" if self.strong_choice else "—"
-        return f" fast: {fast}  ·  strong: {strong} "
+        fast = (
+            f"{self.fast_choice['provider']}/{self.fast_choice['model']}"
+            if self.fast_choice
+            else "—"
+        )
+        strong = (
+            f"{self.strong_choice['provider']}/{self.strong_choice['model']}"
+            if self.strong_choice
+            else "—"
+        )
+        return f" fast: {fast}     strong: {strong} "
 
     def _refresh_status(self) -> None:
         self.query_one("#status", Static).update(self._status_text())
+
+    def _set_saved_indicator(self, provider: str, on: bool) -> None:
+        try:
+            self.query_one(f"#saved-{provider}", Static).update(
+                "[$success]saved[/$success]" if on else ""
+            )
+        except Exception:
+            pass
 
     # ----- inline api_key persistence ----------------------------------------
 
@@ -226,18 +363,25 @@ class OnboardScreen(Screen[bool]):
         if provider not in self.provider_state:
             return
         new_key = event.value.strip()
-        self.provider_state[provider].api_key = new_key
-        # reset verification statuses for this provider — the key changed
-        self.provider_state[provider].statuses.clear()
-        for row in self.query(ModelRow):
-            if row.provider == provider:
-                row.status = "?"
-                row._refresh()
+        state = self.provider_state[provider]
+        # If key changed, drop stale verification statuses.
+        if new_key != state.api_key:
+            state.model_status.clear()
+            for row in self.query(ModelRow):
+                if row.provider == provider:
+                    row.status = UNKNOWN
+                    row._refresh()
+        state.api_key = new_key
+        state.key_saved = bool(new_key)
+        # Defensive: keep the Input showing the value we just read.
+        event.input.value = new_key
+        self._set_saved_indicator(provider, state.key_saved)
         self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
-        self.notify(
-            f"saved {provider} api_key to {self.config.path}",
-            severity="information",
-        )
+        if new_key:
+            self.notify(
+                f"saved {provider} api_key to {self.config.path}",
+                severity="information",
+            )
 
     def _persist_yaml(
         self,
@@ -247,7 +391,11 @@ class OnboardScreen(Screen[bool]):
     ) -> None:
         cfg = Config(
             providers={
-                name: {"base_url": s.base_url, "api_key": s.api_key}
+                name: {
+                    "base_url": s.base_url,
+                    "api_key": s.api_key,
+                    "model_status": dict(s.model_status),
+                }
                 for name, s in self.provider_state.items()
             },
             slots=self.config.slots,
@@ -264,21 +412,51 @@ class OnboardScreen(Screen[bool]):
     def _focused_row(self) -> ModelRow | None:
         return self.focused if isinstance(self.focused, ModelRow) else None
 
+    def _focused_all(self) -> VerifyAllRow | None:
+        return self.focused if isinstance(self.focused, VerifyAllRow) else None
+
     async def action_verify(self) -> None:
+        all_row = self._focused_all()
+        if all_row is not None:
+            await self._verify_all(all_row.provider)
+            return
         row = self._focused_row()
         if row is None:
-            self.notify("focus a model row first (Tab to navigate)", severity="warning")
+            self.notify(
+                "focus a model row or the (all) row first", severity="warning"
+            )
             return
         state = self.provider_state[row.provider]
         if not state.api_key:
             self.notify(f"set {row.provider}'s api_key first", severity="warning")
             return
-        row.status = "…"
+        row.status = VERIFYING
         row._refresh()
         ok = await verify_model(state.base_url, state.api_key, row.model)
-        row.status = "✓" if ok else "✗"
-        state.statuses[row.model] = row.status
+        row.status = VERIFIED if ok else FAILED
+        state.model_status[row.model] = row.status
         row._refresh()
+        self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
+
+    async def _verify_all(self, provider: str) -> None:
+        state = self.provider_state[provider]
+        if not state.api_key:
+            self.notify(f"set {provider}'s api_key first", severity="warning")
+            return
+        rows = [r for r in self.query(ModelRow) if r.provider == provider]
+        if not rows:
+            return
+        for r in rows:
+            r.status = VERIFYING
+            r._refresh()
+        results = await verify_models(
+            state.base_url, state.api_key, [r.model for r in rows]
+        )
+        for r in rows:
+            r.status = VERIFIED if results[r.model] else FAILED
+            state.model_status[r.model] = r.status
+            r._refresh()
+        self._persist_yaml(fast=self.fast_choice, strong=self.strong_choice)
 
     def action_set_fast(self) -> None:
         self._assign("fast")
@@ -288,7 +466,7 @@ class OnboardScreen(Screen[bool]):
 
     def _assign(self, slot_name: str) -> None:
         row = self._focused_row()
-        if row is None or row.status != "✓":
+        if row is None or row.status != VERIFIED:
             self.notify("focus a verified (✓) model first", severity="warning")
             return
         choice = {"provider": row.provider, "model": row.model}

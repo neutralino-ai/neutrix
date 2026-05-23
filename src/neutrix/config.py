@@ -150,10 +150,7 @@ def save_config(
     out = path or config.path
     data: dict[str, Any] = {
         "providers": {
-            name: {
-                "base_url": (prov or {}).get("base_url", ""),
-                "api_key": (prov or {}).get("api_key", ""),
-            }
+            name: _serialize_provider(prov)
             for name, prov in config.providers.items()
         },
         "fast": fast if fast is not None else (config.slots.get("fast") or {}),
@@ -161,6 +158,19 @@ def save_config(
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return out
+
+
+def _serialize_provider(prov: Any) -> dict[str, Any]:
+    """Provider entries write `model_status` only when non-empty."""
+    prov = prov or {}
+    out: dict[str, Any] = {
+        "base_url": prov.get("base_url", ""),
+        "api_key": prov.get("api_key", ""),
+    }
+    status = prov.get("model_status") or {}
+    if status:
+        out["model_status"] = {k: v for k, v in status.items() if v in ("verified", "failed")}
     return out
 
 
