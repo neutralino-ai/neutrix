@@ -80,6 +80,32 @@ async def test_agent_loop_appends_user_and_assistant_once():
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_emits_final_assistant_when_no_tokens_streamed():
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "final only"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ]
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=False, llm=llm)
+
+    events = [event async for event in agent.stream_reply("hi")]
+
+    assert [(event.kind, event.data) for event in events] == [
+        ("assistant", "final only"),
+        ("done", None),
+    ]
+    assert agent.messages[-1] == {"role": "assistant", "content": "final only"}
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_runs_tools_then_samples_follow_up(monkeypatch):
     monkeypatch.setattr(
         "neutrix.agent_loop.get_schemas",

@@ -5,12 +5,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from neutrix.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentEvent
 from neutrix.config import Config, Slot
 from neutrix.onboard import KeyInput
-from neutrix.tui import Message, NeutrixApp
+from neutrix.tui import DraftInput, Message, NeutrixApp
 
 
 def _slot() -> Slot:
@@ -99,6 +99,14 @@ class ErrorAgent(StreamingAgent):
         yield AgentEvent("error", "model failed")
 
 
+class FinalOnlyAgent(StreamingAgent):
+    async def stream_reply(self, user_text: str):
+        self.messages.append({"role": "user", "content": user_text})
+        yield AgentEvent("assistant", "final only")
+        self.messages.append({"role": "assistant", "content": "final only"})
+        yield AgentEvent("done")
+
+
 @pytest.mark.asyncio
 async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
     app = NeutrixApp(StreamingAgent(), config=_config(tmp_path))
@@ -106,15 +114,17 @@ async def test_main_chat_mount_shows_system_prompt_and_composer(tmp_path: Path):
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        input_box = app.query_one("#input", Input)
+        input_box = app.query_one("#input", DraftInput)
         composer = app.query_one("#composer")
         messages = list(app.query(Message))
 
         assert [message.role for message in messages] == ["system"]
         assert DEFAULT_SYSTEM_PROMPT in messages[0]._content
-        assert messages[0].border_title == "System"
+        assert messages[0].border_title in (None, "")
         assert messages[0].has_class("block")
+        assert messages[0].has_class("role-system")
         assert input_box.parent is composer
+        assert input_box.highlight_cursor_line is False
         assert composer.parent is app.query_one("#blocks")
         assert composer.has_class("block")
         assert composer.has_class("role-user")
@@ -129,7 +139,7 @@ async def test_slash_command_feedback_stays_outside_model_blocks(tmp_path: Path)
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_box = app.query_one("#input", Input)
+        input_box = app.query_one("#input", DraftInput)
         input_box.value = "/help"
 
         await pilot.press("enter")
@@ -152,7 +162,7 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_box = app.query_one("#input", Input)
+        input_box = app.query_one("#input", DraftInput)
         input_box.value = "hi"
 
         await pilot.press("enter")
@@ -190,6 +200,70 @@ async def test_submit_streams_reply_and_shows_busy_indicator(tmp_path: Path):
         assert app.query_one("#composer").has_class("role-user")
 
 
+@pytest.mark.parametrize("shortcut", ["shift+enter", "alt+enter", "ctrl+j"])
+@pytest.mark.asyncio
+async def test_draft_newline_shortcuts_insert_linebreak(
+    tmp_path: Path, shortcut: str
+):
+    app = NeutrixApp(SpyAgent(), config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        input_box.value = "line one"
+        input_box.move_cursor((0, len("line one")))
+
+        await pilot.press(shortcut)
+        await pilot.pause()
+
+        assert input_box.value == "line one\n"
+
+
+@pytest.mark.asyncio
+async def test_draft_enter_submits_multiline_text(tmp_path: Path):
+    agent = SpyAgent()
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        input_box.value = "line one\nline two"
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if agent.streamed_texts:
+                break
+
+        assert agent.streamed_texts == ["line one\nline two"]
+
+
+@pytest.mark.asyncio
+async def test_final_only_assistant_event_renders_llm_block(tmp_path: Path):
+    agent = FinalOnlyAgent()
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input", DraftInput)
+        input_box.value = "hi"
+
+        await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            messages = list(app.query(Message))
+            if messages and messages[-1].role == "assistant":
+                break
+
+        messages = list(app.query(Message))
+        assert [message.role for message in messages] == [
+            "system",
+            "user",
+            "assistant",
+        ]
+        assert messages[-1]._content == "final only"
+        assert messages[-1].border_title == "LLM"
+
+
 @pytest.mark.asyncio
 async def test_model_error_restores_editable_draft(tmp_path: Path):
     agent = ErrorAgent()
@@ -197,7 +271,7 @@ async def test_model_error_restores_editable_draft(tmp_path: Path):
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_box = app.query_one("#input", Input)
+        input_box = app.query_one("#input", DraftInput)
         input_box.value = "hi"
 
         await pilot.press("enter")
@@ -227,7 +301,7 @@ async def test_onboard_key_submit_does_not_become_chat_message(tmp_path: Path):
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        input_box = app.query_one("#input", Input)
+        input_box = app.query_one("#input", DraftInput)
         input_box.value = "/onboard"
         await pilot.press("enter")
         await pilot.pause()

@@ -66,6 +66,7 @@ class Agent:
         while True:
             try:
                 assistant_msg: dict[str, Any] | None = None
+                rendered_tokens = False
                 tools = get_schemas() if self.use_tools else None
                 assert self.llm is not None
                 async for event in self.llm.stream_response(
@@ -74,6 +75,7 @@ class Agent:
                     tools=tools,
                 ):
                     if event.kind == "token":
+                        rendered_tokens = True
                         yield AgentEvent("token", event.data)
                     elif event.kind == "assistant":
                         response = event.data
@@ -85,6 +87,9 @@ class Agent:
                 if assistant_msg is None:
                     assistant_msg = {"role": "assistant", "content": None}
                 self.messages.append(assistant_msg)
+                content = assistant_msg.get("content")
+                if isinstance(content, str) and content and not rendered_tokens:
+                    yield AgentEvent("assistant", content)
 
                 tool_calls = self._tool_calls(assistant_msg)
                 if not tool_calls:

@@ -14,6 +14,7 @@ Slash commands:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
@@ -21,12 +22,14 @@ from typing import ClassVar
 from loguru import logger
 from rich.markdown import Markdown
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.message import Message as TextualMessage
 from textual.timer import Timer
-from textual.widgets import Footer, Header, Input, Static
+from textual.widgets import Footer, Header, Static, TextArea
 
 from neutrix import __version__
 from neutrix.agent_loop import Agent, AgentEvent
@@ -46,7 +49,7 @@ ROLE_STYLE = {
 ROLE_LABEL = {
     "user": "User",
     "assistant": "LLM",
-    "system": "System",
+    "system": "",
     "tool": "Tool",
     "error": "Error",
 }
@@ -59,6 +62,57 @@ NOTICE_STYLE = {
 }
 
 
+class DraftInput(TextArea):
+    """Multiline chat draft that keeps Enter as submit."""
+
+    @dataclass
+    class Submitted(TextualMessage):
+        draft: DraftInput
+        value: str
+
+        @property
+        def control(self) -> DraftInput:
+            return self.draft
+
+    def __init__(self, *, placeholder: str, id: str) -> None:
+        super().__init__(
+            "",
+            id=id,
+            placeholder=placeholder,
+            compact=True,
+            highlight_cursor_line=False,
+            show_line_numbers=False,
+            soft_wrap=True,
+        )
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, value: str) -> None:
+        self.load_text(value)
+
+    async def _on_key(self, event: events.Key) -> None:
+        if self.disabled or self.read_only:
+            await super()._on_key(event)
+            return
+
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self, self.text))
+            return
+
+        if event.key in {"shift+enter", "alt+enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+
+        await super()._on_key(event)
+
+
 class Message(Static):
     """Single message bubble; updated in-place during streaming."""
 
@@ -67,7 +121,9 @@ class Message(Static):
         self.role = role
         self._content = content
         self._markdown = markdown
-        self.border_title = ROLE_LABEL.get(role, role.title())
+        label = ROLE_LABEL.get(role, role.title())
+        if label:
+            self.border_title = label
         self._refresh()
 
     def append(self, text: str) -> None:
@@ -92,21 +148,21 @@ class NeutrixApp(App):
     #chat {
         height: 1fr;
         width: 1fr;
-        padding: 1 0;
+        padding: 0;
         align: left top;
     }
 
     #blocks {
         height: 1fr;
         width: 1fr;
-        padding: 0 0 1 0;
+        padding: 0;
     }
 
     .block {
         width: 1fr;
         height: auto;
         margin: 0 0 1 0;
-        padding: 0 1;
+        padding: 0;
         border: solid $surface;
         background: $surface;
     }
@@ -114,7 +170,7 @@ class NeutrixApp(App):
     #thinking {
         display: none;
         height: 1;
-        margin: 0 0 1 0;
+        margin: 0;
         color: $warning;
     }
     #thinking.active {
@@ -123,24 +179,28 @@ class NeutrixApp(App):
     #input {
         height: 3;
         border: none;
+        padding: 0;
         background: $surface;
-        padding: 0 1;
     }
     #input:focus {
-        background: $boost;
+        background: $surface;
     }
     #input:disabled {
         color: $text-muted;
+        background: $surface;
+    }
+    #input .text-area--cursor-line {
+        background: $surface;
     }
     #notice {
         min-height: 1;
         max-height: 8;
-        margin: 0 2;
+        margin: 0 1;
         color: $text-muted;
     }
     #status {
         height: 1;
-        margin: 0 2;
+        margin: 0 1;
         color: $text-muted;
     }
 
@@ -154,8 +214,8 @@ class NeutrixApp(App):
         color: $text;
     }
     .role-system {
-        border: solid $warning;
-        background: $panel;
+        border: none;
+        background: $background;
         color: $warning;
     }
     .role-tool {
@@ -193,7 +253,7 @@ class NeutrixApp(App):
                 with Vertical(id="composer", classes="block role-user draft") as composer:
                     composer.border_title = ROLE_LABEL["user"]
                     yield Static("", id="thinking")
-                    yield Input(
+                    yield DraftInput(
                         placeholder="Message the assistant  (/help for commands)",
                         id="input",
                     )
@@ -205,7 +265,7 @@ class NeutrixApp(App):
         self.title = f"neutrix v{__version__}"
         self._refresh_subtitle()
         self._render_model_blocks()
-        self.query_one("#input", Input).focus()
+        self.query_one("#input", DraftInput).focus()
 
     # ----- UI helpers ---------------------------------------------------------
 
@@ -274,7 +334,7 @@ class NeutrixApp(App):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         try:
-            input_box = self.query_one("#input", Input)
+            input_box = self.query_one("#input", DraftInput)
             thinking = self.query_one("#thinking", Static)
         except NoMatches:
             return
@@ -311,7 +371,7 @@ class NeutrixApp(App):
             return
         self._thinking_tick += 1
 
-    def _is_chat_input(self, input_widget: Input) -> bool:
+    def _is_chat_input(self, input_widget: DraftInput) -> bool:
         try:
             composer = self.query_one("#composer", Vertical)
         except NoMatches:
@@ -320,14 +380,14 @@ class NeutrixApp(App):
 
     # ----- input handler ------------------------------------------------------
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if not self._is_chat_input(event.input):
+    async def on_draft_input_submitted(self, event: DraftInput.Submitted) -> None:
+        if not self._is_chat_input(event.draft):
             return
         event.stop()
         text = event.value.strip()
         if not text or self._busy:
             return
-        event.input.value = ""
+        event.draft.value = ""
         if text.startswith("/"):
             await self._run_command(text)
             return
@@ -355,12 +415,12 @@ class NeutrixApp(App):
     def _handle_event(
         self, ev: AgentEvent, assistant: Message | None
     ) -> Message | None:
-        if ev.kind == "token":
+        if ev.kind in {"token", "assistant"}:
             if assistant is None:
                 assistant = self._post(
                     "assistant", "", markdown=self.render_markdown
                 )
-            assistant.append(ev.data)
+            assistant.append(str(ev.data))
             self.query_one("#blocks", VerticalScroll).scroll_end(animate=False)
             return assistant
         elif ev.kind == "tool_call":

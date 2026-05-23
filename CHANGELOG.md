@@ -4,6 +4,35 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.4] - 2026-05-24
+
+### Changed
+- Main chat blocks are more compact: the chat container no longer adds outer
+  padding, transcript blocks keep only a tiny one-row gap between blocks, and
+  the notice/status lines use tighter side margins.
+- Message and draft block text now sits closer to the block edge by removing
+  the extra inner padding column.
+- The editable user draft now uses a compact multiline `TextArea` while
+  keeping the same outer user-block styling as committed user messages.
+- The draft editor keeps one background surface when focused instead of
+  showing a second inner focus background.
+- The system prompt now renders as warning-colored text on the screen
+  background, without a border or title.
+
+### Fixed
+- Assistant content is now rendered even when an OpenAI-compatible provider
+  emits only the final assistant message and no streamed token deltas.
+
+### Added
+- Draft newline shortcuts: Shift+Enter, Alt+Enter, and Ctrl+J insert a line
+  break while Enter still submits.
+- Regression coverage for final-only assistant responses and multiline draft
+  submit/newline behavior.
+
+  Total suite: 61 tests.
+
+See [docs/PRDs/v0.6.4-main-chat-compact-draft.md](docs/PRDs/v0.6.4-main-chat-compact-draft.md).
+
 ## [v0.6.3] - 2026-05-23
 
 ### Changed
