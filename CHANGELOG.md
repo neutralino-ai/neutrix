@@ -4,6 +4,38 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.8] - 2026-05-24
+
+### Changed
+- The main chat now launches as an append-only terminal chat instead of a
+  fullscreen Textual screen, so long conversations use normal terminal
+  scrollback and short conversations do not reserve a full screen.
+- Input now uses a `prompt_toolkit` multiline draft editor with normal
+  readline-style editing keys, including Ctrl+A and Ctrl+K.
+- The terminal chat now has an explicit view/controller split: the view owns
+  prompt rendering and transcript output, while the controller owns commands,
+  queueing, agent events, and model/tool work.
+- The prompt stays active while the assistant is working; prompts submitted
+  during an active response are queued and run in order.
+- System, user, and assistant transcript content is distinguished by role
+  color instead of `system:`, `user:`, or `assistant:` labels.
+- Chat logging now writes to `~/.cache/neutrix/neutrix.log` instead of the
+  interactive terminal.
+- Tool dispatch now runs off the UI event loop so blocking tools such as
+  `run_shell` do not freeze the draft editor.
+
+### Added
+- Folded one-line tool-result summaries with exact line counts and approximate
+  token counts, plus `/tool` and `/tool N` commands for listing or expanding
+  stored tool results.
+- Regression coverage for folded tool summaries, loaded-session tool
+  summaries, readline-style draft editing helpers, queued input while the
+  agent is busy, CLI terminal-chat launch, and non-blocking tool dispatch.
+
+  Total suite: 77 tests.
+
+See [docs/PRDs/v0.6.8-append-only-terminal-chat.md](docs/PRDs/v0.6.8-append-only-terminal-chat.md).
+
 ## [v0.6.7] - 2026-05-24
 
 ### Changed

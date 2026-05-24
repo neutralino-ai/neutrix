@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "openai>=1.50.0",
     "textual>=0.80.0",
+    "prompt_toolkit>=3.0.0",
     "pyyaml>=6.0",
     "loguru>=0.7.0",
     "rich>=13.7.0",

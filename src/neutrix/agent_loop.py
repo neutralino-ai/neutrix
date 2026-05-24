@@ -1,6 +1,7 @@
 """Append-only agent loop over a streaming LLM client."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -109,7 +110,7 @@ class Agent:
                         "tool_call",
                         {"name": name, "arguments": arguments},
                     )
-                    result = dispatch(name, arguments)
+                    result = await asyncio.to_thread(dispatch, name, arguments)
                     yield AgentEvent(
                         "tool_result",
                         {"name": name, "result": result},

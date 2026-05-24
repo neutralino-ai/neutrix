@@ -25,7 +25,7 @@ def test_version_string():
     assert __version__
 
 
-def test_cli_launches_main_tui_with_terminal_owned_mouse(monkeypatch, tmp_path):
+def test_cli_launches_append_only_terminal_chat(monkeypatch, tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("ok")
     fast_slot = Slot(
@@ -52,22 +52,24 @@ def test_cli_launches_main_tui_with_terminal_owned_mouse(monkeypatch, tmp_path):
     )
     seen: dict[str, object] = {}
 
-    class DummyApp:
+    class DummyChat:
         def __init__(self, *args, **kwargs):
             seen["init"] = (args, kwargs)
 
-        def run(self, **kwargs):
-            seen["run"] = kwargs
+        def run(self):
+            seen["run"] = True
 
     monkeypatch.setattr(cli, "CONFIG_PATH", path)
     monkeypatch.setattr(cli, "load_config", lambda: config)
     monkeypatch.setattr(cli, "resolve_initial_slot", lambda _config: (fast_slot, strong_slot))
-    monkeypatch.setattr("neutrix.tui.NeutrixApp", DummyApp)
+    monkeypatch.setattr("neutrix.terminal_chat.TerminalChat", DummyChat)
 
     assert cli.main([]) == 0
-    assert seen["run"] == {"mouse": False}
-    args, _kwargs = seen["init"]
+    assert seen["run"] is True
+    args, kwargs = seen["init"]
     assert args[0].slot is strong_slot
+    assert kwargs["config"] is config
+    assert kwargs["render_markdown"] is True
 
 
 # ----- config ----------------------------------------------------------------

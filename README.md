@@ -1,10 +1,13 @@
 # neutrix
 
-A simple multi-provider TUI agent for DeepSeek, GLM, and Claude (via the
+A simple multi-provider terminal agent for DeepSeek, GLM, and Claude (via the
 IHEP gateway), all driven through a single OpenAI SDK client.
 
-- **Textual** TUI with final assistant responses
-- Two named model slots — **`fast`** and **`strong`** — switch in-TUI with `/fast` / `/strong`
+- Append-only terminal chat that uses normal scrollback instead of a fullscreen app
+- Multiline draft editor with normal readline-style editing keys
+- Async prompt queue — keep typing while a response is running
+- Folded one-line tool results, expandable with `/tool N`
+- Two named model slots — **`fast`** and **`strong`** — switch in-chat with `/fast` / `/strong`
 - OpenAI-style **tool calling** (built-in: `read_file`, `write_file`, `list_dir`, `run_shell`)
 - Save / load conversations as JSON
 - One YAML config at `~/.config/neutrix/config.yaml`, no env vars
@@ -51,13 +54,13 @@ appending another entry under `providers:`.
 ## Run
 
 ```bash
-neutrix                              # open TUI, fast slot active
+neutrix                              # open terminal chat, strong slot preferred
 neutrix --load sessions/last.json    # resume a saved session
 neutrix --no-tools                   # disable tool calling
 neutrix --version
 ```
 
-### Slash commands in the TUI
+### Slash commands in chat
 
 | Command                  | Meaning                                       |
 |--------------------------|-----------------------------------------------|
@@ -70,9 +73,14 @@ neutrix --version
 | `/load PATH`             | load session                                  |
 | `/clear`                 | reset conversation                            |
 | `/tools` / `/tools on\|off` | list or toggle tool calling                |
+| `/tool [N]`              | list folded tool results or expand one        |
 | `/quit`                  | exit                                          |
 
-`Ctrl+C` quits. `Ctrl+L` clears the command notice line.
+`Enter` submits. `Ctrl+J` or `Alt+Enter` inserts a newline. Standard
+readline-style keys such as `Ctrl+A` and `Ctrl+K` work in the draft editor.
+Prompts submitted while the assistant is still responding are queued and run in
+order.
+`Ctrl+C` or EOF exits the terminal chat.
 
 ## Development
 

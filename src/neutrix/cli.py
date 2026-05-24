@@ -1,8 +1,9 @@
-"""`neutrix` CLI entry point: load config, build Agent, launch TUI."""
+"""`neutrix` CLI entry point: load config, build Agent, launch terminal chat."""
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from loguru import logger
 
@@ -22,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="neutrix",
         description=(
-            "A multi-provider TUI agent (DeepSeek, GLM, Claude via IHEP). "
+            "A multi-provider terminal agent (DeepSeek, GLM, Claude via IHEP). "
             "Configure providers and the fast/strong slots in "
             f"{CONFIG_PATH}."
         ),
@@ -89,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     assert slot is not None  # for type-checker; guarded above
 
     agent = Agent(slot=slot, use_tools=not args.no_tools)
+    _configure_chat_logging()
 
     if args.load:
         try:
@@ -99,11 +101,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"neutrix: error loading session: {e}", file=sys.stderr)
             return 1
 
-    from neutrix.tui import NeutrixApp
+    from neutrix.terminal_chat import TerminalChat
 
-    app = NeutrixApp(agent, config=config, render_markdown=not args.no_markdown)
-    app.run(mouse=False)
+    chat = TerminalChat(agent, config=config, render_markdown=not args.no_markdown)
+    chat.run()
     return 0
+
+
+def _configure_chat_logging() -> None:
+    """Keep operational logs out of the interactive terminal surface."""
+    log_path = Path("~/.cache/neutrix/neutrix.log").expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.remove()
+    logger.add(log_path, rotation="1 MB", retention=3, level="INFO")
 
 
 if __name__ == "__main__":

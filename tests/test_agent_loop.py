@@ -1,6 +1,8 @@
 """Tests for the model/tool continuation loop."""
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -213,3 +215,70 @@ async def test_agent_loop_runs_tools_then_samples_follow_up(monkeypatch):
     assert agent.messages[3]["content"] == 'echo:{"x": 1}'
     assert len(llm.calls) == 2
     assert llm.calls[1]["messages"][-1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_tool_dispatch_does_not_block_event_loop(monkeypatch):
+    monkeypatch.setattr(
+        "neutrix.agent_loop.get_schemas",
+        lambda: [{"type": "function", "function": {"name": "slow"}}],
+    )
+
+    def slow_dispatch(name: str, arguments: str) -> str:
+        time.sleep(0.2)
+        return f"{name}:{arguments}"
+
+    monkeypatch.setattr("neutrix.agent_loop.dispatch", slow_dispatch)
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "slow",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason="tool_calls",
+                    ),
+                )
+            ],
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "done"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ],
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=True, llm=llm)
+
+    async def collect_events():
+        return [event async for event in agent.stream_reply("hi")]
+
+    task = asyncio.create_task(collect_events())
+    start = time.perf_counter()
+    await asyncio.sleep(0.05)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.15
+    events = await asyncio.wait_for(task, timeout=1)
+    assert [event.kind for event in events] == [
+        "tool_call",
+        "tool_result",
+        "assistant",
+        "done",
+    ]
