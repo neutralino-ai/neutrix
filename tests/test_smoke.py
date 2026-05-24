@@ -25,7 +25,7 @@ def test_version_string():
     assert __version__
 
 
-def test_cli_launches_main_tui_without_mouse_reporting(monkeypatch, tmp_path):
+def test_cli_launches_main_tui_with_terminal_owned_mouse(monkeypatch, tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("ok")
     fast_slot = Slot(

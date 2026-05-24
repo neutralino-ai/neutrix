@@ -9,7 +9,9 @@ Project guidance for any AI coding assistant working in this repo.
 | Module | Single responsibility |
 |---|---|
 | `config.py` | Load + validate `~/.config/neutrix/config.yaml`. Nothing else. |
-| `agent.py` | Stream chat completions and dispatch tool calls. |
+| `agent.py` | Compatibility facade for the public agent API. |
+| `agent_loop.py` | Conversation state and tool-call continuation. |
+| `llm.py` | One final OpenAI-compatible chat completion request. |
 | `tools.py` | Built-in tools the model can call (read/write/list/shell). |
 | `session.py` | JSON save/load of conversations. |
 | `tui.py` | Textual UI — rendering, input, slash commands. |

@@ -58,6 +58,12 @@ class Agent:
         assert self.llm is not None
         self.llm.switch(slot)
 
+    def supports_tools(self) -> bool:
+        return supports_openai_tools(self.slot)
+
+    def effective_tools_enabled(self) -> bool:
+        return self.use_tools and self.supports_tools()
+
     async def stream_reply(self, user_text: str) -> AsyncIterator[AgentEvent]:
         """Append a user turn and continue while tools require follow-up."""
 
@@ -67,7 +73,7 @@ class Agent:
             try:
                 assistant_msg: dict[str, Any] | None = None
                 rendered_tokens = False
-                tools = get_schemas() if self.use_tools else None
+                tools = get_schemas() if self.effective_tools_enabled() else None
                 assert self.llm is not None
                 async for event in self.llm.stream_response(
                     model=self.slot.model,
@@ -116,8 +122,9 @@ class Agent:
                         }
                     )
             except Exception as exc:
-                logger.exception("agent loop failed")
-                yield AgentEvent("error", str(exc))
+                error = compact_error(exc)
+                logger.warning("agent loop failed: {}", error)
+                yield AgentEvent("error", error)
                 return
 
     def _tool_calls(self, assistant_msg: dict[str, Any]) -> list[dict[str, str]]:
@@ -140,3 +147,19 @@ class Agent:
                 }
             )
         return tool_calls
+
+
+def supports_openai_tools(slot: Slot) -> bool:
+    """Whether this slot accepts OpenAI Chat Completions function tools."""
+    model = slot.model.lower()
+    provider = slot.provider.lower()
+    if provider == "ihep" and model.startswith("anthropic/"):
+        return False
+    return True
+
+
+def compact_error(exc: Exception, *, limit: int = 600) -> str:
+    text = str(exc).replace("\n", " ").strip() or exc.__class__.__name__
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."

@@ -322,12 +322,20 @@ class NeutrixApp(App):
     # ----- UI helpers ---------------------------------------------------------
 
     def _status_text(self) -> str:
-        tools = "on" if self.agent.use_tools else "off"
+        tools = self._tool_status()
         s = self.agent.slot
         return (
             f" {s.provider} · {s.model} · tools:{tools} · "
             f"msgs:{len(self.agent.messages)} "
         )
+
+    def _tool_status(self) -> str:
+        if not self.agent.use_tools:
+            return "off"
+        enabled = getattr(self.agent, "effective_tools_enabled", None)
+        if callable(enabled) and not enabled():
+            return "unsupported"
+        return "on"
 
     def _refresh_status(self) -> None:
         self.query_one("#messages-status", Static).update(self._status_text())
@@ -616,7 +624,7 @@ class NeutrixApp(App):
         lines = ["available tools:"]
         for t in BUILTIN_TOOLS.values():
             lines.append(f"  • {t.name} — {t.description}")
-        lines.append(f"status: {'on' if self.agent.use_tools else 'off'}")
+        lines.append(f"status: {self._tool_status()}")
         self._notice("\n".join(lines))
 
     async def _cmd_onboard(self, args: list[str]) -> None:

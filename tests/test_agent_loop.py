@@ -20,6 +20,16 @@ def _slot() -> Slot:
     )
 
 
+def _ihep_claude_slot() -> Slot:
+    return Slot(
+        name="strong",
+        provider="ihep",
+        model="anthropic/claude-opus-4-7",
+        base_url="https://aiapi.ihep.ac.cn/apiv2/",
+        api_key="sk-test",
+    )
+
+
 class FakeLLM:
     def __init__(self, rounds: list[list[LLMEvent]]) -> None:
         self.rounds = rounds
@@ -103,6 +113,37 @@ async def test_agent_loop_emits_final_assistant_when_no_tokens_streamed():
         ("done", None),
     ]
     assert agent.messages[-1] == {"role": "assistant", "content": "final only"}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_omits_openai_tools_for_ihep_anthropic_models(monkeypatch):
+    monkeypatch.setattr(
+        "neutrix.agent_loop.get_schemas",
+        lambda: [{"type": "function", "function": {"name": "echo"}}],
+    )
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "hello"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ]
+        ]
+    )
+    agent = Agent(slot=_ihep_claude_slot(), use_tools=True, llm=llm)
+
+    events = [event async for event in agent.stream_reply("hi")]
+
+    assert [(event.kind, event.data) for event in events] == [
+        ("assistant", "hello"),
+        ("done", None),
+    ]
+    assert llm.calls[0]["tools"] is None
+    assert not agent.effective_tools_enabled()
 
 
 @pytest.mark.asyncio

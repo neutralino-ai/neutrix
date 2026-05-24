@@ -4,6 +4,34 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.6.7] - 2026-05-24
+
+### Changed
+- The LLM adapter now uses a final-only Chat Completions request with
+  `stream=False`, emitting one final assistant event instead of token deltas.
+- Main chat remains in terminal-owned mouse mode with Textual mouse reporting
+  disabled, preserving native selection and copy/paste behavior.
+- IHEP Anthropic models keep using the OpenAI SDK but send system prompt text
+  through SDK `extra_body` instead of an outbound `system` role message.
+- IHEP Anthropic models now report `tools:unsupported` and omit OpenAI
+  function-tool schemas that the gateway currently rejects.
+- Project guidance now reflects the existing `agent_loop.py` / `llm.py`
+  responsibilities instead of the older monolithic agent wording.
+
+### Fixed
+- Assistant replies now render reliably for final-only model responses.
+- The IHEP Claude gateway no longer receives rejected OpenAI-style `system`
+  role or `type:function` tool payloads.
+
+### Added
+- Regression coverage for final-only OpenAI SDK requests, IHEP Anthropic
+  system prompt forwarding, unsupported-tool status, and preserved tool
+  continuation for compatible models.
+
+  Total suite: 70 tests.
+
+See [docs/PRDs/v0.6.7-terminal-mouse-final-llm.md](docs/PRDs/v0.6.7-terminal-mouse-final-llm.md).
+
 ## [v0.6.6] - 2026-05-24
 
 ### Changed

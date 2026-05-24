@@ -3,7 +3,7 @@
 A simple multi-provider TUI agent for DeepSeek, GLM, and Claude (via the
 IHEP gateway), all driven through a single OpenAI SDK client.
 
-- **Textual** TUI with streaming responses
+- **Textual** TUI with final assistant responses
 - Two named model slots — **`fast`** and **`strong`** — switch in-TUI with `/fast` / `/strong`
 - OpenAI-style **tool calling** (built-in: `read_file`, `write_file`, `list_dir`, `run_shell`)
 - Save / load conversations as JSON

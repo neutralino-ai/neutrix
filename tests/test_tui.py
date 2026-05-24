@@ -64,6 +64,25 @@ def test_default_system_prompt_is_simple_chatbot_prompt():
     assert agent.messages == [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
 
 
+@pytest.mark.asyncio
+async def test_status_marks_tools_unsupported_for_ihep_anthropic(tmp_path: Path):
+    slot = Slot(
+        name="strong",
+        provider="ihep",
+        model="anthropic/claude-opus-4-7",
+        base_url="https://aiapi.ihep.ac.cn/apiv2/",
+        api_key="sk-test",
+    )
+    agent = Agent(slot=slot, use_tools=True)
+    app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        status = _render_text(app.query_one("#messages-status", Static))
+        assert "tools:unsupported" in status
+
+
 class StreamingAgent:
     def __init__(self) -> None:
         self.slot = _slot()

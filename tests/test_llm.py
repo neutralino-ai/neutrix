@@ -1,7 +1,6 @@
-"""Tests for the OpenAI-compatible streaming adapter."""
+"""Tests for the OpenAI-compatible final-response adapter."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +20,17 @@ def _slot() -> Slot:
     )
 
 
-def _chunk(
+def _ihep_claude_slot() -> Slot:
+    return Slot(
+        name="strong",
+        provider="ihep",
+        model="anthropic/claude-opus-4-7",
+        base_url="https://aiapi.ihep.ac.cn/apiv2/",
+        api_key="sk-test",
+    )
+
+
+def _completion(
     *,
     content: str | None = None,
     tool_calls: list[Any] | None = None,
@@ -30,57 +39,50 @@ def _chunk(
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
-                delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+                message=SimpleNamespace(content=content, tool_calls=tool_calls),
                 finish_reason=finish_reason,
             )
         ]
     )
 
 
-def _tool_delta(
+def _tool_call(
     *,
-    index: int = 0,
     tool_id: str | None = None,
     name: str | None = None,
     arguments: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        index=index,
         id=tool_id,
+        type="function",
         function=SimpleNamespace(name=name, arguments=arguments),
     )
 
 
 class FakeCompletions:
-    def __init__(self, chunks: list[SimpleNamespace]) -> None:
-        self.chunks = chunks
+    def __init__(self, completion: Any) -> None:
+        self.completion = completion
         self.kwargs: dict[str, Any] | None = None
 
-    async def create(self, **kwargs: Any) -> AsyncIterator[SimpleNamespace]:
+    async def create(self, **kwargs: Any) -> Any:
         self.kwargs = kwargs
-        return self._stream()
-
-    async def _stream(self) -> AsyncIterator[SimpleNamespace]:
-        for chunk in self.chunks:
-            yield chunk
+        return self.completion
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_llm_streams_tokens_and_final_assistant_message():
+async def test_openai_chat_llm_emits_final_assistant_message_without_tokens():
     completions = FakeCompletions(
-        [
-            _chunk(content="hello "),
-            _chunk(
-                tool_calls=[
-                    _tool_delta(tool_id="call_1", name="echo", arguments='{"x"')
-                ]
-            ),
-            _chunk(content="world"),
-            _chunk(
-                tool_calls=[_tool_delta(arguments=": 1}")],
-                finish_reason="tool_calls",
-            ),
-        ]
+        _completion(
+            content="hello world",
+            tool_calls=[
+                _tool_call(
+                    tool_id="call_1",
+                    name="echo",
+                    arguments='{"x": 1}',
+                )
+            ],
+            finish_reason="tool_calls",
+        )
     )
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -94,8 +96,7 @@ async def test_openai_chat_llm_streams_tokens_and_final_assistant_message():
         )
     ]
 
-    assert [event.kind for event in events] == ["token", "token", "assistant"]
-    assert [event.data for event in events[:2]] == ["hello ", "world"]
+    assert [event.kind for event in events] == ["assistant"]
     response = events[-1].data
     assert isinstance(response, LLMResponse)
     assert response.finish_reason == "tool_calls"
@@ -108,7 +109,100 @@ async def test_openai_chat_llm_streams_tokens_and_final_assistant_message():
         }
     ]
     assert completions.kwargs is not None
-    assert completions.kwargs["stream"] is True
+    assert completions.kwargs["stream"] is False
     assert completions.kwargs["tools"] == [
         {"type": "function", "function": {"name": "echo"}}
     ]
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_llm_handles_dict_completion_payloads():
+    completions = FakeCompletions(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": "dict payload",
+                        "tool_calls": [
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "echo",
+                                    "arguments": '{"ok": true}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+    llm = OpenAIChatLLM(_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    events = [
+        event
+        async for event in llm.stream_response(
+            model="test-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    ]
+
+    response = events[-1].data
+    assert response.message == {
+        "role": "assistant",
+        "content": "dict payload",
+        "tool_calls": [
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {"name": "echo", "arguments": '{"ok": true}'},
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_ihep_anthropic_request_sends_system_prompt_via_sdk_extra_body():
+    completions = FakeCompletions(_completion(content="ok", finish_reason="stop"))
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    events = [
+        event
+        async for event in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "Say ok."},
+            ],
+        )
+    ]
+
+    assert [event.kind for event in events] == ["assistant"]
+    assert completions.kwargs is not None
+    assert completions.kwargs["stream"] is False
+    assert completions.kwargs["messages"] == [{"role": "user", "content": "Say ok."}]
+    assert completions.kwargs["extra_body"] == {"system": "Be brief."}
+
+
+@pytest.mark.asyncio
+async def test_ihep_anthropic_request_still_uses_openai_sdk_completion_create():
+    completions = FakeCompletions(_completion(content="ok", finish_reason="stop"))
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    events = [
+        event
+        async for event in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[{"role": "user", "content": "Say ok."}],
+        )
+    ]
+
+    assert [event.kind for event in events] == ["assistant"]
+    assert completions.kwargs is not None
+    assert completions.kwargs["messages"] == [{"role": "user", "content": "Say ok."}]
+    assert "extra_body" not in completions.kwargs
