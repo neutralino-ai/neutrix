@@ -22,7 +22,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
         "deepseek-ai/deepseek-v4-pro",
         "deepseek-ai/deepseek-v4-flash",
         "zhipu/glm-5.1",
-        "kimi/kimi-k2.6",
+        "moonshot/kimi-k2.6",
     ],
     "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
     "glm": ["glm-5.1", "glm-5.1-highspeed"],

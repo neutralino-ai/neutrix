@@ -31,10 +31,10 @@ from textual.message import Message as TextualMessage
 from textual.timer import Timer
 from textual.widgets import Static, TextArea
 
+from neutrix import transcript
 from neutrix.agent_loop import Agent, AgentEvent
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
-from neutrix.session import dump as session_dump
-from neutrix.session import load as session_load
+from neutrix.store import ChatStore, openai_to_record
 from neutrix.tools import BUILTIN_TOOLS
 
 ROLE_STYLE = {
@@ -587,11 +587,15 @@ class NeutrixApp(App):
         else:
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = Path("sessions") / f"{ts}.json"
-        out = session_dump(
+        store = ChatStore()
+        for raw in self.agent.messages:
+            if isinstance(raw, dict):
+                store.append_message(openai_to_record(raw))
+        out = transcript.save(
             path,
+            store,
             provider=self.agent.slot.provider,
             model=self.agent.slot.model,
-            messages=self.agent.messages,
         )
         self._notice(f"saved → {out}", severity="success")
 
@@ -599,8 +603,8 @@ class NeutrixApp(App):
         if not args:
             self._notice("usage: /load PATH", severity="error")
             return
-        payload = session_load(args[0])
-        self.agent.messages = payload["messages"]
+        _store, metadata = transcript.load(args[0])
+        self.agent.messages = list(metadata["raw_messages"])
         self._render_model_blocks()
         self._notice(
             f"loaded {args[0]} ({len(self.agent.messages)} msgs); "

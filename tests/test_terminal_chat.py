@@ -92,6 +92,17 @@ class BlockingAgent(ToolAgent):
         yield AgentEvent("done")
 
 
+def _render(value: object) -> str:
+    """Flatten a value that may be str or prompt_toolkit FormattedText
+    (an iterable of (style, text) tuples) into a single string for
+    substring assertions in tests."""
+    if isinstance(value, str):
+        return value
+    if hasattr(value, "__iter__"):
+        return "".join(text for _style, text in value)
+    return str(value)
+
+
 def _chat(
     agent: ToolAgent,
     tmp_path: Path,
@@ -248,11 +259,18 @@ async def test_terminal_chat_accepts_and_queues_input_while_agent_is_busy(
     input_values.put("second")
     for _ in range(20):
         await asyncio.sleep(0.01)
-        if "queued:1" in chat._status_text():
+        if chat.store.queued_user_messages:
             break
 
     assert chat._busy
-    assert "queued:1" in chat._status_text()
+    queued = chat.store.queued_user_messages
+    assert [q.text for q in queued] == ["second"]
+    # The visible queue is rendered ABOVE the input via the message
+    # supplier. The bottom toolbar is gone in v0.7.0 (it blinked
+    # during streaming output); /status is the on-demand replacement.
+    assert "queued:" not in chat._status_line()
+    rendered_message = _render(chat._queued_message())
+    assert "› second" in rendered_message  # noqa: RUF001 -- chosen UI glyph
 
     await agent.releases.put(None)
     assert await asyncio.wait_for(agent.started.get(), timeout=1) == "second"
@@ -279,8 +297,20 @@ def test_terminal_chat_tool_toggle_updates_status(tmp_path: Path) -> None:
     rendered = output.getvalue()
     assert "tool calling disabled" in rendered
     assert "tools:off" not in rendered
-    assert "tools:off" in chat._status_text()
+    assert "tools:off" in chat._status_line()
     assert agent.use_tools is False
+
+
+def test_terminal_chat_status_command_prints_current_state(tmp_path: Path) -> None:
+    """/status prints slot, provider/model, tool state, and msg count."""
+    agent = ToolAgent()
+    chat, output, _prompts = _chat(agent, tmp_path, ["/status", "/quit"])
+    chat.run()
+    rendered = output.getvalue()
+    assert "strong" in rendered
+    assert "test/strong-model" in rendered
+    assert "tools:on" in rendered
+    assert "msgs:1" in rendered  # only the system message at start
 
 
 def test_terminal_chat_folds_loaded_tool_messages_with_call_arguments(
@@ -315,3 +345,130 @@ def test_terminal_chat_folds_loaded_tool_messages_with_call_arguments(
         '<- [tool 1] read_file {"path": "README.md"} | folded | 1 lines | ~2 tokens'
         in rendered
     )
+
+
+@pytest.mark.asyncio
+async def test_terminal_chat_renders_multiple_queued_messages_in_order(
+    tmp_path: Path,
+) -> None:
+    """Covers PRD v0.7.0 acceptance steps 3 + 4 + 5 + 6:
+
+    - two messages submitted while the assistant is busy queue up,
+    - both show in the toolbar in submission order with the dim-style
+      QUEUED_PREFIX,
+    - the `queued:N` counter is absent,
+    - both are consumed in order when the assistant frees up.
+    """
+    agent = BlockingAgent()
+    output = StringIO()
+    input_values: Queue[str] = Queue()
+    prompts: list[str] = []
+
+    def input_func(prompt: str) -> str:
+        prompts.append(prompt)
+        return input_values.get(timeout=2)
+
+    chat = TerminalChat(
+        agent,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=input_func,
+        console=Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=100,
+        ),
+    )
+    task = asyncio.create_task(chat.run_async())
+
+    input_values.put("first")
+    assert await asyncio.wait_for(agent.started.get(), timeout=1) == "first"
+
+    # Two more messages typed while the agent is still blocked.
+    input_values.put("second")
+    input_values.put("third")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if len(chat.store.queued_user_messages) == 2:
+            break
+
+    queued = chat.store.queued_user_messages
+    assert [q.text for q in queued] == ["second", "third"]
+
+    # Status line: no queue rendering, no `queued:` substring.
+    assert "queued:" not in chat._status_line()
+
+    # Queue renders ABOVE the input cursor via the message supplier.
+    message = chat._queued_message()
+    assert not isinstance(
+        message, str
+    ), "queued_message must be FormattedText when queue is non-empty"
+    fragments = list(message)
+    queued_lines = [text for _style, text in fragments if text.startswith("› ")]  # noqa: RUF001
+    assert queued_lines == ["› second\n", "› third\n"]  # noqa: RUF001
+    # All fragments are dim-styled.
+    assert all(style == "fg:ansibrightblack" for style, _text in fragments)
+
+    # Release each turn; the queue must drain in submission order.
+    await agent.releases.put(None)
+    assert await asyncio.wait_for(agent.started.get(), timeout=1) == "second"
+    await agent.releases.put(None)
+    assert await asyncio.wait_for(agent.started.get(), timeout=1) == "third"
+    await agent.releases.put(None)
+    input_values.put("/quit")
+
+    await asyncio.wait_for(task, timeout=2)
+    assert agent.sent == ["first", "second", "third"]
+    assert chat.store.queued_user_messages == ()
+
+
+def test_terminal_chat_status_line_carries_only_status_no_queue(
+    tmp_path: Path,
+) -> None:
+    """`_status_line` is the on-demand status string used by /status.
+    It never contains queue rendering; the queue lives in
+    `_queued_message` (rendered above the input)."""
+    agent = ToolAgent()
+    chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
+    line = chat._status_line()
+    assert isinstance(line, str)
+    assert "queued:" not in line
+    assert "tools:" in line
+    assert "msgs:" in line
+    # No queue → empty message supplier output.
+    assert chat._queued_message() == ""
+
+
+def test_terminal_chat_save_and_load_round_trip_via_commands(tmp_path: Path) -> None:
+    """Covers PRD v0.7.0 acceptance step 7: /save then a fresh chat /load
+    reconstructs the conversation visibly and re-seeds the store."""
+    save_path = tmp_path / "session.json"
+
+    agent_a = ToolAgent()
+    chat_a, _output_a, _prompts_a = _chat(
+        agent_a,
+        tmp_path,
+        ["please list", f"/save {save_path}", "/quit"],
+    )
+    chat_a.run()
+    assert save_path.exists()
+
+    agent_b = ToolAgent()
+    chat_b, output_b, _prompts_b = _chat(
+        agent_b,
+        tmp_path,
+        [f"/load {save_path}", "/quit"],
+    )
+    chat_b.run()
+
+    rendered = output_b.getvalue()
+    assert "please list" in rendered
+    # Tool results render as folded summaries on load.
+    assert "[tool 1]" in rendered
+    assert "folded | 2 lines" in rendered
+    assert "done" in rendered
+    # The store mirrors the agent's loaded messages.
+    assert len(chat_b.store.messages) == len(agent_b.messages)
+    assert chat_b.store.messages[1].role == "user"
+    assert chat_b.store.messages[1].content == "please list"

@@ -16,7 +16,6 @@ from neutrix.config import (
     resolve_initial_slot,
     save_config,
 )
-from neutrix.session import dump, load
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 
 
@@ -327,18 +326,4 @@ def test_tool_dispatch_list_dir(tmp_path):
     assert "d sub" in result
 
 
-# ----- session ---------------------------------------------------------------
-
-
-def test_session_roundtrip(tmp_path):
-    messages = [
-        {"role": "system", "content": "be terse"},
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"},
-    ]
-    path = tmp_path / "s.json"
-    dump(path, provider="ihep", model="anthropic/claude-haiku-4-5", messages=messages)
-    payload = load(path)
-    assert payload["provider"] == "ihep"
-    assert payload["model"] == "anthropic/claude-haiku-4-5"
-    assert payload["messages"] == messages
+# transcript round-trip tests live in tests/test_transcript.py.

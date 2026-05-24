@@ -4,6 +4,55 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.7.0] - 2026-05-24
+
+### Added
+- New `neutrix.store` module exposing `ChatStore`, the canonical
+  in-memory record of a chat session (settled messages, queued user
+  inputs, in-progress assistant stream text, pending tool calls).
+- `ChatStore.changes()` async iterator for renderers to await store
+  mutations; multiple consecutive mutations between yields coalesce
+  into a single wake-up.
+- Queued user messages now render directly above the input cursor in
+  dim foreground, prefixed with `› `, sharing the input area's
+  background so the queue and input form one visual region. They go
+  through prompt_toolkit's `PromptSession.message`.
+- Screen updates are invalidation-driven: a background coroutine
+  subscribes to `ChatStore.changes()` and calls `app.invalidate()`
+  once per batch of mutations, removing the prior 0.5-s periodic
+  refresh and the rhythmic flicker it caused.
+- New `/status` command prints the current slot, provider/model,
+  tool state, and message count on demand. Replaces the persistent
+  bottom toolbar.
+
+### Changed
+- Renamed `neutrix.session` → `neutrix.transcript`. The on-disk JSON
+  format is unchanged; old `session.py`-written files load cleanly via
+  `transcript.load`.
+- `transcript.save` / `transcript.load` now operate on a `ChatStore`
+  rather than a separate `messages` list. `load` returns
+  `(store, metadata)` where `metadata` keeps `raw_messages` for callers
+  still feeding the agent's OpenAI-format list.
+- `TerminalChat` mirrors agent events into its own `ChatStore`. Pending
+  tool calls and the user queue now live on the store rather than as
+  private attributes.
+
+### Removed
+- The bottom status toolbar. In prompt_toolkit's append-only mode the
+  toolbar visibly blinked during streaming output because every stdout
+  write triggers a hide-restore cycle of the prompt area. Slot,
+  provider, model, tool state, and message count are now available on
+  demand via the new `/status` command.
+- The `queued:N` counter (the visible queue replaces it).
+
+### Fixed
+- IHEP provider's Kimi model is namespaced under `moonshot/`, not
+  `kimi/`. The default model catalog now lists `moonshot/kimi-k2.6` so
+  the onboarding picker hands the gateway the prefix it actually
+  accepts.
+
+See [docs/PRDs/v0.7.0-chatstore.md](docs/PRDs/v0.7.0-chatstore.md).
+
 ## [v0.6.8] - 2026-05-24
 
 ### Changed

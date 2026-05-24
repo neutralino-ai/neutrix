@@ -7,7 +7,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from neutrix import __version__
+from neutrix import __version__, transcript
 from neutrix.agent import Agent
 from neutrix.config import (
     CONFIG_PATH,
@@ -16,7 +16,6 @@ from neutrix.config import (
     load_config,
     resolve_initial_slot,
 )
-from neutrix.session import load as session_load
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,11 +93,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.load:
         try:
-            payload = session_load(args.load)
-            agent.messages = payload["messages"]
-            logger.info("loaded session: {} msgs", len(agent.messages))
+            _store, metadata = transcript.load(args.load)
+            agent.messages = list(metadata["raw_messages"])
+            logger.info("loaded transcript: {} msgs", len(agent.messages))
         except Exception as e:
-            print(f"neutrix: error loading session: {e}", file=sys.stderr)
+            print(f"neutrix: error loading transcript: {e}", file=sys.stderr)
             return 1
 
     from neutrix.terminal_chat import TerminalChat

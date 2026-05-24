@@ -21,11 +21,13 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
 
+from neutrix import transcript
 from neutrix.agent_loop import Agent, AgentEvent
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
-from neutrix.session import dump as session_dump
-from neutrix.session import load as session_load
+from neutrix.store import ChatStore, MessageRecord, openai_to_record
 from neutrix.tools import BUILTIN_TOOLS
+
+QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 
 WORD_RE = re.compile(r"\S+")
 SYSTEM_STYLE = "dim yellow"
@@ -75,10 +77,28 @@ InputFunc = Callable[[str], str]
 
 
 class DraftReader:
-    """Bottom draft editor, using prompt_toolkit when it is installed."""
+    """Bottom draft editor, using prompt_toolkit when it is installed.
 
-    def __init__(self, status_text: Callable[[], str]) -> None:
-        self._status_text = status_text
+    ``message_supplier`` populates the area shown directly above the
+    input cursor (used for the queued-user-messages display). It is a
+    callable re-evaluated on each render, so
+    :py:meth:`prompt_toolkit.application.invalidate` refreshes it
+    without a periodic timer.
+
+    There is intentionally no bottom toolbar: in prompt_toolkit's
+    append-only-with-bottom-input mode, every stdout write (every
+    streamed token, every tool result) triggers a hide-restore cycle
+    of the prompt + toolbar area, which made the toolbar visibly
+    blink during the assistant's response. Status info is available
+    on demand via the ``/status`` command.
+    """
+
+    def __init__(
+        self,
+        *,
+        message_supplier: Callable[[], object] = lambda: "",
+    ) -> None:
+        self._message_supplier = message_supplier
         self._session = self._build_session()
 
     def read(self) -> str:
@@ -103,17 +123,22 @@ class DraftReader:
         except ImportError:
             return None
 
+        # No bottom_toolbar and no refresh_interval. The queued
+        # messages render above the input via ``message_supplier``;
+        # there is no other persistent UI region that would need
+        # periodic refresh, and removing the toolbar eliminates the
+        # blink that was visible whenever the assistant streamed
+        # output (every stdout write hides-then-restores the prompt
+        # area, which made the toolbar disappear for one frame).
         return PromptSession(
-            "",
+            self._message_supplier,
             multiline=True,
             editing_mode=EditingMode.EMACS,
             erase_when_done=True,
             placeholder="Message the assistant  (/help for commands)",
             prompt_continuation="",
-            bottom_toolbar=self._status_text,
             history=InMemoryHistory(),
             key_bindings=build_draft_key_bindings(),
-            refresh_interval=0.5,
         )
 
 
@@ -169,7 +194,7 @@ class TerminalView:
     def __init__(
         self,
         *,
-        status_text: Callable[[], str],
+        message_supplier: Callable[[], object] = lambda: "",
         render_markdown: bool = True,
         input_func: InputFunc | None = None,
         console: Console | None = None,
@@ -179,7 +204,9 @@ class TerminalView:
         self.console = console or Console()
         self._prompt_running = False
         self._draft_reader = (
-            None if input_func is not None else DraftReader(status_text)
+            None
+            if input_func is not None
+            else DraftReader(message_supplier=message_supplier)
         )
 
     async def read_input(self) -> str:
@@ -277,7 +304,7 @@ class TerminalChat:
         self.agent = agent
         self.config = config
         self.view = TerminalView(
-            status_text=self._status_text,
+            message_supplier=self._queued_message,
             render_markdown=render_markdown,
             input_func=input_func,
             console=console,
@@ -286,8 +313,20 @@ class TerminalChat:
         self._busy = False
         self._input_queue: asyncio.Queue[str] | None = None
         self._tool_records: list[ToolRecord] = []
-        self._pending_tool_calls: list[tuple[str, str]] = []
         self._streaming_assistant = False
+        self.store = ChatStore()
+        self._seed_store_from_agent()
+
+    def _seed_store_from_agent(self) -> None:
+        """Mirror the agent's current message list into the store.
+
+        Called at construction and after /load and /clear. The agent still
+        owns the OpenAI-format list it feeds back to the LLM; the store
+        is the typed view future renderers will read.
+        """
+        for raw in self.agent.messages:
+            if isinstance(raw, dict):
+                self.store.append_message(openai_to_record(raw))
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
@@ -298,6 +337,7 @@ class TerminalChat:
         await self._render_transcript()
         self._input_queue = asyncio.Queue()
         worker = asyncio.create_task(self._worker_loop())
+        invalidator = asyncio.create_task(self._invalidation_watcher())
         try:
             with self.view.output_patch():
                 await self._input_loop()
@@ -305,10 +345,12 @@ class TerminalChat:
                 await self._input_queue.join()
         finally:
             worker.cancel()
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
+            invalidator.cancel()
+            for task in (worker, invalidator):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _input_loop(self) -> None:
         while self._running:
@@ -328,18 +370,25 @@ class TerminalChat:
                 await self._run_command(text)
                 continue
             assert self._input_queue is not None
+            self.store.enqueue_user(text)
             await self._input_queue.put(text)
 
     async def _worker_loop(self) -> None:
         assert self._input_queue is not None
         while True:
             text = await self._input_queue.get()
+            self.store.dequeue_user()
             self._busy = True
+            self._invalidate_app()
             try:
                 await self.view.print_user(text)
+                self.store.append_message(
+                    MessageRecord(role="user", content=text)
+                )
                 await self._send_message(text)
             finally:
                 self._busy = False
+                self._invalidate_app()
                 self._input_queue.task_done()
 
     def _tool_status(self) -> str:
@@ -350,7 +399,8 @@ class TerminalChat:
             return "unsupported"
         return "on"
 
-    def _status_text(self) -> str:
+    def _status_line(self) -> str:
+        """Single-line status string used by the ``/status`` command."""
         slot = self.agent.slot
         parts = [
             slot.name,
@@ -360,10 +410,50 @@ class TerminalChat:
         ]
         if self._busy:
             parts.append("working")
-        queued = self._input_queue.qsize() if self._input_queue is not None else 0
-        if queued:
-            parts.append(f"queued:{queued}")
         return " | ".join(parts)
+
+    def _queued_message(self):
+        """Content rendered directly above the input cursor.
+
+        Each queued user message is one dim-foreground line prefixed
+        with ``QUEUED_PREFIX``; the input cursor lands on the line below
+        the last queued item. Returns an empty string when no messages
+        are queued, so the input cursor sits at its natural position.
+        Returns FormattedText when prompt_toolkit is installed, plain
+        str otherwise.
+        """
+        queued = self.store.queued_user_messages
+        if not queued:
+            return ""
+        try:
+            from prompt_toolkit.formatted_text import FormattedText
+        except ImportError:
+            return "\n".join(f"{QUEUED_PREFIX}{q.text}" for q in queued) + "\n"
+        fragments: list[tuple[str, str]] = [
+            ("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n") for q in queued
+        ]
+        return FormattedText(fragments)
+
+    def _invalidate_app(self) -> None:
+        """Force the running prompt_toolkit app to redraw, if any."""
+        try:
+            from prompt_toolkit.application.current import get_app_or_none
+        except ImportError:
+            return
+        app = get_app_or_none()
+        if app is not None:
+            app.invalidate()
+
+    async def _invalidation_watcher(self) -> None:
+        """Subscribe to store mutations and trigger one redraw per batch.
+
+        Replaces the previous 0.5-s ``refresh_interval`` polling. The
+        screen now only refreshes when something actually changed
+        (queue, pending tool calls, new messages, streamed text), so
+        there is no rhythmic flash between updates.
+        """
+        async for _ in self.store.changes():
+            self._invalidate_app()
 
     async def _render_transcript(self) -> None:
         tool_call_lookup: dict[str, tuple[str, str]] = {}
@@ -409,7 +499,7 @@ class TerminalChat:
         return calls
 
     async def _send_message(self, text: str) -> None:
-        self._pending_tool_calls.clear()
+        self.store.clear_pending_tool_calls()
         self._streaming_assistant = False
         try:
             assistant_started = False
@@ -418,9 +508,20 @@ class TerminalChat:
             if self._streaming_assistant:
                 await self.view.write_raw("\n")
                 self._streaming_assistant = False
+            # The agent appended its assistant turn to its own list; mirror
+            # the latest message into the store as well so future renderers
+            # can read a complete typed transcript.
+            self._mirror_new_agent_messages()
         except Exception as exc:
             logger.exception("terminal chat worker failed")
             await self.view.print_notice(str(exc), style="bold red")
+
+    def _mirror_new_agent_messages(self) -> None:
+        """Append any agent messages not yet in the store."""
+        stored = len(self.store.messages)
+        for raw in self.agent.messages[stored:]:
+            if isinstance(raw, dict):
+                self.store.append_message(openai_to_record(raw))
 
     async def _handle_event(self, event: AgentEvent, assistant_started: bool) -> bool:
         if event.kind == "token":
@@ -441,7 +542,7 @@ class TerminalChat:
         if event.kind == "tool_call":
             name = str(event.data["name"])
             arguments = str(event.data["arguments"])
-            self._pending_tool_calls.append((name, arguments))
+            self.store.add_pending_tool_call(name, arguments)
             await self.view.print_notice(f"-> {name} {compact_inline(arguments or '{}')}")
             return assistant_started
 
@@ -459,17 +560,10 @@ class TerminalChat:
         return assistant_started
 
     def _pop_tool_arguments(self, name: str) -> str:
-        if not self._pending_tool_calls:
+        call = self.store.remove_pending_tool_call(name)
+        if call is None:
             return "{}"
-        first_name, first_args = self._pending_tool_calls.pop(0)
-        if first_name == name:
-            return first_args
-
-        for index, (pending_name, pending_args) in enumerate(self._pending_tool_calls):
-            if pending_name == name:
-                del self._pending_tool_calls[index]
-                return pending_args
-        return first_args
+        return call.arguments
 
     async def _store_and_print_tool_result(
         self, name: str, arguments: str, result: str
@@ -512,6 +606,7 @@ class TerminalChat:
                 [
                     "Commands:",
                     "  /help               show this",
+                    "  /status             show slot, model, tool state, message count",
                     "  /fast               switch to the fast slot",
                     "  /strong             switch to the strong slot",
                     "  /model              show current slot/provider/model",
@@ -526,6 +621,16 @@ class TerminalChat:
                 ]
             )
         )
+
+    async def _cmd_status(self, args: list[str]) -> None:
+        """Print the current slot, model, tool state, and message count.
+
+        Replaces the persistent bottom toolbar: the toolbar was visibly
+        blinking during streaming output because every stdout write
+        triggers a hide-restore cycle of the prompt area. Status info
+        is now available on demand here.
+        """
+        await self.view.print_plain(self._status_line())
 
     async def _cmd_fast(self, args: list[str]) -> None:
         await self._switch_slot("fast")
@@ -559,11 +664,11 @@ class TerminalChat:
         else:
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = Path("sessions") / f"{ts}.json"
-        out = session_dump(
+        out = transcript.save(
             path,
+            self.store,
             provider=self.agent.slot.provider,
             model=self.agent.slot.model,
-            messages=self.agent.messages,
         )
         await self.view.print_notice(f"saved -> {out}", style="green")
 
@@ -571,8 +676,10 @@ class TerminalChat:
         if not args:
             await self.view.print_notice("usage: /load PATH", style="bold red")
             return
-        payload = session_load(args[0])
-        self.agent.messages = payload["messages"]
+        _store, metadata = transcript.load(args[0])
+        self.agent.messages = list(metadata["raw_messages"])
+        self.store.reset()
+        self._seed_store_from_agent()
         self._tool_records.clear()
         await self.view.print_notice(
             f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
@@ -583,6 +690,8 @@ class TerminalChat:
 
     async def _cmd_clear(self, args: list[str]) -> None:
         self.agent.reset()
+        self.store.reset()
+        self._seed_store_from_agent()
         self._tool_records.clear()
         await self.view.print_notice("conversation cleared", style="green")
         await self._render_transcript()
