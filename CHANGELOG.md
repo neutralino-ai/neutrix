@@ -4,6 +4,23 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.8.2] — 2026-05-25
+
+### Changed
+- Tool-call and tool-result transcript lines now carry a colored
+  keyword anchor matching the Anthropic SDK content-block types:
+  `-> tool_use   <name> <args>` (keyword in **bold cyan** against the
+  existing dim line) and `<- tool_result [tool N] <name> <args> | ...`
+  (keyword in **bold bright_green** against the existing yellow
+  line). Both keywords are right-padded to width 11 so the body name
+  column lines up between the two lines and across successive calls.
+  Same vocabulary you see in `/save`'d chatstore JSON and in
+  `agent_loop.py`. Fold/expand behavior, `[tool N]` indexing, and the
+  `| folded | N lines | ~K tokens` summary are unchanged. Replay paths
+  (`/load` and `/tool`) render with the same colored format.
+
+See [docs/PRDs/v0.8.2-tool-keyword-colors.md](docs/PRDs/v0.8.2-tool-keyword-colors.md).
+
 ## [v0.8.1] — 2026-05-25
 
 ### Added

@@ -128,6 +128,12 @@ def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
     return fragments
 
 
+# Width of the longest keyword, "tool_result". Keyword strings are
+# right-padded to this width so the body name aligns vertically between
+# the `-> tool_use` and `<- tool_result` lines (and across calls).
+TOOL_KEYWORD_WIDTH = len("tool_result")
+
+
 @dataclass(frozen=True)
 class ToolRecord:
     index: int
@@ -135,15 +141,22 @@ class ToolRecord:
     arguments: str
     result: str
 
-    @property
-    def summary(self) -> str:
+    def _summary_body(self) -> str:
         args = compact_inline(self.arguments or "{}")
         lines = result_line_count(self.result)
         approx_tokens = approximate_token_count(self.result)
         return (
-            f"<- [tool {self.index}] {self.name} {args} | folded | "
+            f" [tool {self.index}] {self.name} {args} | folded | "
             f"{lines} lines | ~{approx_tokens} tokens"
         )
+
+    @property
+    def summary(self) -> str:
+        return f"<- {'tool_result'.ljust(TOOL_KEYWORD_WIDTH)}{self._summary_body()}"
+
+    def summary_parts(self) -> tuple[str, str, str]:
+        """Return (prefix, padded_keyword, suffix) for colored rendering."""
+        return ("<- ", "tool_result".ljust(TOOL_KEYWORD_WIDTH), self._summary_body())
 
 
 InputFunc = Callable[[str], str]
@@ -344,6 +357,31 @@ class TerminalView:
 
     async def print_assistant(self, content: str) -> None:
         await self._render(lambda: self.print_assistant_now(content))
+
+    def print_tool_use_now(self, name: str, arguments: str) -> None:
+        keyword = "tool_use".ljust(TOOL_KEYWORD_WIDTH)
+        args = compact_inline(arguments or "{}")
+        text = Text.assemble(
+            ("-> ", "dim"),
+            (keyword, "bold cyan"),
+            (f" {name} {args}", "dim"),
+        )
+        self.console.print(text)
+
+    async def print_tool_use(self, name: str, arguments: str) -> None:
+        await self._render(lambda: self.print_tool_use_now(name, arguments))
+
+    def print_tool_result_now(self, record: ToolRecord) -> None:
+        prefix, keyword, suffix = record.summary_parts()
+        text = Text.assemble(
+            (prefix, "yellow"),
+            (keyword, "bold bright_green"),
+            (suffix, "yellow"),
+        )
+        self.console.print(text)
+
+    async def print_tool_result(self, record: ToolRecord) -> None:
+        await self._render(lambda: self.print_tool_result_now(record))
 
     def write_raw_now(self, text: str) -> None:
         file: TextIO = self.console.file
@@ -572,9 +610,7 @@ class TerminalChat:
                 for call_id, name, arguments in self._tool_calls_from_message(message):
                     if call_id:
                         tool_call_lookup[call_id] = (name, arguments)
-                    await self.view.print_notice(
-                        f"-> {name} {compact_inline(arguments or '{}')}"
-                    )
+                    await self.view.print_tool_use(name, arguments)
             elif role == "tool" and content is not None:
                 call_id = str(message.get("tool_call_id") or "")
                 name, arguments = tool_call_lookup.get(call_id, ("tool", "{}"))
@@ -660,7 +696,7 @@ class TerminalChat:
             name = str(event.data["name"])
             arguments = str(event.data["arguments"])
             self.store.add_pending_tool_call(name, arguments)
-            await self.view.print_notice(f"-> {name} {compact_inline(arguments or '{}')}")
+            await self.view.print_tool_use(name, arguments)
             return assistant_started
 
         if event.kind == "tool_result":
@@ -692,7 +728,7 @@ class TerminalChat:
             result=result,
         )
         self._tool_records.append(record)
-        await self.view.print_notice(record.summary, style="yellow")
+        await self.view.print_tool_result(record)
         return record
 
     async def _run_command(self, line: str) -> None:
@@ -858,7 +894,7 @@ class TerminalChat:
 
         if not args:
             for record in self._tool_records[-20:]:
-                await self.view.print_notice(record.summary, style="yellow")
+                await self.view.print_tool_result(record)
             return
 
         try:

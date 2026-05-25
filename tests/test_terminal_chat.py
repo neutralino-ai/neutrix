@@ -185,7 +185,7 @@ def test_tool_result_summary_counts_lines_and_approx_tokens() -> None:
     )
 
     assert record.summary == (
-        '<- [tool 1] list_dir {"path": "."} | folded | 2 lines | ~3 tokens'
+        '<- tool_result [tool 1] list_dir {"path": "."} | folded | 2 lines | ~3 tokens'
     )
 
 
@@ -220,9 +220,9 @@ def test_terminal_chat_folds_tool_results_and_expands_on_command(tmp_path: Path)
     assert "assistant is responding" not in rendered
     assert "please list" in rendered
     assert "strong | test/strong-model | tools:on" not in rendered
-    assert '-> list_dir {"path": "."}' in rendered
+    assert '-> tool_use    list_dir {"path": "."}' in rendered
     assert (
-        '<- [tool 1] list_dir {"path": "."} | folded | 2 lines | ~4 tokens'
+        '<- tool_result [tool 1] list_dir {"path": "."} | folded | 2 lines | ~4 tokens'
         in rendered
     )
     assert "[tool 1] list_dir full result:" in rendered
@@ -344,9 +344,9 @@ def test_terminal_chat_folds_loaded_tool_messages_with_call_arguments(
     chat.run()
 
     rendered = output.getvalue()
-    assert '-> read_file {"path": "README.md"}' in rendered
+    assert '-> tool_use    read_file {"path": "README.md"}' in rendered
     assert (
-        '<- [tool 1] read_file {"path": "README.md"} | folded | 1 lines | ~2 tokens'
+        '<- tool_result [tool 1] read_file {"path": "README.md"} | folded | 1 lines | ~2 tokens'
         in rendered
     )
 
@@ -514,7 +514,7 @@ def test_terminal_chat_taskcreate_tool_populates_store_and_tasks_command(
     ]
     rendered = output.getvalue()
     flat = " ".join(rendered.split())
-    assert "-> TaskCreate" in flat
+    assert "-> tool_use TaskCreate" in flat
     assert "#1 [pending] refactor onion" in flat
 
 
