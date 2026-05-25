@@ -364,3 +364,120 @@ def test_openai_to_record_stringifies_non_string_content():
     assert record.content == "42"
 
 
+# ---- v0.9.0 reducer ---------------------------------------------------------
+
+
+def _event(kind: str, data: object = None) -> object:
+    """A bare object that quacks like AgentEvent — apply() reads kind/data
+    reflectively so the store does not import AgentEvent (would be a
+    circular import)."""
+    class _Stub:
+        pass
+
+    e = _Stub()
+    e.kind = kind  # type: ignore[attr-defined]
+    e.data = data  # type: ignore[attr-defined]
+    return e
+
+
+def test_apply_llm_request_start_and_end_flip_llm_active():
+    store = ChatStore()
+    assert store.llm_active is False
+    store.apply(_event("llm_request_start"))
+    assert store.llm_active is True
+    store.apply(_event("llm_request_end"))
+    assert store.llm_active is False
+
+
+async def test_apply_lifecycle_events_notify_subscribers():
+    store = ChatStore()
+    notes: list[int] = []
+
+    async def watcher() -> None:
+        count = 0
+        async for _ in store.changes():
+            count += 1
+            notes.append(count)
+            if count == 2:
+                return
+
+    task = asyncio.create_task(watcher())
+    await asyncio.sleep(0)
+    store.apply(_event("llm_request_start"))
+    await asyncio.sleep(0)
+    store.apply(_event("llm_request_end"))
+    await asyncio.wait_for(task, timeout=1.0)
+    assert notes == [1, 2]
+
+
+def test_apply_tool_call_then_tool_result_round_trip():
+    store = ChatStore()
+    store.apply(_event("tool_call", {"name": "x", "arguments": "{}"}))
+    assert len(store.pending_tool_calls) == 1
+    only = store.pending_tool_calls[0]
+    assert only.name == "x"
+    assert only.arguments == "{}"
+    store.apply(_event("tool_result", {"name": "x", "result": "ok"}))
+    assert store.pending_tool_calls == ()
+
+
+def test_apply_tool_call_tolerates_missing_or_extra_fields():
+    """The reducer accepts the payload shape the agent loop emits today
+    without crashing on slightly wrong shapes (defensive: it reads via
+    .get() with str() coercion)."""
+    store = ChatStore()
+    store.apply(_event("tool_call", {}))  # no name, no arguments
+    assert len(store.pending_tool_calls) == 1
+    assert store.pending_tool_calls[0].name == ""
+    assert store.pending_tool_calls[0].arguments == ""
+    store.apply(_event("tool_result", {"name": ""}))
+    assert store.pending_tool_calls == ()
+
+
+def test_apply_noop_kinds_do_not_notify():
+    store = ChatStore()
+    woke = asyncio.Event()
+    notified: list[str] = []
+
+    async def watcher() -> None:
+        async for _ in store.changes():
+            notified.append("tick")
+            woke.set()
+
+    async def run() -> None:
+        task = asyncio.create_task(watcher())
+        await asyncio.sleep(0)
+        # Each of these should be a pure no-op — no notify, no state change.
+        for kind in ("token", "assistant", "done", "error"):
+            store.apply(_event(kind, "ignored"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run())
+    assert notified == []
+    assert store.llm_active is False
+    assert store.pending_tool_calls == ()
+    assert store.messages == ()
+
+
+def test_apply_unknown_kind_is_silent():
+    """Forward-compatibility: a future event kind we haven't taught the
+    reducer about must be ignored, not crash."""
+    store = ChatStore()
+    store.apply(_event("future_kind", {"anything": "goes"}))
+    assert store.llm_active is False
+    assert store.pending_tool_calls == ()
+
+
+def test_reset_clears_llm_active():
+    store = ChatStore()
+    store.apply(_event("llm_request_start"))
+    assert store.llm_active is True
+    store.reset()
+    assert store.llm_active is False
+
+

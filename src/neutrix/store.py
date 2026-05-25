@@ -102,6 +102,7 @@ class ChatStore:
         self._pending_tool_calls: list[PendingToolCall] = []
         self._tasks: list[Task] = []
         self._next_task_id: int = 1
+        self._llm_active: bool = False
         self._subscribers: set[asyncio.Event] = set()
 
     # --------------------------------------------------------------- reads
@@ -125,6 +126,10 @@ class ChatStore:
     @property
     def tasks(self) -> tuple[Task, ...]:
         return tuple(self._tasks)
+
+    @property
+    def llm_active(self) -> bool:
+        return self._llm_active
 
     # -------------------------------------------------------------- writes
 
@@ -285,11 +290,43 @@ class ChatStore:
         self._pending_tool_calls.clear()
         self._tasks.clear()
         self._next_task_id = 1
+        self._llm_active = False
         if system_prompt is not None:
             self._messages.append(
                 MessageRecord(role="system", content=system_prompt)
             )
         self._notify()
+
+    # --------------------------------------------------------------- reducer
+
+    def apply(self, event: Any) -> None:
+        """Mutate the store from an :class:`AgentEvent`.
+
+        The single entry point used by renderers that consume an
+        ``Agent.stream_reply`` event stream. Only the kinds listed
+        below have an effect; other kinds are no-ops.
+
+        Accepts ``event: Any`` (read reflectively) so this module does
+        not import :class:`neutrix.agent_loop.AgentEvent` — that would
+        be a circular import, since ``agent_loop`` imports
+        :class:`ChatStore`.
+        """
+        kind = getattr(event, "kind", None)
+        data = getattr(event, "data", None)
+        if kind == "llm_request_start":
+            self._llm_active = True
+            self._notify()
+        elif kind == "llm_request_end":
+            self._llm_active = False
+            self._notify()
+        elif kind == "tool_call":
+            name = str((data or {}).get("name") or "")
+            arguments = str((data or {}).get("arguments") or "")
+            self.add_pending_tool_call(name, arguments)
+        elif kind == "tool_result":
+            name = str((data or {}).get("name") or "")
+            self.remove_pending_tool_call(name)
+        # token / assistant / done / error: no store change.
 
     # -------------------------------------------------------- observation
 

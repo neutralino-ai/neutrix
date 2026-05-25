@@ -26,9 +26,23 @@ TASK_MANAGEMENT_TOOLS = frozenset({"TaskCreate", "TaskUpdate"})
 
 @dataclass(frozen=True)
 class AgentEvent:
-    """Stream event yielded by Agent.stream_reply."""
+    """Stream event yielded by Agent.stream_reply.
 
-    kind: str  # "token" | "tool_call" | "tool_result" | "done" | "error"
+    Kinds:
+      ``llm_request_start`` — data=None. One fires before each
+        ``llm.stream_response(...)`` round.
+      ``token``             — data=str (partial assistant text)
+      ``assistant``         — data=str (full assistant text, when not streamed)
+      ``tool_call``         — data={"name": str, "arguments": str}
+      ``tool_result``       — data={"name": str, "result": str}
+      ``llm_request_end``   — data=None. One fires after each LLM round
+        returns (or raises); skipped on async-generator cancellation
+        so PEP 525 does not raise inside ``.aclose()``.
+      ``done``              — data=None
+      ``error``             — data=str
+    """
+
+    kind: str
     data: Any = None
 
 
@@ -87,20 +101,32 @@ class Agent:
                 rendered_tokens = False
                 tools = get_schemas() if self.effective_tools_enabled() else None
                 assert self.llm is not None
-                async for event in self.llm.stream_response(
-                    model=self.slot.model,
-                    messages=self.messages,
-                    tools=tools,
-                ):
-                    if event.kind == "token":
-                        rendered_tokens = True
-                        yield AgentEvent("token", event.data)
-                    elif event.kind == "assistant":
-                        response = event.data
-                        if isinstance(response, LLMResponse):
-                            assistant_msg = response.message
-                        else:
-                            assistant_msg = response
+                yield AgentEvent("llm_request_start")
+                try:
+                    async for event in self.llm.stream_response(
+                        model=self.slot.model,
+                        messages=self.messages,
+                        tools=tools,
+                    ):
+                        if event.kind == "token":
+                            rendered_tokens = True
+                            yield AgentEvent("token", event.data)
+                        elif event.kind == "assistant":
+                            response = event.data
+                            if isinstance(response, LLMResponse):
+                                assistant_msg = response.message
+                            else:
+                                assistant_msg = response
+                except Exception:
+                    # Cancellation (GeneratorExit from .aclose()) is not an
+                    # Exception subclass and is intentionally not caught here,
+                    # so PEP 525 does not raise inside .aclose() (a yield in
+                    # a finally would do exactly that). The outer ``except
+                    # Exception`` below still turns this into an ``error``
+                    # event for the caller.
+                    yield AgentEvent("llm_request_end")
+                    raise
+                yield AgentEvent("llm_request_end")
 
                 if assistant_msg is None:
                     assistant_msg = {"role": "assistant", "content": None}

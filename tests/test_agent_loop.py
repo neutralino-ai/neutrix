@@ -87,7 +87,12 @@ async def test_agent_loop_appends_user_and_assistant_once():
 
     events = [event async for event in agent.stream_reply("hi")]
 
-    assert [event.kind for event in events] == ["token", "done"]
+    assert [event.kind for event in events] == [
+        "llm_request_start",
+        "token",
+        "llm_request_end",
+        "done",
+    ]
     assert [message["role"] for message in agent.messages] == [
         "system",
         "user",
@@ -119,6 +124,8 @@ async def test_agent_loop_emits_final_assistant_when_no_tokens_streamed():
     events = [event async for event in agent.stream_reply("hi")]
 
     assert [(event.kind, event.data) for event in events] == [
+        ("llm_request_start", None),
+        ("llm_request_end", None),
         ("assistant", "final only"),
         ("done", None),
     ]
@@ -149,6 +156,8 @@ async def test_agent_loop_omits_openai_tools_for_ihep_anthropic_models(monkeypat
     events = [event async for event in agent.stream_reply("hi")]
 
     assert [(event.kind, event.data) for event in events] == [
+        ("llm_request_start", None),
+        ("llm_request_end", None),
         ("assistant", "hello"),
         ("done", None),
     ]
@@ -207,9 +216,13 @@ async def test_agent_loop_runs_tools_then_samples_follow_up(monkeypatch):
     events = [event async for event in agent.stream_reply("hi")]
 
     assert [event.kind for event in events] == [
+        "llm_request_start",
+        "llm_request_end",
         "tool_call",
         "tool_result",
+        "llm_request_start",
         "token",
+        "llm_request_end",
         "done",
     ]
     assert [message["role"] for message in agent.messages] == [
@@ -379,7 +392,12 @@ async def test_stream_reply_injects_reminder_when_due(monkeypatch):
     agent.messages.extend([_user("hi")] + [_assistant("a")] * 10)
 
     events = [event async for event in agent.stream_reply("now what")]
-    assert [event.kind for event in events] == ["assistant", "done"]
+    assert [event.kind for event in events] == [
+        "llm_request_start",
+        "llm_request_end",
+        "assistant",
+        "done",
+    ]
 
     # The LLM saw: user("now what"), then the reminder, before the assistant turn.
     sent = llm.calls[0]["messages"]
@@ -595,8 +613,265 @@ async def test_agent_loop_tool_dispatch_does_not_block_event_loop(monkeypatch):
     assert elapsed < 0.15
     events = await asyncio.wait_for(task, timeout=1)
     assert [event.kind for event in events] == [
+        "llm_request_start",
+        "llm_request_end",
         "tool_call",
         "tool_result",
+        "llm_request_start",
+        "llm_request_end",
         "assistant",
         "done",
     ]
+
+
+# ---- v0.9.0 lifecycle events -----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_brackets_token_only_round():
+    """A token-only round emits start/token×N/end/done in order, and the
+    'assistant' synthesis event is suppressed when tokens were streamed."""  # noqa: RUF002
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent("token", "he"),
+                LLMEvent("token", "llo"),
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "hello"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ]
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=False, llm=llm)
+    events = [event async for event in agent.stream_reply("hi")]
+    assert [event.kind for event in events] == [
+        "llm_request_start",
+        "token",
+        "token",
+        "llm_request_end",
+        "done",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_emits_assistant_when_no_tokens_streamed():
+    """Companion to the token-only case: when the LLM returns the final
+    assistant message without any streamed tokens, the synthesized
+    'assistant' event still fires (after llm_request_end)."""
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "ready"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ]
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=False, llm=llm)
+    events = [event async for event in agent.stream_reply("hi")]
+    assert [event.kind for event in events] == [
+        "llm_request_start",
+        "llm_request_end",
+        "assistant",
+        "done",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_emits_one_pair_per_round(monkeypatch):
+    """A tool-call followed by a tokens-only second round emits two
+    distinct start/end pairs, with tool_call/tool_result between them."""
+    monkeypatch.setattr(
+        "neutrix.agent_loop.get_schemas",
+        lambda: [{"type": "function", "function": {"name": "echo"}}],
+    )
+    monkeypatch.setattr(
+        "neutrix.agent_loop.dispatch",
+        lambda name, arguments, **_: f"{name}:{arguments}",
+    )
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "echo",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason="tool_calls",
+                    ),
+                )
+            ],
+            [
+                LLMEvent("token", "done"),
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {"role": "assistant", "content": "done"},
+                        finish_reason="stop",
+                    ),
+                ),
+            ],
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=True, llm=llm)
+    events = [event async for event in agent.stream_reply("hi")]
+    kinds = [event.kind for event in events]
+    # Two distinct start/end pairs, one per LLM round.
+    assert kinds.count("llm_request_start") == 2
+    assert kinds.count("llm_request_end") == 2
+    assert kinds == [
+        "llm_request_start",
+        "llm_request_end",
+        "tool_call",
+        "tool_result",
+        "llm_request_start",
+        "token",
+        "llm_request_end",
+        "done",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_mid_stream_error_emits_end_before_error():
+    """When the LLM raises mid-stream, exactly one llm_request_end is
+    emitted before the 'error' event so observers can clear llm_active."""
+
+    class RaisingLLM:
+        def switch(self, slot):
+            pass
+
+        async def stream_response(self, *, model, messages, tools=None):
+            yield LLMEvent("token", "partial")
+            raise RuntimeError("upstream boom")
+
+    agent = Agent(slot=_slot(), use_tools=False, llm=RaisingLLM())
+    events = [event async for event in agent.stream_reply("hi")]
+    kinds = [event.kind for event in events]
+    assert kinds == ["llm_request_start", "token", "llm_request_end", "error"]
+    assert kinds.count("llm_request_end") == 1
+    # The 'error' event still carries the compacted exception text.
+    assert "upstream boom" in str(events[-1].data)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_dispatch_failure_still_surfaces_as_error(monkeypatch):
+    """Regression gate: a synchronous dispatch failure must still be
+    caught by the OUTER try/except (the one that wraps the whole loop),
+    not collapsed into the inner LLM-stream guard. Proves the inner
+    except wraps only the model stream."""
+    monkeypatch.setattr(
+        "neutrix.agent_loop.get_schemas",
+        lambda: [{"type": "function", "function": {"name": "boom"}}],
+    )
+
+    def raising_dispatch(name, arguments, **_):
+        raise RuntimeError("tool exploded")
+
+    monkeypatch.setattr("neutrix.agent_loop.dispatch", raising_dispatch)
+    llm = FakeLLM(
+        [
+            [
+                LLMEvent(
+                    "assistant",
+                    LLMResponse(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "boom",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        finish_reason="tool_calls",
+                    ),
+                )
+            ]
+        ]
+    )
+    agent = Agent(slot=_slot(), use_tools=True, llm=llm)
+    events = [event async for event in agent.stream_reply("hi")]
+    kinds = [event.kind for event in events]
+    # llm_request_end fired normally; the dispatch exception only
+    # surfaces via the outer except, producing 'error' then terminating.
+    assert kinds == [
+        "llm_request_start",
+        "llm_request_end",
+        "tool_call",
+        "error",
+    ]
+    assert "tool exploded" in str(events[-1].data)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_cancellation_via_aclose_exits_cleanly():
+    """A mock LLM that suspends mid-stream then .aclose() on the iterator
+    must NOT raise RuntimeError and must NOT emit llm_request_end during
+    .aclose(). Covers TerminalChat.run_async()'s worker-cancel path on
+    Ctrl-C — yielding inside a finally would break PEP 525.
+    """
+
+    blocked = asyncio.Event()
+
+    class SuspendingLLM:
+        def switch(self, slot):
+            pass
+
+        async def stream_response(self, *, model, messages, tools=None):
+            blocked.set()
+            await asyncio.Event().wait()  # blocks forever
+            yield LLMEvent("token", "unreachable")
+
+    agent = Agent(slot=_slot(), use_tools=False, llm=SuspendingLLM())
+    iterator = agent.stream_reply("hi")
+
+    collected: list[Any] = []
+
+    async def collect_two() -> None:
+        async for event in iterator:
+            collected.append(event)
+            if len(collected) >= 2:
+                return
+
+    task = asyncio.create_task(collect_two())
+    await blocked.wait()
+    # Cancel-then-close mirrors what TerminalChat.run_async() does to
+    # the worker on Ctrl-C: the surrounding task is cancelled and the
+    # generator is unwound via aclose. No RuntimeError must escape.
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    await iterator.aclose()
+
+    kinds = [event.kind for event in collected]
+    # We saw the start event; we must NOT have seen llm_request_end
+    # because cancellation skips the explicit-yield path.
+    assert "llm_request_start" in kinds
+    assert "llm_request_end" not in kinds

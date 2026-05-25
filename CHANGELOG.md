@@ -4,6 +4,52 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.0] — 2026-05-25
+
+### Added
+- Two new `AgentEvent` kinds: `llm_request_start` and `llm_request_end`.
+  `Agent.stream_reply` now wraps each LLM round with exactly one
+  start/end pair, so observers can tell *when* an LLM request is in
+  flight, not just what content arrived. Multi-round tool-loop turns
+  emit multiple pairs, one per round. Cancellation via
+  `.aclose()` (PEP 525 / `GeneratorExit`) is handled by an inner
+  `except Exception` plus an explicit `yield` outside any `finally`,
+  so `TerminalChat.run_async`'s worker-cancel path on Ctrl-C unwinds
+  cleanly without `RuntimeError`.
+- `ChatStore.llm_active: bool` (read-only property) — true while an
+  LLM request is in flight; flipped by the reducer below.
+- Single reducer entry point `ChatStore.apply(event)` that maps
+  `llm_request_start`/`llm_request_end` to `llm_active`,
+  `tool_call`/`tool_result` to pending-tool-call list mutations, and
+  no-ops on `token` / `assistant` / `done` / `error`. Accepts
+  `event: Any` (read reflectively) to avoid a circular import with
+  `agent_loop`.
+
+### Changed
+- `TerminalChat._send_message` now routes every event through
+  `self.store.apply(event)` before the existing render switch. The
+  view no longer writes to the store mid-event: direct
+  `add_pending_tool_call` / `remove_pending_tool_call` calls in
+  `_handle_event` are gone, and `_pop_tool_arguments` is replaced
+  with a short-lived per-call `tool_arg_cache: dict[str, list[str]]`
+  that carries arguments forward from `tool_call` to `tool_result`.
+  This is the prerequisite for the v0.10.0 FakeView swap-test: the
+  renderer becomes a pure reader of the store.
+- `ChatStore.reset()` clears `llm_active` along with the other
+  in-flight state.
+
+### Non-changes (deliberately)
+- No user-visible behavior change. Same layout, colors, task panel,
+  streaming behavior as v0.8.2. The release scope leaked if you can
+  spot a difference.
+- No rename of `agent_loop.py` / `Agent` / `stream_reply`. Deferred
+  to v0.10.0 if still warranted once a second `Agent` consumer
+  (FakeView) materializes.
+- `/save` / `/load` transcript format unchanged. `llm_active` is
+  always `False` at serialize time (saves only happen between turns).
+
+See [docs/PRDs/v0.9.0-lifecycle-events.md](docs/PRDs/v0.9.0-lifecycle-events.md).
+
 ## [v0.8.2] — 2026-05-25
 
 ### Changed

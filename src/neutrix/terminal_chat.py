@@ -642,8 +642,18 @@ class TerminalChat:
         try:
             pre_message_count = len(self.agent.messages)
             assistant_started = False
+            # tool_arg_cache lives for the duration of one _send_message
+            # call. store.apply() removes pending entries on tool_result
+            # before the renderer sees the event, so the renderer can no
+            # longer reach back into store.pending_tool_calls for the
+            # original arguments string — we record them here on tool_call
+            # and FIFO-pop on tool_result. Discarded at end of the call.
+            tool_arg_cache: dict[str, list[str]] = {}
             async for event in self.agent.stream_reply(text):
-                assistant_started = await self._handle_event(event, assistant_started)
+                self.store.apply(event)
+                assistant_started = await self._handle_event(
+                    event, assistant_started, tool_arg_cache
+                )
             if self._streaming_assistant:
                 await self.view.write_raw("\n")
                 self._streaming_assistant = False
@@ -676,7 +686,12 @@ class TerminalChat:
             if isinstance(raw, dict):
                 self.store.append_message(openai_to_record(raw))
 
-    async def _handle_event(self, event: AgentEvent, assistant_started: bool) -> bool:
+    async def _handle_event(
+        self,
+        event: AgentEvent,
+        assistant_started: bool,
+        tool_arg_cache: dict[str, list[str]],
+    ) -> bool:
         if event.kind == "token":
             if not assistant_started:
                 assistant_started = True
@@ -695,13 +710,14 @@ class TerminalChat:
         if event.kind == "tool_call":
             name = str(event.data["name"])
             arguments = str(event.data["arguments"])
-            self.store.add_pending_tool_call(name, arguments)
+            tool_arg_cache.setdefault(name, []).append(arguments)
             await self.view.print_tool_use(name, arguments)
             return assistant_started
 
         if event.kind == "tool_result":
             name = str(event.data["name"])
-            arguments = self._pop_tool_arguments(name)
+            queued = tool_arg_cache.get(name) or []
+            arguments = queued.pop(0) if queued else "{}"
             result = str(event.data["result"])
             await self._store_and_print_tool_result(name, arguments, result)
             return assistant_started
@@ -711,12 +727,6 @@ class TerminalChat:
             return assistant_started
 
         return assistant_started
-
-    def _pop_tool_arguments(self, name: str) -> str:
-        call = self.store.remove_pending_tool_call(name)
-        if call is None:
-            return "{}"
-        return call.arguments
 
     async def _store_and_print_tool_result(
         self, name: str, arguments: str, result: str
