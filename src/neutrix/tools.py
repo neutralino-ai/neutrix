@@ -25,6 +25,132 @@ _TASK_UPDATE_STATUSES = ("pending", "in_progress", "completed", "deleted")
 _STORE_REQUIRED_TOOLS = frozenset({"TaskCreate", "TaskUpdate", "TaskList"})
 
 
+# Tool descriptions sent to the LLM. Lifted verbatim from Claude Code's
+# V2 task tool prompts (cc2/src/tools/{TaskCreateTool,TaskUpdateTool,
+# TaskListTool}/prompt.ts) with the agent-swarm-only sections dropped —
+# neutrix has no teammate-swarm features. These descriptions are the
+# primary mechanism that shapes LLM behavior around the task tools;
+# putting the "Mark in_progress BEFORE beginning work" etc. guidance
+# here (rather than in result-text nudges) matches the way Claude Code
+# itself drives the LLM to actually start, update, and complete tasks.
+
+_TASK_CREATE_DESCRIPTION = """\
+Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+It also helps the user understand the progress of the task and overall progress of their requests.
+
+## When to Use This Tool
+
+Use this tool proactively in these scenarios:
+
+- Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
+- Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
+- Plan mode - When using plan mode, create a task list to track the work
+- User explicitly requests todo list - When the user directly asks you to use the todo list
+- User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
+- After receiving new instructions - Immediately capture user requirements as tasks
+- When you start working on a task - Mark it as in_progress BEFORE beginning work
+- After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
+
+## When NOT to Use This Tool
+
+Skip using this tool when:
+- There is only a single, straightforward task
+- The task is trivial and tracking it provides no organizational benefit
+- The task can be completed in less than 3 trivial steps
+- The task is purely conversational or informational
+
+NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
+
+## Task Fields
+
+- **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
+- **description**: What needs to be done
+
+All tasks are created with status `pending`.
+
+## Tips
+
+- Create tasks with clear, specific subjects that describe the outcome
+- Check TaskList first to avoid creating duplicate tasks
+"""
+
+_TASK_UPDATE_DESCRIPTION = """\
+Use this tool to update a task in the task list.
+
+## When to Use This Tool
+
+**Mark tasks as resolved:**
+- When you have completed the work described in a task
+- When a task is no longer needed or has been superseded
+- IMPORTANT: Always mark your assigned tasks as resolved when you finish them
+- After resolving, call TaskList to find your next task
+
+- ONLY mark a task as completed when you have FULLY accomplished it
+- If you encounter errors, blockers, or cannot finish, keep the task as in_progress
+- When blocked, create a new task describing what needs to be resolved
+- Never mark a task as completed if:
+  - Tests are failing
+  - Implementation is partial
+  - You encountered unresolved errors
+  - You couldn't find necessary files or dependencies
+
+**Delete tasks:**
+- When a task is no longer relevant or was created in error
+- Setting status to `deleted` permanently removes the task
+
+**Update task details:**
+- When requirements change or become clearer
+
+## Fields You Can Update
+
+- **status**: The task status (see Status Workflow below)
+- **subject**: Change the task title (imperative form, e.g., "Run tests")
+- **description**: Change the task description
+
+## Status Workflow
+
+Status progresses: `pending` → `in_progress` → `completed`
+
+Use `deleted` to permanently remove a task.
+
+## Examples
+
+Mark task as in progress when starting work:
+```json
+{"taskId": "1", "status": "in_progress"}
+```
+
+Mark task as completed after finishing work:
+```json
+{"taskId": "1", "status": "completed"}
+```
+
+Delete a task:
+```json
+{"taskId": "1", "status": "deleted"}
+```
+"""
+
+_TASK_LIST_DESCRIPTION = """\
+Use this tool to list all tasks in the task list.
+
+## When to Use This Tool
+
+- To see what tasks are available to work on (status: 'pending', not blocked)
+- To check overall progress on the project
+- After completing a task, to check for newly unblocked work or the next available task
+- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+
+## Output
+
+Returns a JSON array. Each entry has:
+- **id**: Task identifier (use with TaskUpdate)
+- **subject**: Brief description of the task
+- **status**: 'pending', 'in_progress', or 'completed'
+- **description**: Full description of what needs to be done
+"""
+
+
 @dataclass
 class Tool:
     name: str
@@ -113,7 +239,7 @@ def _task_create(
     if not subject:
         return "ERROR: subject is required"
     task = store.add_task(subject, description=description or "")
-    return f"ok, created task {task.id}: {task.subject}"
+    return f"Task #{task.id} created successfully: {task.subject}"
 
 
 def _task_update(
@@ -133,8 +259,8 @@ def _task_update(
     if status == "deleted":
         removed = store.remove_task(taskId)
         if removed is None:
-            return f"task {taskId} not found"
-        return f"ok, deleted task {removed.id}: {removed.subject}"
+            return f"Task #{taskId} not found"
+        return f"Updated task #{removed.id} deleted"
 
     updated = store.update_task(
         taskId,
@@ -143,16 +269,16 @@ def _task_update(
         description=description,
     )
     if updated is None:
-        return f"task {taskId} not found"
+        return f"Task #{taskId} not found"
     changed: list[str] = []
     if status is not None:
-        changed.append(f"status={status}")
+        changed.append("status")
     if subject is not None:
-        changed.append(f"subject={subject!r}")
+        changed.append("subject")
     if description is not None:
-        changed.append(f"description={description!r}")
+        changed.append("description")
     summary = ", ".join(changed) if changed else "no fields changed"
-    return f"ok, task {updated.id} updated: {summary}"
+    return f"Updated task #{updated.id} {summary}"
 
 
 def _task_list(*, store: ChatStore | None = None) -> str:
@@ -236,21 +362,17 @@ BUILTIN_TOOLS: dict[str, Tool] = {
     ),
     "TaskCreate": Tool(
         name="TaskCreate",
-        description=(
-            "Add a new task to the session task list. Use when the user "
-            "agrees to track work, or when you want to remember items "
-            "that span multiple turns. Returns the new task id."
-        ),
+        description=_TASK_CREATE_DESCRIPTION,
         parameters={
             "type": "object",
             "properties": {
                 "subject": {
                     "type": "string",
-                    "description": "Short title (one line).",
+                    "description": "A brief title for the task",
                 },
                 "description": {
                     "type": "string",
-                    "description": "Optional longer detail.",
+                    "description": "What needs to be done",
                 },
             },
             "required": ["subject"],
@@ -259,32 +381,26 @@ BUILTIN_TOOLS: dict[str, Tool] = {
     ),
     "TaskUpdate": Tool(
         name="TaskUpdate",
-        description=(
-            "Update an existing task's status, subject, or description. "
-            "Set status to 'in_progress' when starting work, 'completed' "
-            "when done, or 'deleted' to remove the task entirely."
-        ),
+        description=_TASK_UPDATE_DESCRIPTION,
         parameters={
             "type": "object",
             "properties": {
                 "taskId": {
                     "type": "string",
-                    "description": "Id returned by TaskCreate.",
+                    "description": "The ID of the task to update",
                 },
                 "status": {
                     "type": "string",
                     "enum": list(_TASK_UPDATE_STATUSES),
-                    "description": (
-                        "New status, or 'deleted' to remove the task."
-                    ),
+                    "description": "New status for the task",
                 },
                 "subject": {
                     "type": "string",
-                    "description": "Replacement subject.",
+                    "description": "New subject for the task",
                 },
                 "description": {
                     "type": "string",
-                    "description": "Replacement description.",
+                    "description": "New description for the task",
                 },
             },
             "required": ["taskId"],
@@ -293,12 +409,7 @@ BUILTIN_TOOLS: dict[str, Tool] = {
     ),
     "TaskList": Tool(
         name="TaskList",
-        description=(
-            "Return the full session task list as a JSON array of "
-            "{id, subject, status, description}. Use when you need to "
-            "re-orient on every tracked item, not just the actionable "
-            "subset surfaced by the system reminder."
-        ),
+        description=_TASK_LIST_DESCRIPTION,
         parameters={
             "type": "object",
             "properties": {},

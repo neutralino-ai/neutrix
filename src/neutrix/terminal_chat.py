@@ -22,12 +22,33 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from neutrix import transcript
-from neutrix.agent_loop import Agent, AgentEvent
+from neutrix.agent_loop import (
+    Agent,
+    AgentEvent,
+    format_reminder_notice,
+    is_task_reminder,
+)
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
-from neutrix.store import ChatStore, MessageRecord, openai_to_record
+from neutrix.store import ChatStore, MessageRecord, Task, openai_to_record
 from neutrix.tools import BUILTIN_TOOLS
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
+
+MAX_PANEL_ROWS = 5
+
+_TASK_PANEL_ICON = {
+    "in_progress": "◼",  # noqa: RUF001  -- U+25FC BLACK MEDIUM SQUARE
+    "pending": "◻",  # noqa: RUF001  -- U+25FB WHITE MEDIUM SQUARE
+    "completed": "✓",
+}
+
+_TASK_PANEL_STYLE = {
+    "in_progress": "fg:ansicyan bold",
+    "pending": "",
+    "completed": "fg:ansigreen",
+}
+
+_TASK_PANEL_ORDER = {"in_progress": 0, "pending": 1, "completed": 2}
 
 WORD_RE = re.compile(r"\S+")
 SYSTEM_STYLE = "dim yellow"
@@ -53,6 +74,58 @@ def compact_inline(value: object, *, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 3].rstrip()}..."
+
+
+def _task_sort_key(task: Task) -> tuple[int, int]:
+    try:
+        id_int = int(task.id)
+    except (TypeError, ValueError):
+        id_int = 0
+    return (_TASK_PANEL_ORDER.get(task.status, 99), id_int)
+
+
+def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
+    """Render the always-on task panel as prompt_toolkit fragments.
+
+    Returns an empty list when ``tasks`` is empty so the input cursor
+    sits at its natural position. Otherwise sorts by
+    (in_progress → pending → completed, id ascending), caps the visible
+    rows at :data:`MAX_PANEL_ROWS`, and appends a dim
+    ``"  … +N in progress, N pending, N done\\n"`` overflow line if any
+    tasks were truncated.
+
+    Pure function — the panel content depends only on ``tasks``, which
+    lets tests assert ordering and overflow without spinning up the
+    full chat surface.
+    """
+    if not tasks:
+        return []
+    ordered = sorted(tasks, key=_task_sort_key)
+    visible = ordered[:MAX_PANEL_ROWS]
+    truncated = ordered[MAX_PANEL_ROWS:]
+
+    fragments: list[tuple[str, str]] = []
+    for task in visible:
+        icon = _TASK_PANEL_ICON.get(task.status, "?")
+        style = _TASK_PANEL_STYLE.get(task.status, "")
+        fragments.append(
+            (style, f"  {icon} #{task.id} [{task.status}] {task.subject}\n")
+        )
+
+    if truncated:
+        n_inprog = sum(1 for t in truncated if t.status == "in_progress")
+        n_pending = sum(1 for t in truncated if t.status == "pending")
+        n_done = sum(1 for t in truncated if t.status == "completed")
+        parts: list[str] = []
+        if n_inprog:
+            parts.append(f"{n_inprog} in progress")
+        if n_pending:
+            parts.append(f"{n_pending} pending")
+        if n_done:
+            parts.append(f"{n_done} done")
+        if parts:
+            fragments.append(("fg:ansibrightblack", f"  … +{', '.join(parts)}\n"))
+    return fragments
 
 
 @dataclass(frozen=True)
@@ -119,6 +192,7 @@ class DraftReader:
         try:
             from prompt_toolkit import PromptSession
             from prompt_toolkit.enums import EditingMode
+            from prompt_toolkit.formatted_text import FormattedText
             from prompt_toolkit.history import InMemoryHistory
         except ImportError:
             return None
@@ -130,12 +204,15 @@ class DraftReader:
         # blink that was visible whenever the assistant streamed
         # output (every stdout write hides-then-restores the prompt
         # area, which made the toolbar disappear for one frame).
+        placeholder = FormattedText(
+            [("fg:ansibrightblack", "Message the assistant  (/help for commands)")]
+        )
         return PromptSession(
             self._message_supplier,
             multiline=True,
             editing_mode=EditingMode.EMACS,
             erase_when_done=True,
-            placeholder="Message the assistant  (/help for commands)",
+            placeholder=placeholder,
             prompt_continuation="",
             history=InMemoryHistory(),
             key_bindings=build_draft_key_bindings(),
@@ -304,7 +381,7 @@ class TerminalChat:
         self.agent = agent
         self.config = config
         self.view = TerminalView(
-            message_supplier=self._queued_message,
+            message_supplier=self._above_input,
             render_markdown=render_markdown,
             input_func=input_func,
             console=console,
@@ -413,26 +490,43 @@ class TerminalChat:
             parts.append("working")
         return " | ".join(parts)
 
-    def _queued_message(self):
+    def _above_input(self):
         """Content rendered directly above the input cursor.
 
-        Each queued user message is one dim-foreground line prefixed
-        with ``QUEUED_PREFIX``; the input cursor lands on the line below
-        the last queued item. Returns an empty string when no messages
-        are queued, so the input cursor sits at its natural position.
-        Returns FormattedText when prompt_toolkit is installed, plain
-        str otherwise.
+        Stacks (top → bottom):
+
+        1. The always-visible task panel (when any tasks exist) — see
+           :func:`format_task_panel` for ordering and overflow rules.
+        2. Queued user messages — dim, prefixed with ``QUEUED_PREFIX``,
+           one per line, drawn on the lines just above the cursor.
+
+        Returns an empty string when there's nothing to show so the
+        input cursor sits at its natural position. Returns
+        ``FormattedText`` when prompt_toolkit is installed; otherwise a
+        plain str fallback (used by tests that mock the input).
         """
+        tasks = self.store.tasks
         queued = self.store.queued_user_messages
-        if not queued:
+        if not tasks and not queued:
             return ""
         try:
             from prompt_toolkit.formatted_text import FormattedText
         except ImportError:
-            return "\n".join(f"{QUEUED_PREFIX}{q.text}" for q in queued) + "\n"
-        fragments: list[tuple[str, str]] = [
-            ("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n") for q in queued
-        ]
+            FormattedText = None  # type: ignore[assignment]
+
+        if FormattedText is None:
+            lines: list[str] = []
+            for _style, text in format_task_panel(tasks):
+                lines.append(text.rstrip("\n"))
+            for q in queued:
+                lines.append(f"{QUEUED_PREFIX}{q.text}")
+            return "\n".join(lines) + "\n" if lines else ""
+
+        fragments: list[tuple[str, str]] = list(format_task_panel(tasks))
+        for q in queued:
+            fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
+        if not fragments:
+            return ""
         return FormattedText(fragments)
 
     def _invalidate_app(self) -> None:
@@ -461,6 +555,13 @@ class TerminalChat:
         for message in self.agent.messages:
             role = str(message.get("role") or "")
             content = message.get("content")
+            if role == "user" and is_task_reminder(content):
+                # v0.8.0 reminder body — render the folded notice instead
+                # of leaking the templated text as a plain user block.
+                await self.view.print_notice(
+                    format_reminder_notice(self.store.tasks), style="dim"
+                )
+                continue
             if role == "system" and content:
                 await self.view.print_system(str(content))
             elif role == "user" and content:
@@ -503,6 +604,7 @@ class TerminalChat:
         self.store.clear_pending_tool_calls()
         self._streaming_assistant = False
         try:
+            pre_message_count = len(self.agent.messages)
             assistant_started = False
             async for event in self.agent.stream_reply(text):
                 assistant_started = await self._handle_event(event, assistant_started)
@@ -511,11 +613,25 @@ class TerminalChat:
                 self._streaming_assistant = False
             # The agent appended its assistant turn to its own list; mirror
             # the latest message into the store as well so future renderers
-            # can read a complete typed transcript.
+            # can read a complete typed transcript. Fold any v0.8.0 task
+            # reminder that landed during this turn into a dim notice so
+            # the user sees that the harness nudged the LLM.
+            await self._render_new_reminders(pre_message_count)
             self._mirror_new_agent_messages()
         except Exception as exc:
             logger.exception("terminal chat worker failed")
             await self.view.print_notice(str(exc), style="bold red")
+
+    async def _render_new_reminders(self, pre_count: int) -> None:
+        for raw in self.agent.messages[pre_count:]:
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("role") != "user":
+                continue
+            if is_task_reminder(raw.get("content")):
+                await self.view.print_notice(
+                    format_reminder_notice(self.store.tasks), style="dim"
+                )
 
     def _mirror_new_agent_messages(self) -> None:
         """Append any agent messages not yet in the store."""

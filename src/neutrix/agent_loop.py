@@ -269,7 +269,7 @@ def assistant_turns_since_reminder(messages: list[dict[str, Any]]) -> int:
         if role == "assistant":
             seen += 1
             continue
-        if role == "user" and _is_task_reminder(message.get("content")):
+        if role == "user" and is_task_reminder(message.get("content")):
             return seen
     return seen
 
@@ -289,12 +289,35 @@ def _message_calls_task_management(message: dict[str, Any]) -> bool:
     return False
 
 
-def _is_task_reminder(content: Any) -> bool:
+def is_task_reminder(content: Any) -> bool:
+    """Whether ``content`` is the body of a v0.8.0-shape task reminder.
+
+    Identifies the templated ``<system-reminder>`` user message injected
+    by :func:`build_task_reminder` so renderers can fold it to a notice
+    instead of leaking the raw body as a user block.
+    """
     if not isinstance(content, str):
         return False
     if not content.startswith(TASK_REMINDER_TAG_OPEN):
         return False
     return TASK_REMINDER_MARKER in content
+
+
+def format_reminder_notice(tasks: tuple[Task, ...]) -> str:
+    """Render the dim one-line notice shown in place of a folded reminder.
+
+    Counts are taken from the live ``tasks`` snapshot at render time, not
+    from re-parsing the templated reminder body — so the notice always
+    reflects the current task list, even after ``/load`` against a
+    session whose tasks were modified after the reminder fired.
+    """
+    n_done = sum(1 for t in tasks if t.status == "completed")
+    n_inprog = sum(1 for t in tasks if t.status == "in_progress")
+    n_todo = sum(1 for t in tasks if t.status == "pending")
+    return (
+        "system reminder: task list injected "
+        f"({n_done} done, {n_inprog} in progress, {n_todo} todo)"
+    )
 
 
 def _build_task_reminder_body(tasks: tuple[Task, ...]) -> str:

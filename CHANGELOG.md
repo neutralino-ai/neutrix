@@ -4,6 +4,52 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.8.1] — 2026-05-25
+
+### Added
+- Persistent task panel above the input cursor. Shows every task
+  (pending, in_progress, completed) the moment any exist, with a
+  `… +N pending, M done` overflow line capped at 5 task rows. Hidden
+  when no tasks exist. Lives in the same dim-foreground region as the
+  queued-message display.
+- Task-reminder messages (from v0.8.0's 10-turn trigger) now render
+  inline as a single dim "system reminder: task list injected (N done,
+  N in progress, N todo)" notice with live counts of the current task
+  list — both live (when the controller injects them) and on `/load`
+  replay. v0.8.0's trigger algorithm, body text, and persistence
+  format are unchanged; only the renderer is new. Folded by default
+  because the always-visible task panel above the input already shows
+  the task list. Smart, judged reminders (with their own renderer
+  treatment) arrive in v0.11.0 — see
+  `docs/PRDs/v0.11.0-smart-advisor.md`.
+
+### Changed
+- `TaskCreate`, `TaskUpdate`, `TaskList` tool descriptions are now
+  ports of Claude Code's V2 task tool prompts (with the agent-swarm
+  branches dropped). The load-bearing lifecycle clauses — *"Mark it
+  as in_progress BEFORE beginning work"*, *"Always mark your assigned
+  tasks as resolved when you finish them"*, *"After resolving, call
+  TaskList to find your next task"* — live in the tool schema the
+  LLM sees on every turn, matching where Claude Code's own V2 puts
+  them. Replaces the v0.8.0 one-line stubs that left the LLM with no
+  lifecycle guidance and led to "tasks created but not started" and
+  "claimed but no tool call fired" failure modes during manual
+  testing.
+- Tool result strings now match Claude Code's V2 byte-for-byte:
+  `"Task #N created successfully: subject"`,
+  `"Updated task #N status, subject"`, `"Updated task #N deleted"`,
+  `"Task #N not found"`. (An earlier v0.8.1 draft appended a
+  *"Please proceed with the current tasks if applicable"* nudge to
+  these — that wording belongs to V1's `TodoWriteTool` and not to
+  V2; mixing V1's nudge into V2-shaped tools shaped the LLM
+  incorrectly.)
+- Input draft placeholder is now dim gray (prompt_toolkit
+  FormattedText with `fg:ansibrightblack`) instead of the default
+  foreground style, matching the dim hierarchy already used for
+  queued user messages.
+
+See [docs/PRDs/v0.8.1-tasks-visible-and-auto-continue.md](docs/PRDs/v0.8.1-tasks-visible-and-auto-continue.md).
+
 ## [v0.8.0] - 2026-05-25
 
 ### Added

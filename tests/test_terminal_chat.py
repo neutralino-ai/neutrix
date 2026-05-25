@@ -14,10 +14,12 @@ from neutrix.agent_loop import AgentEvent
 from neutrix.config import Config, Slot
 from neutrix.store import ChatStore
 from neutrix.terminal_chat import (
+    MAX_PANEL_ROWS,
     TerminalChat,
     ToolRecord,
     approximate_token_count,
     delete_buffer_to_line_end,
+    format_task_panel,
     move_buffer_to_line_start,
     result_line_count,
 )
@@ -271,7 +273,7 @@ async def test_terminal_chat_accepts_and_queues_input_while_agent_is_busy(
     # supplier. The bottom toolbar is gone in v0.7.0 (it blinked
     # during streaming output); /status is the on-demand replacement.
     assert "queued:" not in chat._status_line()
-    rendered_message = _render(chat._queued_message())
+    rendered_message = _render(chat._above_input())
     assert "› second" in rendered_message  # noqa: RUF001 -- chosen UI glyph
 
     await agent.releases.put(None)
@@ -402,14 +404,14 @@ async def test_terminal_chat_renders_multiple_queued_messages_in_order(
     assert "queued:" not in chat._status_line()
 
     # Queue renders ABOVE the input cursor via the message supplier.
-    message = chat._queued_message()
+    message = chat._above_input()
     assert not isinstance(
         message, str
-    ), "queued_message must be FormattedText when queue is non-empty"
+    ), "_above_input must be FormattedText when queue is non-empty"
     fragments = list(message)
     queued_lines = [text for _style, text in fragments if text.startswith("› ")]  # noqa: RUF001
     assert queued_lines == ["› second\n", "› third\n"]  # noqa: RUF001
-    # All fragments are dim-styled.
+    # No tasks → all fragments are dim queue lines.
     assert all(style == "fg:ansibrightblack" for style, _text in fragments)
 
     # Release each turn; the queue must drain in submission order.
@@ -430,7 +432,7 @@ def test_terminal_chat_status_line_carries_only_status_no_queue(
 ) -> None:
     """`_status_line` is the on-demand status string used by /status.
     It never contains queue rendering; the queue lives in
-    `_queued_message` (rendered above the input)."""
+    `_above_input` (rendered above the input)."""
     agent = ToolAgent()
     chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
     line = chat._status_line()
@@ -438,8 +440,8 @@ def test_terminal_chat_status_line_carries_only_status_no_queue(
     assert "queued:" not in line
     assert "tools:" in line
     assert "msgs:" in line
-    # No queue → empty message supplier output.
-    assert chat._queued_message() == ""
+    # No queue, no tasks → empty supplier output.
+    assert chat._above_input() == ""
 
 
 class TaskCreatingAgent(ToolAgent):
@@ -584,3 +586,224 @@ def test_terminal_chat_save_and_load_round_trip_via_commands(tmp_path: Path) -> 
     assert len(chat_b.store.messages) == len(agent_b.messages)
     assert chat_b.store.messages[1].role == "user"
     assert chat_b.store.messages[1].content == "please list"
+
+
+# ---- v0.8.1: task panel + folded reminder rendering ------------------------
+
+
+def test_format_task_panel_returns_empty_for_no_tasks():
+    """Hidden when no tasks exist — matches Claude TaskListV2 behavior so
+    the input cursor sits at its natural position."""
+    assert format_task_panel(()) == []
+
+
+def test_format_task_panel_orders_in_progress_then_pending_then_completed():
+    """v0.8.1 panel sort: in_progress → pending → completed, id ascending
+    inside each bucket (matches Claude Code's getTaskListSortedByStatus)."""
+    store = ChatStore()
+    store.add_task("a-pending")
+    store.add_task("b-completed")
+    store.add_task("c-in-progress")
+    store.update_task("2", status="completed")
+    store.update_task("3", status="in_progress")
+    fragments = format_task_panel(store.tasks)
+
+    flat = "".join(text for _style, text in fragments)
+    in_progress_pos = flat.index("c-in-progress")
+    pending_pos = flat.index("a-pending")
+    completed_pos = flat.index("b-completed")
+    assert in_progress_pos < pending_pos < completed_pos
+
+
+def test_format_task_panel_styles_match_status():
+    """in_progress: cyan bold, pending: default, completed: green."""
+    store = ChatStore()
+    store.add_task("plain")
+    store.add_task("active")
+    store.add_task("done")
+    store.update_task("2", status="in_progress")
+    store.update_task("3", status="completed")
+    styles_by_subject = {
+        text.strip().split()[-1]: style for style, text in format_task_panel(store.tasks)
+    }
+    assert styles_by_subject["active"] == "fg:ansicyan bold"
+    assert styles_by_subject["plain"] == ""
+    assert styles_by_subject["done"] == "fg:ansigreen"
+
+
+def test_format_task_panel_caps_visible_rows_and_emits_overflow_line():
+    """Cap at MAX_PANEL_ROWS visible task lines; append a single dim
+    overflow line summarizing the truncated bucket sizes."""
+    store = ChatStore()
+    for i in range(MAX_PANEL_ROWS + 3):
+        store.add_task(f"task-{i}")
+    store.update_task("1", status="completed")
+    store.update_task("2", status="completed")
+    fragments = format_task_panel(store.tasks)
+
+    task_rows = [t for s, t in fragments if "task-" in t]
+    assert len(task_rows) == MAX_PANEL_ROWS
+    overflow = [(s, t) for s, t in fragments if t.startswith("  … +")]
+    assert len(overflow) == 1
+    style, text = overflow[0]
+    assert style == "fg:ansibrightblack"
+    # 6 pending + 2 completed total = 8 tasks; visible = top 5 sorted
+    # (5 pending), overflow = 1 pending + 2 completed.
+    assert "1 pending" in text
+    assert "2 done" in text
+
+
+def test_draft_reader_placeholder_uses_dim_formatted_text():
+    """v0.8.1: the empty-input hint renders in fg:ansibrightblack so it
+    reads as a hint rather than as foreground text."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.formatted_text import FormattedText
+
+    from neutrix.terminal_chat import DraftReader
+
+    reader = DraftReader(message_supplier=lambda: "")
+    session = reader._session
+    assert session is not None
+    placeholder = session.placeholder
+    assert isinstance(placeholder, FormattedText)
+    styles = {style for style, _text in placeholder}
+    assert styles == {"fg:ansibrightblack"}
+
+
+class RecordingView:
+    """Minimal TerminalView stand-in that captures notice/user/etc. calls
+    so reminder-folding tests can assert which render path was taken
+    without diff'ing rendered text."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def print_notice(self, content: str, *, style: str = "dim") -> None:
+        self.calls.append(("notice", content, style))
+
+    async def print_system(self, content: str) -> None:
+        self.calls.append(("system", content, None))
+
+    async def print_user(self, content: str) -> None:
+        self.calls.append(("user", content, None))
+
+    async def print_assistant(self, content: str) -> None:
+        self.calls.append(("assistant", content, None))
+
+    async def print_text(self, text) -> None:
+        self.calls.append(("text", str(text), None))
+
+    async def write_raw(self, text: str) -> None:
+        self.calls.append(("raw", text, None))
+
+
+def _make_reminder(body_lines: list[str] | None = None) -> dict[str, Any]:
+    body = "\n".join(
+        body_lines
+        or [
+            "The task tools haven't been used recently.",
+            "",
+            "Here are the existing tasks:",
+            "",
+            "#1. [pending] refactor onion",
+        ]
+    )
+    return {"role": "user", "content": f"<system-reminder>\n{body}\n</system-reminder>"}
+
+
+def _seed_chat_with_messages(
+    tmp_path: Path,
+    messages: list[dict[str, Any]],
+) -> tuple[TerminalChat, RecordingView]:
+    agent = ToolAgent()
+    agent.messages = messages
+    chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
+    view = RecordingView()
+    chat.view = view  # swap in the recorder for direct introspection
+    return chat, view
+
+
+@pytest.mark.asyncio
+async def test_render_transcript_folds_reminder_as_dim_notice(tmp_path: Path):
+    """v0.8.1: a <system-reminder> user message in agent.messages renders
+    as a single dim notice on replay (after /load or /clear), not as a
+    plain user block — and adjacent real turns render normally."""
+    chat, view = _seed_chat_with_messages(
+        tmp_path,
+        [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            _make_reminder(),
+            {"role": "user", "content": "next"},
+            {"role": "assistant", "content": "ok"},
+        ],
+    )
+    chat.store.add_task("refactor onion")
+
+    await chat._render_transcript()
+
+    notice_calls = [c for c in view.calls if c[0] == "notice"]
+    user_calls = [c for c in view.calls if c[0] == "user"]
+    # The reminder renders as exactly one dim notice.
+    assert len(notice_calls) == 1
+    assert notice_calls[0][2] == "dim"
+    assert notice_calls[0][1].startswith("system reminder: task list injected")
+    # Real user messages render normally — the reminder did not eat them.
+    assert [c[1] for c in user_calls] == ["hello", "next"]
+
+
+@pytest.mark.asyncio
+async def test_send_message_folds_live_reminder_appended_during_turn(
+    tmp_path: Path,
+):
+    """v0.8.1: when the agent injects a reminder before the LLM call,
+    the user sees the folded notice land in the live transcript
+    exactly once per reminder, not as a plain user block."""
+
+    class ReminderAgent(ToolAgent):
+        async def stream_reply(self, user_text: str):
+            self.messages.append({"role": "user", "content": user_text})
+            # Mirror what agent_loop._maybe_inject_task_reminder does:
+            # append a Claude-shaped <system-reminder> user message
+            # before the assistant turn.
+            self.messages.append(_make_reminder())
+            self.messages.append({"role": "assistant", "content": "ack"})
+            yield AgentEvent("assistant", "ack")
+            yield AgentEvent("done")
+
+    agent = ReminderAgent()
+    chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
+    view = RecordingView()
+    chat.view = view
+    chat.store.add_task("refactor onion")
+
+    await chat._send_message("kickoff")
+
+    notice_calls = [c for c in view.calls if c[0] == "notice"]
+    folded_calls = [
+        c
+        for c in notice_calls
+        if c[1].startswith("system reminder: task list injected")
+    ]
+    assert len(folded_calls) == 1
+    assert folded_calls[0][2] == "dim"
+
+
+@pytest.mark.asyncio
+async def test_send_message_skips_folded_notice_when_no_reminder_landed(
+    tmp_path: Path,
+):
+    """A turn that doesn't trigger a reminder must not emit the folded
+    notice — guard against false positives in the snapshot-diff logic."""
+    agent = ToolAgent()  # base ToolAgent does no reminder injection
+    chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
+    view = RecordingView()
+    chat.view = view
+
+    await chat._send_message("hello")
+
+    notice_calls = [c for c in view.calls if c[0] == "notice"]
+    assert not any(
+        c[1].startswith("system reminder: task list injected") for c in notice_calls
+    )

@@ -18,6 +18,24 @@ def test_task_tools_appear_in_registry_with_claude_code_names():
     assert "TaskList" in BUILTIN_TOOLS
 
 
+def test_task_tool_descriptions_carry_claude_code_v2_lifecycle_guidance():
+    """v0.8.1: tool descriptions are lifted from Claude Code's V2
+    task tool prompts. Without these lifecycle cues the LLM doesn't
+    auto-start work (observed in v0.8.0 manual testing). Regression
+    guard: if someone shortens these strings back to the 1-line stubs,
+    this test catches it."""
+    create_desc = BUILTIN_TOOLS["TaskCreate"].description
+    assert "Mark it as in_progress BEFORE beginning work" in create_desc
+    assert "When you start working on a task" in create_desc
+
+    update_desc = BUILTIN_TOOLS["TaskUpdate"].description
+    assert "Always mark your assigned tasks as resolved" in update_desc
+    assert "After resolving, call TaskList to find your next task" in update_desc
+
+    list_desc = BUILTIN_TOOLS["TaskList"].description
+    assert "Prefer working on tasks in ID order" in list_desc
+
+
 def test_task_tool_schemas_match_documented_shape():
     schemas = {schema["function"]["name"]: schema for schema in get_schemas()}
     create = schemas["TaskCreate"]["function"]["parameters"]
@@ -35,10 +53,21 @@ def test_task_tool_schemas_match_documented_shape():
 def test_task_create_mutates_store_and_returns_human_message():
     store = ChatStore()
     out = dispatch("TaskCreate", json.dumps({"subject": "first"}), store=store)
-    assert out == "ok, created task 1: first"
+    assert out == "Task #1 created successfully: first"
     assert [(t.id, t.subject, t.status) for t in store.tasks] == [
         ("1", "first", "pending")
     ]
+
+
+def test_task_create_result_matches_claude_code_v2_format():
+    """v0.8.1: result strings mirror Claude Code's V2
+    TaskCreateTool.mapToolResultToToolResultBlockParam exactly —
+    bare ack, no nudge. The LLM is shaped via the rich tool
+    description, not via result-text suffixes (which V2 doesn't use)."""
+    store = ChatStore()
+    out = dispatch("TaskCreate", json.dumps({"subject": "x"}), store=store)
+    assert "Please proceed" not in out
+    assert out == "Task #1 created successfully: x"
 
 
 def test_task_create_accepts_optional_description():
@@ -59,8 +88,23 @@ def test_task_update_changes_status_field():
         json.dumps({"taskId": "1", "status": "in_progress"}),
         store=store,
     )
-    assert out == "ok, task 1 updated: status=in_progress"
+    assert out == "Updated task #1 status"
     assert store.tasks[0].status == "in_progress"
+
+
+def test_task_update_result_matches_claude_code_v2_format():
+    """V2 result text is `Updated task #ID field1, field2` — bare field
+    names, no values, no nudge. Match exactly so the LLM gets the same
+    cue surface CC's own sessions get."""
+    store = ChatStore()
+    store.add_task("first")
+    out = dispatch(
+        "TaskUpdate",
+        json.dumps({"taskId": "1", "status": "in_progress", "subject": "renamed"}),
+        store=store,
+    )
+    assert "Please proceed" not in out
+    assert out == "Updated task #1 status, subject"
 
 
 def test_task_update_unknown_id_returns_not_found():
@@ -70,7 +114,7 @@ def test_task_update_unknown_id_returns_not_found():
         json.dumps({"taskId": "99", "status": "completed"}),
         store=store,
     )
-    assert out == "task 99 not found"
+    assert out == "Task #99 not found"
 
 
 def test_task_update_with_status_deleted_removes_task():
@@ -81,7 +125,9 @@ def test_task_update_with_status_deleted_removes_task():
         json.dumps({"taskId": "1", "status": "deleted"}),
         store=store,
     )
-    assert out == "ok, deleted task 1: first"
+    # V2 treats deletion as a status change, so the success message has the
+    # same `Updated task #N <field>` shape with `deleted` as the field.
+    assert out == "Updated task #1 deleted"
     assert store.tasks == ()
 
 

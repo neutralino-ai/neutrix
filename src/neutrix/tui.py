@@ -32,7 +32,12 @@ from textual.timer import Timer
 from textual.widgets import Static, TextArea
 
 from neutrix import transcript
-from neutrix.agent_loop import Agent, AgentEvent
+from neutrix.agent_loop import (
+    Agent,
+    AgentEvent,
+    format_reminder_notice,
+    is_task_reminder,
+)
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
 from neutrix.store import ChatStore, openai_to_record
 from neutrix.tools import BUILTIN_TOOLS
@@ -43,6 +48,7 @@ ROLE_STYLE = {
     "tool": "bold yellow",
     "system": "bold yellow",
     "error": "bold red",
+    "reminder": "dim",
 }
 
 ROLE_LABEL = {
@@ -51,6 +57,7 @@ ROLE_LABEL = {
     "system": "",
     "tool": "Tool",
     "error": "Error",
+    "reminder": "",
 }
 
 NOTICE_STYLE = {
@@ -162,7 +169,8 @@ class Message(Static):
         if self._markdown and self.role == "assistant":
             self.update(Markdown(self._content) if self._content else Text(""))
         else:
-            self.update(Text(self._content, style=style if self.role == "error" else ""))
+            inline_style = style if self.role in {"error", "reminder"} else ""
+            self.update(Text(self._content, style=inline_style))
 
 
 class NeutrixApp(App):
@@ -262,6 +270,10 @@ class NeutrixApp(App):
     .role-error {
         background: #1e1c18;
         color: #c65a4a;
+    }
+    .role-reminder {
+        background: #10100e;
+        color: #9a9284;
     }
     """
 
@@ -402,6 +414,11 @@ class NeutrixApp(App):
         self._clear_model_blocks()
         for message in self.agent.messages:
             role = str(message.get("role") or "")
+            if role == "user" and is_task_reminder(message.get("content")):
+                # v0.8.0 reminder body — render the folded notice instead
+                # of leaking the templated text as a user block.
+                self._post("reminder", format_reminder_notice(self.store.tasks))
+                continue
             content = self._message_content(message)
             if content:
                 self._post(role, str(content), markdown=role == "assistant")
