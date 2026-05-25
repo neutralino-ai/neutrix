@@ -5,6 +5,7 @@ a confirmation prompt that the TUI surfaces to the user.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -14,6 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from neutrix.store import ChatStore
+
+# Status names the LLM may pass to TaskUpdate. Matches Claude Code's
+# `TaskUpdateStatusSchema().or(z.literal("deleted"))` shape — "deleted"
+# is the action that removes the task, not a stored status value.
+_TASK_UPDATE_STATUSES = ("pending", "in_progress", "completed", "deleted")
+_STORE_REQUIRED_TOOLS = frozenset({"TaskCreate", "TaskUpdate", "TaskList"})
 
 
 @dataclass
@@ -93,6 +102,74 @@ def _run_shell(command: str, timeout: int = 30) -> str:
     return "\n".join(parts)
 
 
+def _task_create(
+    subject: str,
+    description: str = "",
+    *,
+    store: ChatStore | None = None,
+) -> str:
+    if store is None:
+        return "ERROR: TaskCreate requires a ChatStore"
+    if not subject:
+        return "ERROR: subject is required"
+    task = store.add_task(subject, description=description or "")
+    return f"ok, created task {task.id}: {task.subject}"
+
+
+def _task_update(
+    taskId: str,  # ruff: noqa - LLM-facing name matches Claude Code's tool
+    status: str | None = None,
+    subject: str | None = None,
+    description: str | None = None,
+    *,
+    store: ChatStore | None = None,
+) -> str:
+    if store is None:
+        return "ERROR: TaskUpdate requires a ChatStore"
+    if status is not None and status not in _TASK_UPDATE_STATUSES:
+        allowed = ", ".join(_TASK_UPDATE_STATUSES)
+        return f"ERROR: status must be one of {allowed}"
+
+    if status == "deleted":
+        removed = store.remove_task(taskId)
+        if removed is None:
+            return f"task {taskId} not found"
+        return f"ok, deleted task {removed.id}: {removed.subject}"
+
+    updated = store.update_task(
+        taskId,
+        status=status,
+        subject=subject,
+        description=description,
+    )
+    if updated is None:
+        return f"task {taskId} not found"
+    changed: list[str] = []
+    if status is not None:
+        changed.append(f"status={status}")
+    if subject is not None:
+        changed.append(f"subject={subject!r}")
+    if description is not None:
+        changed.append(f"description={description!r}")
+    summary = ", ".join(changed) if changed else "no fields changed"
+    return f"ok, task {updated.id} updated: {summary}"
+
+
+def _task_list(*, store: ChatStore | None = None) -> str:
+    if store is None:
+        return "ERROR: TaskList requires a ChatStore"
+    items = [
+        {
+            "id": task.id,
+            "subject": task.subject,
+            "status": task.status,
+            "description": task.description,
+        }
+        for task in store.tasks
+    ]
+    return json.dumps(items)
+
+
 # ----- registry ---------------------------------------------------------------
 
 
@@ -157,6 +234,77 @@ BUILTIN_TOOLS: dict[str, Tool] = {
         },
         func=_run_shell,
     ),
+    "TaskCreate": Tool(
+        name="TaskCreate",
+        description=(
+            "Add a new task to the session task list. Use when the user "
+            "agrees to track work, or when you want to remember items "
+            "that span multiple turns. Returns the new task id."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "subject": {
+                    "type": "string",
+                    "description": "Short title (one line).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional longer detail.",
+                },
+            },
+            "required": ["subject"],
+        },
+        func=_task_create,
+    ),
+    "TaskUpdate": Tool(
+        name="TaskUpdate",
+        description=(
+            "Update an existing task's status, subject, or description. "
+            "Set status to 'in_progress' when starting work, 'completed' "
+            "when done, or 'deleted' to remove the task entirely."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "taskId": {
+                    "type": "string",
+                    "description": "Id returned by TaskCreate.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": list(_TASK_UPDATE_STATUSES),
+                    "description": (
+                        "New status, or 'deleted' to remove the task."
+                    ),
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Replacement subject.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Replacement description.",
+                },
+            },
+            "required": ["taskId"],
+        },
+        func=_task_update,
+    ),
+    "TaskList": Tool(
+        name="TaskList",
+        description=(
+            "Return the full session task list as a JSON array of "
+            "{id, subject, status, description}. Use when you need to "
+            "re-orient on every tracked item, not just the actionable "
+            "subset surfaced by the system reminder."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        func=_task_list,
+    ),
 }
 
 
@@ -164,8 +312,19 @@ def get_schemas() -> list[dict[str, Any]]:
     return [t.schema() for t in BUILTIN_TOOLS.values()]
 
 
-def dispatch(name: str, arguments_json: str) -> str:
+def dispatch(
+    name: str,
+    arguments_json: str,
+    *,
+    store: ChatStore | None = None,
+) -> str:
     """Look up `name` in the registry and call it with parsed JSON args.
+
+    The ``store`` keyword is forwarded only to tools whose implementation
+    declares a ``store`` keyword parameter (currently ``TaskCreate``,
+    ``TaskUpdate``, ``TaskList``); all other tools see their original
+    signature. This keeps existing callers working while letting the
+    task tools mutate :class:`neutrix.store.ChatStore` directly.
 
     Returns the tool's string result (errors are returned as text, not raised).
     """
@@ -176,6 +335,12 @@ def dispatch(name: str, arguments_json: str) -> str:
         args = json.loads(arguments_json) if arguments_json else {}
     except json.JSONDecodeError as e:
         return f"ERROR: invalid JSON args: {e}"
+    try:
+        signature = inspect.signature(tool.func)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None and "store" in signature.parameters:
+        args.setdefault("store", store)
     try:
         return tool.func(**args)
     except TypeError as e:

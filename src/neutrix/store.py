@@ -14,14 +14,34 @@ imports nothing from ``tui``, ``terminal_chat``, ``agent_loop``, ``llm``,
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
 
 from loguru import logger
 
 Role = Literal["user", "assistant", "system", "tool"]
+TaskStatus = Literal["pending", "in_progress", "completed"]
+
+
+@dataclass(frozen=True)
+class Task:
+    """One LLM-tracked work item.
+
+    Mirrors the minimal shape of Claude Code's todo entries: a stable
+    id, a short subject, an optional description, and a tri-state status.
+    Ids are monotonic positive integers serialized as strings so they
+    survive transcript save/load and stay short enough to mention in
+    conversation.
+    """
+
+    id: str
+    subject: str
+    description: str = ""
+    status: TaskStatus = "pending"
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass(frozen=True)
@@ -80,6 +100,8 @@ class ChatStore:
         self._queued: list[QueuedUserMessage] = []
         self._pending_assistant_text: str | None = None
         self._pending_tool_calls: list[PendingToolCall] = []
+        self._tasks: list[Task] = []
+        self._next_task_id: int = 1
         self._subscribers: set[asyncio.Event] = set()
 
     # --------------------------------------------------------------- reads
@@ -99,6 +121,10 @@ class ChatStore:
     @property
     def pending_tool_calls(self) -> tuple[PendingToolCall, ...]:
         return tuple(self._pending_tool_calls)
+
+    @property
+    def tasks(self) -> tuple[Task, ...]:
+        return tuple(self._tasks)
 
     # -------------------------------------------------------------- writes
 
@@ -177,12 +203,88 @@ class ChatStore:
         self._pending_tool_calls.clear()
         self._notify()
 
+    def add_task(self, subject: str, description: str = "") -> Task:
+        """Append a new ``pending`` task and return it."""
+        task = Task(
+            id=str(self._next_task_id),
+            subject=subject,
+            description=description,
+        )
+        self._next_task_id += 1
+        self._tasks.append(task)
+        self._notify()
+        return task
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        status: TaskStatus | None = None,
+        subject: str | None = None,
+        description: str | None = None,
+    ) -> Task | None:
+        """Update one or more fields of an existing task.
+
+        Returns the new record, or ``None`` if the id is unknown. The
+        ``updated_at`` field is refreshed whenever any field changes.
+        """
+        for index, existing in enumerate(self._tasks):
+            if existing.id != task_id:
+                continue
+            changes: dict[str, Any] = {}
+            if status is not None and status != existing.status:
+                changes["status"] = status
+            if subject is not None and subject != existing.subject:
+                changes["subject"] = subject
+            if description is not None and description != existing.description:
+                changes["description"] = description
+            if not changes:
+                return existing
+            changes["updated_at"] = datetime.now()
+            new_task = replace(existing, **changes)
+            self._tasks[index] = new_task
+            self._notify()
+            return new_task
+        return None
+
+    def remove_task(self, task_id: str) -> Task | None:
+        """Remove the matching task; return the removed record, or
+        ``None`` if the id is unknown.
+        """
+        for index, existing in enumerate(self._tasks):
+            if existing.id == task_id:
+                removed = self._tasks.pop(index)
+                self._notify()
+                return removed
+        return None
+
+    def replace_tasks(self, tasks: Iterable[Task]) -> None:
+        """Replace the current task list and reset the id counter.
+
+        Used by :func:`neutrix.transcript.load` to seed tasks from disk.
+        The next-id counter resumes from ``max(loaded_ids) + 1`` so newly
+        added tasks never collide with previously deleted ones.
+        """
+        self._tasks = list(tasks)
+        max_id = 0
+        for task in self._tasks:
+            try:
+                value = int(task.id)
+            except (TypeError, ValueError):
+                continue
+            if value > max_id:
+                max_id = value
+        self._next_task_id = max_id + 1
+        self._notify()
+
     def reset(self, system_prompt: str | None = None) -> None:
         """Drop all state. Optionally re-seed with a system prompt."""
         self._messages.clear()
         self._queued.clear()
         self._pending_assistant_text = None
         self._pending_tool_calls.clear()
+        self._tasks.clear()
+        self._next_task_id = 1
         if system_prompt is not None:
             self._messages.append(
                 MessageRecord(role="system", content=system_prompt)

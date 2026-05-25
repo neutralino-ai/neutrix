@@ -14,6 +14,7 @@ from neutrix.store import (
     MessageRecord,
     PendingToolCall,
     QueuedUserMessage,
+    Task,
     openai_to_record,
     record_to_openai,
 )
@@ -98,6 +99,7 @@ def test_reset_clears_everything_and_optionally_seeds_system_prompt():
     store.add_pending_tool_call("t", "{}")
     store.start_assistant_stream()
     store.extend_assistant_stream("partial")
+    store.add_task("task")
 
     store.reset(system_prompt="be brief")
     assert len(store.messages) == 1
@@ -106,6 +108,113 @@ def test_reset_clears_everything_and_optionally_seeds_system_prompt():
     assert store.queued_user_messages == ()
     assert store.pending_tool_calls == ()
     assert store.pending_assistant_text is None
+    assert store.tasks == ()
+    # After reset the next id starts from 1 again.
+    fresh = store.add_task("first")
+    assert fresh.id == "1"
+
+
+# ---- tasks ------------------------------------------------------------------
+
+
+def test_add_task_assigns_monotonic_string_ids():
+    store = ChatStore()
+    a = store.add_task("first")
+    b = store.add_task("second", description="detail")
+    assert isinstance(a, Task)
+    assert (a.id, a.subject, a.status) == ("1", "first", "pending")
+    assert (b.id, b.subject, b.description) == ("2", "second", "detail")
+    assert store.tasks == (a, b)
+
+
+def test_update_task_changes_fields_and_refreshes_updated_at():
+    store = ChatStore()
+    task = store.add_task("first")
+    original_updated_at = task.updated_at
+
+    updated = store.update_task(task.id, status="in_progress")
+    assert updated is not None
+    assert updated.status == "in_progress"
+    assert updated.subject == "first"
+    assert updated.updated_at >= original_updated_at
+    assert store.tasks[0] == updated
+
+
+def test_update_task_no_change_returns_existing_unchanged():
+    store = ChatStore()
+    task = store.add_task("first")
+    same = store.update_task(task.id, subject="first")
+    assert same == task
+
+
+def test_update_task_unknown_id_returns_none():
+    store = ChatStore()
+    store.add_task("first")
+    assert store.update_task("99", status="completed") is None
+
+
+def test_remove_task_returns_removed_record_or_none():
+    store = ChatStore()
+    a = store.add_task("first")
+    b = store.add_task("second")
+    removed = store.remove_task(a.id)
+    assert removed == a
+    assert store.tasks == (b,)
+    assert store.remove_task("99") is None
+
+
+def test_replace_tasks_seeds_next_id_from_max_id_not_length():
+    """Deleted-then-saved tasks leave gaps in the id sequence; the next
+    id must be max(loaded_ids) + 1, not len(loaded) + 1, otherwise a
+    fresh add_task would collide with an existing id."""
+    store = ChatStore()
+    loaded = [
+        Task(id="2", subject="two"),
+        Task(id="5", subject="five"),
+    ]
+    store.replace_tasks(loaded)
+    assert store.tasks == tuple(loaded)
+    fresh = store.add_task("new")
+    assert fresh.id == "6"
+
+
+def test_replace_tasks_with_empty_list_resets_counter_to_one():
+    store = ChatStore()
+    store.add_task("a")
+    store.add_task("b")
+    store.replace_tasks([])
+    assert store.tasks == ()
+    assert store.add_task("c").id == "1"
+
+
+async def test_task_mutations_notify_subscribers():
+    store = ChatStore()
+    woke = asyncio.Event()
+    yielded = 0
+
+    async def watcher() -> None:
+        nonlocal yielded
+        async for _ in store.changes():
+            yielded += 1
+            woke.set()
+            if yielded == 3:
+                return
+
+    task = asyncio.create_task(watcher())
+    await asyncio.sleep(0)
+
+    store.add_task("a")
+    await asyncio.wait_for(woke.wait(), timeout=1.0)
+    woke.clear()
+
+    only = store.tasks[0]
+    store.update_task(only.id, status="in_progress")
+    await asyncio.wait_for(woke.wait(), timeout=1.0)
+    woke.clear()
+
+    store.remove_task(only.id)
+    await asyncio.wait_for(task, timeout=1.0)
+    assert yielded == 3
 
 
 async def test_changes_yields_on_every_subscribed_mutation():

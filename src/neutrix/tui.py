@@ -300,6 +300,8 @@ class NeutrixApp(App):
         self._busy = False
         self._thinking_tick = 0
         self._thinking_timer: Timer | None = None
+        self.store = ChatStore()
+        self.agent.store = self.store
 
     def compose(self) -> ComposeResult:
         with Vertical(id="chat"):
@@ -545,6 +547,7 @@ class NeutrixApp(App):
         lines = [
             "Commands:",
             "  /help               show this",
+            "  /tasks              list tracked tasks (read-only)",
             "  /fast               switch to the fast slot",
             "  /strong             switch to the strong slot",
             "  /model              show current slot/provider/model",
@@ -587,13 +590,18 @@ class NeutrixApp(App):
         else:
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             path = Path("sessions") / f"{ts}.json"
-        store = ChatStore()
+        # Mirror the agent's messages into a fresh store so it carries
+        # the same shape as terminal_chat — the live tasks come from
+        # self.store, which the agent has been mutating directly.
+        snapshot = ChatStore()
         for raw in self.agent.messages:
             if isinstance(raw, dict):
-                store.append_message(openai_to_record(raw))
+                snapshot.append_message(openai_to_record(raw))
+        if self.store.tasks:
+            snapshot.replace_tasks(self.store.tasks)
         out = transcript.save(
             path,
-            store,
+            snapshot,
             provider=self.agent.slot.provider,
             model=self.agent.slot.model,
         )
@@ -603,19 +611,31 @@ class NeutrixApp(App):
         if not args:
             self._notice("usage: /load PATH", severity="error")
             return
-        _store, metadata = transcript.load(args[0])
+        loaded, metadata = transcript.load(args[0])
         self.agent.messages = list(metadata["raw_messages"])
+        self.store.reset()
+        if loaded.tasks:
+            self.store.replace_tasks(loaded.tasks)
         self._render_model_blocks()
         self._notice(
-            f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
-            f"current slot unchanged",
+            f"loaded {args[0]} ({len(self.agent.messages)} msgs, "
+            f"{len(self.store.tasks)} tasks); current slot unchanged",
             severity="success",
         )
 
     async def _cmd_clear(self, args: list[str]) -> None:
         self.agent.reset()
+        self.store.reset()
         self._render_model_blocks()
         self._notice("conversation cleared", severity="success")
+
+    async def _cmd_tasks(self, args: list[str]) -> None:
+        tasks = self.store.tasks
+        if not tasks:
+            self._notice("no tasks")
+            return
+        lines = [f"#{t.id} [{t.status}] {t.subject}" for t in tasks]
+        self._notice("\n".join(lines))
 
     async def _cmd_tools(self, args: list[str]) -> None:
         if args and args[0] in ("on", "off"):

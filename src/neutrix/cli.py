@@ -91,11 +91,17 @@ def main(argv: list[str] | None = None) -> int:
     agent = Agent(slot=slot, use_tools=not args.no_tools)
     _configure_chat_logging()
 
+    loaded_tasks: list = []
     if args.load:
         try:
-            _store, metadata = transcript.load(args.load)
+            loaded_store, metadata = transcript.load(args.load)
             agent.messages = list(metadata["raw_messages"])
-            logger.info("loaded transcript: {} msgs", len(agent.messages))
+            loaded_tasks = list(loaded_store.tasks)
+            logger.info(
+                "loaded transcript: {} msgs, {} tasks",
+                len(agent.messages),
+                len(loaded_tasks),
+            )
         except Exception as e:
             print(f"neutrix: error loading transcript: {e}", file=sys.stderr)
             return 1
@@ -103,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     from neutrix.terminal_chat import TerminalChat
 
     chat = TerminalChat(agent, config=config, render_markdown=not args.no_markdown)
+    if loaded_tasks:
+        chat.store.replace_tasks(loaded_tasks)
     chat.run()
     return 0
 

@@ -12,6 +12,7 @@ from rich.console import Console
 
 from neutrix.agent_loop import AgentEvent
 from neutrix.config import Config, Slot
+from neutrix.store import ChatStore
 from neutrix.terminal_chat import (
     TerminalChat,
     ToolRecord,
@@ -51,6 +52,7 @@ class ToolAgent:
             {"role": "system", "content": "system prompt"}
         ]
         self.sent: list[str] = []
+        self.store: ChatStore | None = None
 
     def effective_tools_enabled(self) -> bool:
         return self.use_tools
@@ -438,6 +440,116 @@ def test_terminal_chat_status_line_carries_only_status_no_queue(
     assert "msgs:" in line
     # No queue → empty message supplier output.
     assert chat._queued_message() == ""
+
+
+class TaskCreatingAgent(ToolAgent):
+    """Fake agent that emits a TaskCreate tool call and mutates the store
+    directly the way the real Agent's dispatch does."""
+
+    def __init__(self, subject: str = "first") -> None:
+        super().__init__()
+        self.subject = subject
+
+    async def stream_reply(self, user_text: str):
+        self.sent.append(user_text)
+        self.messages.append({"role": "user", "content": user_text})
+        arguments = f'{{"subject": "{self.subject}"}}'
+        yield AgentEvent("tool_call", {"name": "TaskCreate", "arguments": arguments})
+        assert self.store is not None
+        task = self.store.add_task(self.subject)
+        result = f"ok, created task {task.id}: {task.subject}"
+        self.messages.append(
+            {"role": "tool", "tool_call_id": "call_1", "content": result}
+        )
+        yield AgentEvent("tool_result", {"name": "TaskCreate", "result": result})
+        self.messages.append({"role": "assistant", "content": "tracked"})
+        yield AgentEvent("assistant", "tracked")
+        yield AgentEvent("done")
+
+
+def test_terminal_chat_constructor_wires_store_into_agent(tmp_path: Path) -> None:
+    """The PRD requires TerminalChat to construct Agent with store=self.store
+    so the LLM-callable Task tools can mutate the live store."""
+    agent = ToolAgent()
+    chat, _output, _prompts = _chat(agent, tmp_path, ["/quit"])
+    assert agent.store is chat.store
+
+
+def test_terminal_chat_tasks_command_prints_no_tasks_when_empty(
+    tmp_path: Path,
+) -> None:
+    agent = ToolAgent()
+    chat, output, _prompts = _chat(agent, tmp_path, ["/tasks", "/quit"])
+    chat.run()
+    assert "no tasks" in output.getvalue()
+
+
+def test_terminal_chat_tasks_command_lists_seeded_tasks(tmp_path: Path) -> None:
+    agent = ToolAgent()
+    chat, output, _prompts = _chat(agent, tmp_path, ["/tasks", "/quit"])
+    chat.store.add_task("refactor onion")
+    chat.store.add_task("ship v0.8.0")
+    chat.store.update_task("2", status="in_progress")
+    chat.run()
+    rendered = output.getvalue()
+    flat = " ".join(rendered.split())
+    assert "#1 [pending] refactor onion" in flat
+    assert "#2 [in_progress] ship v0.8.0" in flat
+
+
+def test_terminal_chat_taskcreate_tool_populates_store_and_tasks_command(
+    tmp_path: Path,
+) -> None:
+    """A fake agent emits a TaskCreate tool call → the store gains the task
+    → a subsequent /tasks shows it."""
+    agent = TaskCreatingAgent(subject="refactor onion")
+    chat, output, _prompts = _chat(
+        agent, tmp_path, ["track that", "/tasks", "/quit"]
+    )
+    chat.run()
+    assert [(t.id, t.subject, t.status) for t in chat.store.tasks] == [
+        ("1", "refactor onion", "pending")
+    ]
+    rendered = output.getvalue()
+    flat = " ".join(rendered.split())
+    assert "-> TaskCreate" in flat
+    assert "#1 [pending] refactor onion" in flat
+
+
+def test_terminal_chat_load_preserves_tasks(tmp_path: Path) -> None:
+    """The /load path must call replace_tasks; otherwise tasks silently
+    disappear (advisor flag during PRD review)."""
+    save_path = tmp_path / "session.json"
+
+    agent_a = TaskCreatingAgent(subject="restored-task")
+    chat_a, _output_a, _ = _chat(
+        agent_a, tmp_path, ["track this", f"/save {save_path}", "/quit"]
+    )
+    chat_a.run()
+    assert chat_a.store.tasks  # sanity
+
+    agent_b = ToolAgent()
+    chat_b, output_b, _ = _chat(
+        agent_b, tmp_path, [f"/load {save_path}", "/tasks", "/quit"]
+    )
+    chat_b.run()
+    rendered = output_b.getvalue()
+    # /load notice line gets soft-wrapped at 100 cols; collapse whitespace.
+    flat = " ".join(rendered.split())
+    assert "1 tasks" in flat
+    assert "#1 [pending] restored-task" in flat
+    assert chat_b.store.tasks[0].subject == "restored-task"
+
+
+def test_terminal_chat_clear_resets_tasks(tmp_path: Path) -> None:
+    agent = ToolAgent()
+    chat, output, _ = _chat(
+        agent, tmp_path, ["/clear", "/tasks", "/quit"]
+    )
+    chat.store.add_task("will be cleared")
+    chat.run()
+    assert chat.store.tasks == ()
+    assert "no tasks" in output.getvalue()
 
 
 def test_terminal_chat_save_and_load_round_trip_via_commands(tmp_path: Path) -> None:

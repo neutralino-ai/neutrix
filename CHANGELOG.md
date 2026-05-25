@@ -4,6 +4,52 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.8.0] - 2026-05-25
+
+### Added
+- First-class task tracking. `ChatStore` gains a `tasks` field plus
+  `add_task`, `update_task`, `remove_task`, and `replace_tasks`
+  mutators. Ids are monotonic strings, scoped per session, and
+  preserved across `/save`/`/load` (next id resumes from
+  `max(loaded_ids) + 1`, not `len(loaded) + 1`, so deleted-then-saved
+  ids never collide).
+- Three Claude-Code-shaped LLM-callable tools in `tools.py`:
+  - `TaskCreate(subject, description?)`
+  - `TaskUpdate(taskId, status?, subject?, description?)` — passing
+    `status="deleted"` removes the task, matching Claude exactly.
+  - `TaskList()` — read-only JSON dump of every task.
+  `dispatch()` now accepts a `store=` keyword that the Task tools
+  require and existing tools ignore.
+- `Agent` now accepts a `ChatStore` reference and, on every
+  `stream_reply`, may inject a Claude-shaped
+  `<system-reminder>…</system-reminder>` user message before the
+  first LLM round. The trigger algorithm matches Claude Code's
+  `TODO_REMINDER_CONFIG`: at least 10 assistant turns since the last
+  `TaskCreate`/`TaskUpdate`, at least 10 since the last reminder,
+  and at least one actionable (`pending` or `in_progress`) task.
+  The reminder is part of the persistent message history and rides
+  through `transcript.save`/`load` unchanged.
+- New `/tasks` slash command in the terminal chat and the legacy
+  Textual TUI. Prints the current task list (read-only) as
+  `#{id} [{status}] {subject}` lines, or `"no tasks"` when empty.
+
+### Changed
+- Transcript format bumped to **version 2**: the on-disk JSON now
+  carries a `tasks` array alongside `messages`. v1 files load
+  cleanly with an empty task list. Saves always write v2.
+- `TerminalChat` and the legacy `NeutrixApp` construct themselves
+  around a `ChatStore` and wire it into the agent
+  (`self.agent.store = self.store`), so the Task tools mutate the
+  same store the view renders from.
+- `/load` now calls `store.replace_tasks(loaded.tasks)` so
+  reloading a saved session restores tracked tasks. Without this
+  fix `/load` silently discarded them.
+- `/clear` resets tasks too — the conversation reset is total.
+- `--load PATH` on the CLI plumbs loaded tasks into the
+  terminal-chat store the same way `/load` does.
+
+See [docs/PRDs/v0.8.0-tasks.md](docs/PRDs/v0.8.0-tasks.md).
+
 ## [v0.7.0] - 2026-05-24
 
 ### Added

@@ -315,6 +315,7 @@ class TerminalChat:
         self._tool_records: list[ToolRecord] = []
         self._streaming_assistant = False
         self.store = ChatStore()
+        self.agent.store = self.store
         self._seed_store_from_agent()
 
     def _seed_store_from_agent(self) -> None:
@@ -607,6 +608,7 @@ class TerminalChat:
                     "Commands:",
                     "  /help               show this",
                     "  /status             show slot, model, tool state, message count",
+                    "  /tasks              list tracked tasks (read-only)",
                     "  /fast               switch to the fast slot",
                     "  /strong             switch to the strong slot",
                     "  /model              show current slot/provider/model",
@@ -631,6 +633,23 @@ class TerminalChat:
         is now available on demand here.
         """
         await self.view.print_plain(self._status_line())
+
+    async def _cmd_tasks(self, args: list[str]) -> None:
+        """Print the current task list (read directly from the store).
+
+        The LLM writes tasks via the TaskCreate / TaskUpdate tools; this
+        command is a read-only on-demand view of the same state.
+
+        The lines render through ``print_text`` (not ``print_plain``) so
+        the bracketed status tags ``[pending]`` etc. are not parsed as
+        Rich BBCode markup and disappear.
+        """
+        tasks = self.store.tasks
+        if not tasks:
+            await self.view.print_notice("no tasks", style="dim")
+            return
+        lines = [f"#{t.id} [{t.status}] {t.subject}" for t in tasks]
+        await self.view.print_text(Text("\n".join(lines)))
 
     async def _cmd_fast(self, args: list[str]) -> None:
         await self._switch_slot("fast")
@@ -676,14 +695,19 @@ class TerminalChat:
         if not args:
             await self.view.print_notice("usage: /load PATH", style="bold red")
             return
-        _store, metadata = transcript.load(args[0])
+        loaded, metadata = transcript.load(args[0])
         self.agent.messages = list(metadata["raw_messages"])
         self.store.reset()
         self._seed_store_from_agent()
+        # Preserve tasks across /load — transcript.load() already populated
+        # the throwaway store; copy them onto the live store so the next
+        # /tasks (and the LLM via TaskList) sees them.
+        if loaded.tasks:
+            self.store.replace_tasks(loaded.tasks)
         self._tool_records.clear()
         await self.view.print_notice(
-            f"loaded {args[0]} ({len(self.agent.messages)} msgs); "
-            f"current slot unchanged",
+            f"loaded {args[0]} ({len(self.agent.messages)} msgs, "
+            f"{len(self.store.tasks)} tasks); current slot unchanged",
             style="green",
         )
         await self._render_transcript()
