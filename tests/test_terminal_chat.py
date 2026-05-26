@@ -49,9 +49,24 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+class _FakeLLM:
+    """Minimal LLM stub for fake agents that never invoke an LLM."""
+
+    def switch(self, slot: Slot) -> None:
+        pass
+
+    async def stream_response(self, *, model, messages, tools=None):
+        if False:  # pragma: no cover - never iterated
+            yield None
+
+    def stop(self) -> None:
+        pass
+
+
 class ToolAgent:
     def __init__(self) -> None:
         self.slot = _slot()
+        self.llm = _FakeLLM()
         self.use_tools = True
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": "system prompt"}
@@ -68,7 +83,11 @@ class ToolAgent:
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": "system prompt"}]
 
-    async def stream_reply(self, user_text: str):
+    def rollback_to(self, snapshot_len: int) -> None:
+        if 0 <= snapshot_len < len(self.messages):
+            del self.messages[snapshot_len:]
+
+    async def stream_reply(self, user_text: str, *, executor: Any = None):
         self.sent.append(user_text)
         self.messages.append({"role": "user", "content": user_text})
         arguments = '{"path": "."}'
@@ -89,7 +108,7 @@ class BlockingAgent(ToolAgent):
         self.started: asyncio.Queue[str] = asyncio.Queue()
         self.releases: asyncio.Queue[None] = asyncio.Queue()
 
-    async def stream_reply(self, user_text: str):
+    async def stream_reply(self, user_text: str, *, executor: Any = None):
         self.sent.append(user_text)
         self.messages.append({"role": "user", "content": user_text})
         await self.started.put(user_text)
@@ -455,7 +474,7 @@ class TaskCreatingAgent(ToolAgent):
         super().__init__()
         self.subject = subject
 
-    async def stream_reply(self, user_text: str):
+    async def stream_reply(self, user_text: str, *, executor: Any = None):
         self.sent.append(user_text)
         self.messages.append({"role": "user", "content": user_text})
         arguments = f'{{"subject": "{self.subject}"}}'
@@ -765,7 +784,7 @@ async def test_send_message_folds_live_reminder_appended_during_turn(
     exactly once per reminder, not as a plain user block."""
 
     class ReminderAgent(ToolAgent):
-        async def stream_reply(self, user_text: str):
+        async def stream_reply(self, user_text: str, *, executor: Any = None):
             self.messages.append({"role": "user", "content": user_text})
             # Mirror what agent_loop._maybe_inject_task_reminder does:
             # append a Claude-shaped <system-reminder> user message
@@ -962,9 +981,11 @@ def test_apply_enter_or_continuation_ignores_mid_buffer_backslash():
 
 
 def test_build_draft_key_bindings_registers_newline_keys():
-    """Acceptance: c-j and (escape, enter) both route to the newline
-    handler. Other newline candidates (s-enter, c-enter) are not in
-    prompt_toolkit's Keys enum — see PRD goal #3."""
+    """Acceptance: c-j is the v0.9.2 newline binding. The v0.9.1
+    ``(escape, enter)`` Alt+Enter binding has been DELETED — v0.9.2
+    binds ``escape`` directly (eager=True) as the cancel key, which
+    forces the meta-prefix to dispatch before any composed sequence
+    can match. Users insert newlines via Ctrl+J."""
     pytest.importorskip("prompt_toolkit")
     from prompt_toolkit.keys import Keys
 
@@ -972,8 +993,11 @@ def test_build_draft_key_bindings_registers_newline_keys():
     keys_registered = [kb.keys for kb in bindings.bindings]
 
     assert (Keys.ControlJ,) in keys_registered
-    # Keys.Enter is an alias for Keys.ControlM in prompt_toolkit 3.0.x.
-    assert (Keys.Escape, Keys.ControlM) in keys_registered
+    # Deliberate v0.9.2 regression: the Alt+Enter binding is gone so
+    # Esc-as-cancel can claim the meta-prefix unambiguously.
+    assert (Keys.Escape, Keys.ControlM) not in keys_registered
+    # And the standalone Escape binding IS registered (cancel hook).
+    assert (Keys.Escape,) in keys_registered
 
 
 def test_build_draft_key_bindings_registers_quit_and_suspend_keys():
@@ -1331,3 +1355,371 @@ async def test_ctrl_d_on_non_empty_buffer_does_not_arm_quit():
         )
         assert result == "hi"
         assert quit_state.within_window() is False
+
+
+# ---- v0.9.2: Esc / Ctrl+C cancellation + idle-state contract ---------------
+
+
+@pytest.mark.asyncio
+async def test_escape_invokes_cancel_hook_exactly_once():
+    """Drive a real PromptSession with our bindings; feed ``\\x1b``;
+    assert the registered ``cancel_hook`` fired once. Esc is the
+    universal "stop" key from v0.9.2 onward."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    calls: list[bool] = []
+
+    def hook() -> bool:
+        calls.append(True)
+        return True  # pretend we cancelled something
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state, cancel_hook=hook),
+        )
+        pipe_input.send_text("\x1b\r")  # Esc then Enter to surface result
+        await asyncio.wait_for(
+            session.prompt_async(handle_sigint=False),
+            timeout=1.0,
+        )
+        assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_escape_while_idle_no_buffer_mutation():
+    """Esc with no cancel hook (or a hook that returns False) must
+    be a clean no-op: no exception, no buffer change."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state, cancel_hook=None),
+        )
+        pipe_input.send_text("hello\x1b\r")  # Esc with a non-empty buffer
+        result = await asyncio.wait_for(
+            session.prompt_async(handle_sigint=False),
+            timeout=1.0,
+        )
+        assert result == "hello"
+        assert quit_state.within_window() is False
+
+
+@pytest.mark.asyncio
+async def test_alt_enter_no_longer_inserts_newline():
+    """Deliberate v0.9.2 regression: the v0.9.1 ``(escape, enter)``
+    binding has been deleted. ``\\x1b\\r`` no longer produces a
+    newline in the buffer. ``eager=True`` on the standalone Esc
+    binding swallows the meta-prefix so the composed sequence
+    never matches."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        # Alt+Enter (`\x1b\r`) then a final Enter to submit.
+        pipe_input.send_text("hi\x1b\r\r")
+        result = await asyncio.wait_for(
+            session.prompt_async(handle_sigint=False),
+            timeout=1.0,
+        )
+        # No newline inserted; only the typed "hi" survives.
+        assert result == "hi"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_j_still_inserts_newline():
+    """Ctrl+J is the v0.9.2 newline binding. Feed ``hi\\nworld\\r``;
+    the buffer composes "hi\\nworld" when submitted."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("hi\nworld\r")
+        result = await asyncio.wait_for(
+            session.prompt_async(handle_sigint=False),
+            timeout=1.0,
+        )
+        assert result == "hi\nworld"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_while_busy_cancels_and_does_not_arm_quit():
+    """First Ctrl+C while a turn is in flight: cancel fires, quit
+    is NOT armed (the v0.9.1 hint must not appear during cancel)."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    def busy_hook() -> bool:
+        return True  # something was in flight; we cancelled it
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(
+                quit_state, cancel_hook=busy_hook
+            ),
+        )
+        pipe_input.send_text("\x03")  # single Ctrl+C
+        # The prompt must NOT exit on the lone Ctrl+C-while-busy;
+        # cancellation handles it without arming quit.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+        # And the v0.9.1 arming window stays closed.
+        assert quit_state.within_window("c-c") is False
+        assert quit_state.hint_text() is None
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_while_idle_still_arms_quit():
+    """When the cancel hook reports False (nothing in flight) the
+    binding falls through to v0.9.1's arm-or-exit dance, which arms
+    c-c's window. Symmetric proof that idle-mode preserved."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    def idle_hook() -> bool:
+        return False
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(
+                quit_state, cancel_hook=idle_hook
+            ),
+        )
+        pipe_input.send_text("\x03")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+        assert quit_state.within_window("c-c") is True
+
+
+@pytest.mark.asyncio
+async def test_send_message_routes_through_controller_and_recovers_on_cancel(
+    tmp_path: Path,
+):
+    """End-to-end: a fake-LLM agent that suspends mid-stream. Trigger
+    cancel via ``try_cancel_current_stream``. ``_send_message``
+    catches CancelledError, restores the idle-state contract, and a
+    follow-up ``_send_message`` reaches the controller cleanly."""
+    from neutrix.agent_loop import Agent
+
+    class SuspendingLLMForChat:
+        """LLM that blocks the first request, completes the second."""
+
+        def __init__(self) -> None:
+            self.released = asyncio.Event()
+            self.calls = 0
+
+        def switch(self, slot: Slot) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.released.set()
+
+        async def stream_response(self, *, model, messages, tools=None):
+            self.calls += 1
+            if self.calls == 1:
+                await self.released.wait()
+                return
+            from neutrix.llm import LLMEvent, LLMResponse
+
+            yield LLMEvent(
+                "assistant",
+                LLMResponse(
+                    {"role": "assistant", "content": "ok"},
+                    finish_reason="stop",
+                ),
+            )
+
+    slot = _slot()
+    fake_llm = SuspendingLLMForChat()
+    real_agent = Agent(slot=slot, llm=fake_llm, use_tools=False)
+    output = StringIO()
+
+    def input_func(prompt: str) -> str:  # pragma: no cover - never called
+        return ""
+
+    chat = TerminalChat(
+        real_agent,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=input_func,
+        console=Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=100,
+        ),
+    )
+
+    send_task = asyncio.create_task(chat._send_message("first"))
+    # Wait until the controller has set its in-flight task — that's
+    # when ``try_cancel_current_stream`` actually does something.
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        if chat.controller._current_stream_task is not None:
+            break
+    assert chat.controller._current_stream_task is not None
+
+    assert chat.try_cancel_current_stream() is True
+    await asyncio.wait_for(send_task, timeout=1.0)
+
+    # Idle-state contract.
+    assert chat.store.llm_active is False
+    assert chat.store.pending_tool_calls == ()
+    assert "interrupted" in output.getvalue()
+    # Agent.messages rolled back: no orphan user_turn.
+    assert real_agent.messages == [
+        {"role": "system", "content": real_agent.system_prompt}
+    ]
+
+    # Follow-up call must work normally.
+    await asyncio.wait_for(chat._send_message("again"), timeout=2.0)
+    assert chat.store.llm_active is False
+    # second LLM call completed and left "ok" assistant turn.
+    assert any(
+        msg.get("role") == "assistant" and msg.get("content") == "ok"
+        for msg in real_agent.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_try_cancel_when_idle_returns_false(tmp_path: Path):
+    """``try_cancel_current_stream`` is the key-binding hook; when
+    nothing is in flight it returns False so the c-c handler falls
+    through to its v0.9.1 arming."""
+    from neutrix.agent_loop import Agent
+
+    class DormantLLM:
+        def switch(self, slot: Slot) -> None: pass
+        def stop(self) -> None: pass
+        async def stream_response(self, **_: Any):  # pragma: no cover
+            if False:
+                yield None
+
+    slot = _slot()
+    agent = Agent(slot=slot, llm=DormantLLM(), use_tools=False)
+    chat = TerminalChat(
+        agent,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=lambda _: "",
+        console=Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    assert chat.try_cancel_current_stream() is False
+
+
+@pytest.mark.asyncio
+async def test_queued_user_messages_survive_cancel(tmp_path: Path):
+    """A message queued while busy must outlive the cancel — once the
+    worker loop returns to ``queue.get()``, the next message starts
+    processing on its own."""
+    agent = BlockingAgent()
+    output = StringIO()
+    input_values: Queue[str] = Queue()
+
+    def input_func(prompt: str) -> str:
+        return input_values.get(timeout=2)
+
+    chat = TerminalChat(
+        agent,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=input_func,
+        console=Console(
+            file=output,
+            force_terminal=False,
+            color_system=None,
+            width=100,
+        ),
+    )
+    task = asyncio.create_task(chat.run_async())
+
+    input_values.put("first")
+    assert await asyncio.wait_for(agent.started.get(), timeout=1) == "first"
+
+    input_values.put("queued-second")
+    # Let the queue accept it.
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if chat.store.queued_user_messages:
+            break
+    assert [q.text for q in chat.store.queued_user_messages] == ["queued-second"]
+
+    # Cancel the first turn. ``try_cancel_current_stream`` from the
+    # PRD is the canonical hook — return value confirms the cancel
+    # actually fired.
+    assert chat.try_cancel_current_stream() is True
+
+    # The worker should now drain the queue: "queued-second" is the
+    # next message presented to the agent.
+    assert (
+        await asyncio.wait_for(agent.started.get(), timeout=2)
+        == "queued-second"
+    )
+
+    await agent.releases.put(None)
+    input_values.put("/quit")
+    await asyncio.wait_for(task, timeout=2)
+    rendered = output.getvalue()
+    assert "interrupted" in rendered
+    assert "queued-second" in rendered

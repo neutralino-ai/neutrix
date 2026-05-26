@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>neutrix roadmap</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6a6a6a;
+    --dim: #9a9a9a;
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --border: #e3e3dc;
+    --accent: #b14a00;
+    --shipped: #2f7d32;
+    --inflight: #b14a00;
+    --planned: #6a6a6a;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 {
+    font-size: 24px;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .tagline {
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .note {
+    color: var(--dim);
+    margin: 0 0 32px;
+    font-size: 13px;
+  }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+  .entry {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin: 0 0 10px;
+    display: grid;
+    grid-template-columns: 80px 1fr auto;
+    gap: 16px;
+    align-items: baseline;
+  }
+  .entry .ver {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .entry .ver a {
+    color: var(--fg);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--border);
+  }
+  .entry .ver a:hover { border-bottom-color: var(--fg); }
+  .entry .theme {
+    color: var(--fg);
+  }
+  .entry .theme small {
+    color: var(--muted);
+    display: block;
+    margin-top: 3px;
+    font-size: 13px;
+  }
+  .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.shipped {
+    color: var(--shipped);
+    background: #e8f3e9;
+  }
+  .badge.inflight {
+    color: var(--inflight);
+    background: #fbeada;
+  }
+  .badge.planned {
+    color: var(--planned);
+    background: #ececec;
+  }
+  details.shipped-history {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  details.shipped-history summary {
+    cursor: pointer;
+    color: var(--muted);
+    padding: 6px 0;
+  }
+  details.shipped-history ul {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+    column-count: 2;
+    column-gap: 24px;
+  }
+  details.shipped-history li {
+    padding: 2px 0;
+    break-inside: avoid;
+    font-variant-numeric: tabular-nums;
+  }
+  details.shipped-history li a {
+    color: var(--muted);
+    text-decoration: none;
+  }
+  details.shipped-history li a:hover { color: var(--fg); }
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 48px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+  code {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<h1>neutrix roadmap</h1>
+<p class="tagline">A minimal TUI chat client for OpenAI-compatible LLM APIs.</p>
+<p class="note">
+  This page is the user-visible map of where the project is going.
+  Per <code>CLAUDE.md</code>, every PRD acceptance updates this
+  page before implementation starts. Entries link to their PRDs
+  under <code>docs/PRDs/</code>.
+</p>
+
+<h2>Upcoming</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.3-heartbeat.md">v0.9.3</a></span>
+  <span class="theme">
+    Heartbeat liveness indicator
+    <small>
+      A one-line pulse above the input that says
+      <code>"⠋ LLM …"</code> while streaming and
+      <code>"⠋ tool: run_shell …"</code> while a tool runs.
+      Reads <code>store.llm_active</code> + <code>store.pending_tool_calls</code>.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.4-visibility-parity.md">v0.9.4</a></span>
+  <span class="theme">
+    Visibility parity: show what the LLM sees
+    <small>
+      Renders the system prompt, tool schemas, and
+      <code>&lt;system-reminder&gt;</code> injections in the
+      transcript (folded). Encodes the invariant that no channel
+      the LLM receives is hidden from the user.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.0-tuiview-purify.md">v0.10.0</a></span>
+  <span class="theme">
+    TUIView as pure renderer + visible task panel + FakeView swap-test
+    <small>
+      Closes the v0.7-arc onion refactor. View becomes a pure
+      reader of <code>ChatStore</code>; a <code>FakeView</code> in tests
+      proves the renderer is swappable — the prerequisite for the v1.0
+      web-frontend bet.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.11.0-smart-advisor.md">v0.11.0</a></span>
+  <span class="theme">
+    Smart Advisor — third actor with LLM-driven task judgment
+    <small>
+      A second LLM that watches the store and revises the task list
+      with judgment instead of mechanical bookkeeping. Plugs into
+      the v0.9.2 <code>Controller.cancel()</code> broadcast as a
+      fourth target.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<h2>Shipped</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.2-cancellation.md">v0.9.2</a></span>
+  <span class="theme">
+    Esc / Ctrl+C cancellation + Executor / LLM / Controller decomposition
+    <small>
+      Adds the in-process service-oriented architecture
+      (<code>Controller</code> broadcasts cancel to <code>LLM.stop()</code>
+      + <code>Executor.cancel()</code>). Esc cancels the in-flight turn;
+      <code>run_shell</code>'s subprocess gets tree-killed; conversation
+      history rolls back atomically. <code>OpenAIChatLLM</code>
+      switched back to <code>stream=True</code> so the SDK's
+      <code>AsyncStream.close()</code> is what <code>stop()</code>
+      hangs on.
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.1-keyboard.md">v0.9.1</a></span>
+  <span class="theme">
+    Keyboard ergonomics — two-tap Ctrl+C / Ctrl+D, Ctrl+Z suspend,
+    backslash line continuation
+    <small>
+      Codex-style independent-timer arming for Ctrl+C and Ctrl+D;
+      <code>Ctrl+Z</code> backgrounds the process via
+      <code>suspend_to_background</code>; trailing-backslash + Enter
+      inserts a newline. The keyboard half of "cancel and idle-state."
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.0-lifecycle-events.md">v0.9.0</a></span>
+  <span class="theme">
+    Lifecycle events + store reducer
+    <small>
+      Adds <code>llm_request_start</code> / <code>llm_request_end</code>
+      and a single <code>ChatStore.apply(event)</code> reducer. Makes the
+      store the canonical "what's in flight" surface, unblocks v0.9.3
+      heartbeat and v0.10.0 FakeView. Invisible to the user.
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
+
+<details class="shipped-history">
+  <summary>Earlier shipped versions (v0.8.x and below)</summary>
+  <ul>
+    <li><a href="PRDs/v0.8.2-tool-keyword-colors.md">v0.8.2</a> — colored tool_use / tool_result keywords</li>
+    <li><a href="PRDs/v0.8.1-tasks-visible-and-auto-continue.md">v0.8.1</a> — visible task panel + V2-aligned prompts + folded reminders</li>
+    <li><a href="PRDs/v0.8.0-tasks.md">v0.8.0</a> — tasks with LLM tool integration</li>
+    <li><a href="PRDs/v0.7.0-chatstore.md">v0.7.0</a> — <code>ChatStore</code> introduced; view becomes a reader</li>
+    <li><a href="PRDs/v0.6.8-append-only-terminal-chat.md">v0.6.8</a> — append-only terminal chat mode</li>
+    <li><a href="PRDs/v0.6.7-terminal-mouse-final-llm.md">v0.6.7</a> — terminal mouse handling fixes</li>
+    <li><a href="PRDs/v0.6.6-main-chat-borderless-blocks.md">v0.6.6</a> — borderless blocks (parallel branch)</li>
+    <li><a href="PRDs/v0.6.6-agent-workflow-user-acceptance.md">v0.6.6</a> — PRD-gated workflow lands</li>
+    <li><a href="PRDs/v0.6.5-main-chat-spacing-retune.md">v0.6.5</a> — chat spacing retune</li>
+    <li><a href="PRDs/v0.6.4-main-chat-compact-draft.md">v0.6.4</a> — compact draft area</li>
+    <li><a href="PRDs/v0.6.3-main-onion-blocks.md">v0.6.3</a> — onion-block rendering</li>
+    <li><a href="PRDs/v0.6.2-main-visible-block-list.md">v0.6.2</a> — visible block list</li>
+    <li><a href="PRDs/v0.6.1-onboard-key-submit-isolation.md">v0.6.1</a> — onboard key-submit isolation</li>
+    <li><a href="PRDs/v0.6.0-main-chat-polish.md">v0.6.0</a> — main chat polish pass</li>
+    <li><a href="PRDs/v0.5.5-onboard-key-mask-after-enter.md">v0.5.5</a> — onboard key-mask after enter</li>
+    <li><a href="PRDs/v0.5.4-onboard-enter-race-fix.md">v0.5.4</a> — onboard enter race fix</li>
+    <li><a href="PRDs/v0.5.3-onboard-key-edit-semantics.md">v0.5.3</a> — onboard key-edit semantics</li>
+    <li><a href="PRDs/v0.5.2-onboard-state-and-focus.md">v0.5.2</a> — onboard state and focus</li>
+    <li><a href="PRDs/v0.5.1-onboard-row-and-quit.md">v0.5.1</a> — onboard row + quit</li>
+    <li><a href="PRDs/v0.5.0-onboard-polish.md">v0.5.0</a> — onboard polish</li>
+    <li><a href="PRDs/v0.4.2-deepseek-model-names.md">v0.4.2</a> — DeepSeek model names</li>
+    <li><a href="PRDs/v0.4.1-onboard-arrow-nav-fix.md">v0.4.1</a> — onboard arrow-nav fix</li>
+    <li><a href="PRDs/v0.4.0-onboard-slash-command.md">v0.4.0</a> — onboard slash command</li>
+    <li><a href="PRDs/v0.3.1-onboard-arrow-nav.md">v0.3.1</a> — onboard arrow-nav</li>
+    <li><a href="PRDs/v0.3.0-onboarding-tui.md">v0.3.0</a> — onboarding TUI</li>
+    <li><a href="PRDs/v0.2.0-yaml-config.md">v0.2.0</a> — YAML config</li>
+    <li>v0.1.0 — initial release (no PRD)</li>
+  </ul>
+</details>
+
+<footer>
+  Each shipped version is a git tag; <code>setuptools_scm</code>
+  reads the tag for <code>neutrix --version</code>. PRDs are the
+  durable design rationale — entries above link to them directly.
+</footer>
+
+</body>
+</html>

@@ -4,14 +4,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from loguru import logger
 
 from neutrix.config import Slot
-from neutrix.llm import LLMEvent, LLMResponse, OpenAIChatLLM
+from neutrix.llm import LLMEvent, LLMResponse
 from neutrix.store import ChatStore, Task
 from neutrix.tools import dispatch, get_schemas
+
+if TYPE_CHECKING:
+    from neutrix.executor import Executor
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Keep it simple."
 
@@ -57,30 +60,37 @@ class ChatLLM(Protocol):
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[LLMEvent]: ...
 
+    def stop(self) -> None:
+        """Abort any in-flight ``stream_response``.
+
+        Closes the underlying transport so the next ``__anext__``
+        on the iterator surfaces ``StopAsyncIteration`` and the
+        wrapping ``async for`` exits cleanly. Idempotent — no-op
+        when no stream is in flight.
+        """
+        ...
+
 
 @dataclass
 class Agent:
     """Conversation state plus the model/tool continuation loop."""
 
     slot: Slot
+    llm: ChatLLM
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     use_tools: bool = True
     messages: list[dict[str, Any]] = field(default_factory=list)
-    llm: ChatLLM | None = field(default=None, repr=False)
     store: ChatStore | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.messages:
             self.messages = [{"role": "system", "content": self.system_prompt}]
-        if self.llm is None:
-            self.llm = OpenAIChatLLM(self.slot)
 
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self.system_prompt}]
 
     def switch(self, slot: Slot) -> None:
         self.slot = slot
-        assert self.llm is not None
         self.llm.switch(slot)
 
     def supports_tools(self) -> bool:
@@ -89,7 +99,23 @@ class Agent:
     def effective_tools_enabled(self) -> bool:
         return self.use_tools and self.supports_tools()
 
-    async def stream_reply(self, user_text: str) -> AsyncIterator[AgentEvent]:
+    def rollback_to(self, snapshot_len: int) -> None:
+        """Trim ``self.messages`` back to ``snapshot_len``.
+
+        Used by :class:`neutrix.executor.Executor` on cancellation so
+        the conversation stays valid — e.g. drops an orphan assistant
+        ``tool_calls`` whose tool result never arrived (the OpenAI
+        gateway 400s the next request on that shape).
+        """
+        if 0 <= snapshot_len < len(self.messages):
+            del self.messages[snapshot_len:]
+
+    async def stream_reply(
+        self,
+        user_text: str,
+        *,
+        executor: Executor | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         """Append a user turn and continue while tools require follow-up."""
 
         self.messages.append({"role": "user", "content": user_text})
@@ -100,7 +126,6 @@ class Agent:
                 assistant_msg: dict[str, Any] | None = None
                 rendered_tokens = False
                 tools = get_schemas() if self.effective_tools_enabled() else None
-                assert self.llm is not None
                 yield AgentEvent("llm_request_start")
                 try:
                     async for event in self.llm.stream_response(
@@ -148,7 +173,11 @@ class Agent:
                         {"name": name, "arguments": arguments},
                     )
                     result = await asyncio.to_thread(
-                        _dispatch_with_store, name, arguments, self.store
+                        _dispatch_injected,
+                        name,
+                        arguments,
+                        self.store,
+                        executor,
                     )
                     yield AgentEvent(
                         "tool_result",
@@ -367,10 +396,18 @@ def _build_task_reminder_body(tasks: tuple[Task, ...]) -> str:
     return "\n".join(lines)
 
 
-def _dispatch_with_store(
+def _dispatch_injected(
     name: str,
     arguments: str,
     store: ChatStore | None,
+    executor: Executor | None,
 ) -> str:
-    """asyncio.to_thread shim — dispatch always sees the live store."""
-    return dispatch(name, arguments, store=store)
+    """asyncio.to_thread shim — dispatch sees the live store and executor.
+
+    The store is required by the Task* tools; the executor is required
+    by tools that register a cancellable Popen (``run_shell``).
+    ``dispatch`` itself only forwards each kwarg to tools whose
+    signature declares it, so other tools keep their original
+    signature.
+    """
+    return dispatch(name, arguments, store=store, executor=executor)

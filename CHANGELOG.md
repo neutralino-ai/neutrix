@@ -4,6 +4,98 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.2] — 2026-05-26
+
+### Added
+- ``Esc`` is now the universal "stop and go back to idle" key while a
+  turn is in flight. Pressing Esc closes the LLM's HTTP stream
+  eagerly, tree-kills every cancellable subprocess registered with
+  the executor pool (``run_shell``'s ``sleep 30`` becomes a
+  ``killpg`` victim within ~200 ms), rolls
+  ``Agent.messages`` back to the pre-turn snapshot — dropping the
+  user_turn AND any orphan assistant ``tool_calls`` message that
+  would otherwise 400 the next OpenAI request — clears
+  ``store.pending_tool_calls`` + ``store.llm_active``, and prints a
+  dim-yellow ``interrupted`` notice. Queued user messages (typed
+  while busy, per v0.9.1) survive the cancel: the worker loop drains
+  them next.
+- ``ChatLLM.stop()`` on the protocol + ``OpenAIChatLLM.stop()`` on
+  the implementation. Closes the underlying OpenAI SDK
+  ``AsyncStream`` so the iterator's next ``__anext__`` exits
+  cleanly. Idempotent — no-op when no stream is in flight.
+- New ``Executor`` class (``src/neutrix/executor.py``). Owns the
+  per-turn rollback snapshot, the cancellable-Popen pool, and the
+  single ``cancel()`` entry-point the controller broadcasts to.
+  POSIX-only ``_tree_kill`` helper (SIGTERM + 200 ms grace +
+  SIGKILL) — Python analog of Claude Code's ``tree-kill``.
+- New ``Controller`` class (``src/neutrix/controller.py``). Single
+  command surface the view drives. ``cancel()`` broadcasts to
+  ``llm.stop()``, ``executor.cancel()``, then ``task.cancel()`` —
+  each subordinate is independently idempotent so the controller
+  never asks "are you busy?". Designed so v0.11.0's ``Advisor``
+  plugs in as a fourth broadcast target with one extra line.
+- ``Agent.rollback_to(n)`` — the one new seam the Executor uses;
+  trims ``self.messages[n:]`` so a cancelled turn leaves a valid
+  history.
+- First ``Ctrl+C`` while a turn is in flight now cancels the turn
+  WITHOUT arming the v0.9.1 ``press Ctrl+C again to exit`` hint.
+  When idle, ``Ctrl+C`` keeps its v0.9.1 arm-or-exit semantics.
+
+### Changed
+- ``OpenAIChatLLM.stream_response`` switched to ``stream=True`` —
+  token deltas surface as ``LLMEvent("token", str)`` as they
+  arrive instead of one final ``assistant`` event per call. Tool
+  calls accumulate across streaming deltas (``index``-keyed
+  rebuild). Internally this enables the eager-close that
+  ``LLM.stop()`` relies on; externally streaming visibly stops
+  faster than v0.9.0's final-response wait.
+- ``Agent`` now requires an ``llm`` in the constructor. Earlier
+  callers that relied on the auto-build path
+  (``OpenAIChatLLM(slot)``) must now construct the LLM explicitly
+  and pass it. The CLI bootstrap does this in ``cli.py``.
+- ``Agent.stream_reply`` accepts an optional ``executor=`` kwarg
+  threaded to the tool dispatch shim. ``dispatch(...)`` now grows
+  an ``executor=`` keyword that is forwarded only to tools whose
+  signature declares it (currently ``run_shell``) — the
+  LLM-facing JSON schema is unchanged.
+- ``run_shell`` rewritten from ``subprocess.run`` to
+  ``subprocess.Popen(start_new_session=True)`` +
+  ``communicate``, with the Popen registered with the executor
+  pool before the wait and unregistered in ``finally``. On
+  cancel, the whole process group dies via ``_tree_kill`` and
+  the tool returns ``[cancelled by user]``.
+- ``TerminalChat`` constructs an ``Executor`` and ``Controller``
+  alongside the agent; ``_send_message`` routes every turn
+  through ``controller.send``. The view tracks an outer asyncio
+  task and a single ``cancel_hook`` is passed down through
+  ``TerminalView`` → ``DraftReader`` → ``build_draft_key_bindings``
+  so the key bindings can fire cancel without reaching across
+  the layer boundary.
+
+### Removed
+- The v0.9.1 ``(escape, enter)`` Alt+Enter newline binding.
+  ``eager=True`` on the standalone ``escape`` binding swallows
+  the meta-prefix so composed sequences cannot match — a
+  deliberate trade-off documented in the PRD. Users insert
+  newlines via ``Ctrl+J`` (unchanged).
+- ``Alt-*`` word-motion shortcuts (``Alt+B``, ``Alt+F``,
+  ``Alt+D``) are unavailable for the same reason — same
+  deliberate trade-off.
+
+### Non-changes (deliberately)
+- No pure-compute tool cancellation. Tools running via
+  ``asyncio.to_thread`` (``read_file``, ``list_dir``, ``TaskCreate``,
+  …) keep running on the background thread; their results are
+  silently dropped because ``agent.messages`` rolls back. A
+  generic ``CancellableTool`` polling protocol is v0.10.x scope.
+- No "save partial assistant turn" steering. The cancelled turn
+  is dropped whole; the user re-prompts.
+- No multi-process / RPC implementation. The service-oriented
+  *interfaces* land in v0.9.2; the *transport* stays in-process.
+- The legacy Textual ``tui.py`` app is untouched.
+
+See [docs/PRDs/v0.9.2-cancellation.md](docs/PRDs/v0.9.2-cancellation.md).
+
 ## [v0.9.1] — 2026-05-26
 
 ### Added

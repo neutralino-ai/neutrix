@@ -9,6 +9,7 @@ from textual.widgets import Header, Static
 
 from neutrix.agent import DEFAULT_SYSTEM_PROMPT, Agent, AgentEvent
 from neutrix.config import Config, Slot
+from neutrix.llm import OpenAIChatLLM
 from neutrix.onboard import KeyInput
 from neutrix.tui import DraftInput, Message, NeutrixApp
 
@@ -58,7 +59,8 @@ def _render_text(widget: Static) -> str:
 
 
 def test_default_system_prompt_is_simple_chatbot_prompt():
-    agent = Agent(slot=_slot(), use_tools=False)
+    slot = _slot()
+    agent = Agent(slot=slot, llm=OpenAIChatLLM(slot), use_tools=False)
 
     assert DEFAULT_SYSTEM_PROMPT == "You are a helpful assistant. Keep it simple."
     assert agent.messages == [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
@@ -73,7 +75,7 @@ async def test_status_marks_tools_unsupported_for_ihep_anthropic(tmp_path: Path)
         base_url="https://aiapi.ihep.ac.cn/apiv2/",
         api_key="sk-test",
     )
-    agent = Agent(slot=slot, use_tools=True)
+    agent = Agent(slot=slot, llm=OpenAIChatLLM(slot), use_tools=True)
     app = NeutrixApp(agent, config=_config(tmp_path), render_markdown=False)
 
     async with app.run_test() as pilot:

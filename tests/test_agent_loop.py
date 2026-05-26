@@ -426,8 +426,8 @@ async def test_stream_reply_does_not_re_inject_during_tool_followup(monkeypatch)
         lambda: [{"type": "function", "function": {"name": "echo"}}],
     )
     monkeypatch.setattr(
-        "neutrix.agent_loop._dispatch_with_store",
-        lambda name, arguments, store: "ok",
+        "neutrix.agent_loop._dispatch_injected",
+        lambda name, arguments, store, executor: "ok",
     )
     store = ChatStore()
     store.add_task("first")
@@ -875,3 +875,45 @@ async def test_lifecycle_cancellation_via_aclose_exits_cleanly():
     # because cancellation skips the explicit-yield path.
     assert "llm_request_start" in kinds
     assert "llm_request_end" not in kinds
+
+
+# ---- v0.9.2: rollback_to + required-llm constructor -------------------------
+
+
+def test_rollback_to_trims_messages_in_place():
+    """Used by Executor on cancel: trims ``agent.messages[snapshot:]``
+    so the orphan assistant turn (tool_calls with no matching tool
+    message) does not poison the next OpenAI request."""
+    llm = FakeLLM([])
+    agent = Agent(slot=_slot(), llm=llm, use_tools=False)
+    snapshot = len(agent.messages)
+    agent.messages.append({"role": "user", "content": "x"})
+    agent.messages.append({"role": "assistant", "content": "y"})
+
+    agent.rollback_to(snapshot)
+    assert len(agent.messages) == snapshot
+
+
+def test_rollback_to_is_noop_for_out_of_range_values():
+    """``rollback_to(N)`` only does work when ``0 <= N <
+    len(messages)``. Equal-to-length, larger, and negative are
+    silent no-ops."""
+    llm = FakeLLM([])
+    agent = Agent(slot=_slot(), llm=llm, use_tools=False)
+    starting = list(agent.messages)
+
+    agent.rollback_to(len(starting))  # equal — no-op
+    assert agent.messages == starting
+    agent.rollback_to(len(starting) + 5)  # larger — no-op
+    assert agent.messages == starting
+    agent.rollback_to(-1)  # negative — no-op
+    assert agent.messages == starting
+
+
+def test_agent_requires_llm_in_constructor():
+    """v0.9.2 makes ``llm`` a required positional/keyword arg on
+    :class:`Agent`. Constructing without it raises ``TypeError``.
+    Keeps the bootstrap explicit so a missing-llm bug surfaces at
+    construction, not at first stream_reply."""
+    with pytest.raises(TypeError):
+        Agent(slot=_slot(), use_tools=False)  # type: ignore[call-arg]

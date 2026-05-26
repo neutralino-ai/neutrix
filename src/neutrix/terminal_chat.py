@@ -31,6 +31,8 @@ from neutrix.agent_loop import (
     is_task_reminder,
 )
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
+from neutrix.controller import Controller
+from neutrix.executor import Executor
 from neutrix.store import ChatStore, MessageRecord, Task, openai_to_record
 from neutrix.tools import BUILTIN_TOOLS
 
@@ -39,8 +41,8 @@ QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 MAX_PANEL_ROWS = 5
 
 _TASK_PANEL_ICON = {
-    "in_progress": "◼",  # noqa: RUF001  -- U+25FC BLACK MEDIUM SQUARE
-    "pending": "◻",  # noqa: RUF001  -- U+25FB WHITE MEDIUM SQUARE
+    "in_progress": "◼",
+    "pending": "◻",
     "completed": "✓",
 }
 
@@ -185,9 +187,11 @@ class DraftReader:
         self,
         *,
         message_supplier: Callable[[], object] = lambda: "",
+        cancel_hook: Callable[[], bool] | None = None,
     ) -> None:
         self._message_supplier = message_supplier
         self.quit_state = QuitArmingState()
+        self.cancel_hook = cancel_hook
         self._session = self._build_session()
 
     def read(self) -> str:
@@ -237,7 +241,10 @@ class DraftReader:
             placeholder=placeholder,
             prompt_continuation="",
             history=InMemoryHistory(),
-            key_bindings=build_draft_key_bindings(self.quit_state),
+            key_bindings=build_draft_key_bindings(
+                self.quit_state,
+                cancel_hook=self.cancel_hook,
+            ),
         )
 
 
@@ -317,13 +324,24 @@ def apply_enter_or_continuation(buffer) -> bool:
     return True
 
 
-def build_draft_key_bindings(quit_state: QuitArmingState | None = None):
+def build_draft_key_bindings(
+    quit_state: QuitArmingState | None = None,
+    *,
+    cancel_hook: Callable[[], bool] | None = None,
+):
     """Build explicit editor bindings for terminal draft input.
 
     ``quit_state`` carries the Ctrl+C arming timer; pass a fresh
     :class:`QuitArmingState` per :class:`DraftReader` so two sessions
     don't share state. ``None`` is accepted for unit tests that
     don't care about the quit dance.
+
+    ``cancel_hook`` is invoked on Esc and on the first Ctrl+C while
+    something is in flight. It returns ``True`` iff the cancel
+    actually fired (something was running). When ``None`` the hook
+    is treated as a permanent no-op — tests that don't drive a real
+    chat call ``build_draft_key_bindings()`` and rely on the keys
+    still working without exceptions.
     """
     try:
         from prompt_toolkit.application.current import get_app
@@ -334,6 +352,15 @@ def build_draft_key_bindings(quit_state: QuitArmingState | None = None):
 
     if quit_state is None:
         quit_state = QuitArmingState()
+
+    def _try_cancel() -> bool:
+        if cancel_hook is None:
+            return False
+        try:
+            return bool(cancel_hook())
+        except Exception as exc:
+            logger.warning("cancel_hook raised: {}", exc)
+            return False
 
     bindings = KeyBindings()
 
@@ -370,7 +397,24 @@ def build_draft_key_bindings(quit_state: QuitArmingState | None = None):
 
     @bindings.add("c-c")
     def _(event) -> None:
+        # First Ctrl+C while a turn is in flight cancels and returns;
+        # only when nothing is in flight do we fall through to the
+        # v0.9.1 arm-or-exit dance. Cancel does NOT arm the quit
+        # shortcut — pressing Ctrl+C twice in quick succession during
+        # a busy turn cancels, then arms (it doesn't exit).
+        if _try_cancel():
+            return
         _arm_or_exit(event, "c-c", KeyboardInterrupt)
+
+    @bindings.add("escape", eager=True)
+    def _(event) -> None:
+        # eager=True swallows the meta-prefix before prompt_toolkit can
+        # compose ``Alt+B`` / ``Alt+F`` / ``Alt+D`` / ``Alt+Enter`` — a
+        # deliberate trade-off documented in the v0.9.2 PRD. Replacement
+        # for the load-bearing one (newline): Ctrl+J, registered below.
+        # The hook no-ops when nothing's in flight so the lone Esc
+        # while idle is a clean noop with no buffer mutation.
+        _try_cancel()
 
     # Ctrl+D enters the quit dance ONLY when the buffer is empty;
     # otherwise it falls through to prompt_toolkit's default Emacs
@@ -404,13 +448,11 @@ def build_draft_key_bindings(quit_state: QuitArmingState | None = None):
     # ``c-enter`` are not in its Keys enum (terminals usually send
     # the same byte for Enter regardless of Shift/Ctrl unless CSI-u
     # keyboard protocol is on, which prompt_toolkit doesn't yet
-    # ship). So we cover ``c-j`` and ``escape, enter`` (Alt+Enter),
-    # which work on every terminal.
+    # ship). v0.9.2 grabs Esc as the cancellation key with
+    # eager=True, which forces the meta-prefix to dispatch before
+    # ``escape, enter`` can compose — so the v0.9.1 Alt+Enter binding
+    # is gone. Users insert newlines via Ctrl+J.
     @bindings.add("c-j")
-    def _(event) -> None:
-        event.current_buffer.newline()
-
-    @bindings.add("escape", "enter")
     def _(event) -> None:
         event.current_buffer.newline()
 
@@ -449,6 +491,7 @@ class TerminalView:
         render_markdown: bool = True,
         input_func: InputFunc | None = None,
         console: Console | None = None,
+        cancel_hook: Callable[[], bool] | None = None,
     ) -> None:
         self.render_markdown = render_markdown
         self.input_func = input_func
@@ -457,7 +500,10 @@ class TerminalView:
         self._draft_reader = (
             None
             if input_func is not None
-            else DraftReader(message_supplier=message_supplier)
+            else DraftReader(
+                message_supplier=message_supplier,
+                cancel_hook=cancel_hook,
+            )
         )
 
     async def read_input(self) -> str:
@@ -584,6 +630,7 @@ class TerminalChat:
             render_markdown=render_markdown,
             input_func=input_func,
             console=console,
+            cancel_hook=self.try_cancel_current_stream,
         )
         self._running = True
         self._busy = False
@@ -592,6 +639,25 @@ class TerminalChat:
         self._streaming_assistant = False
         self.store = ChatStore()
         self.agent.store = self.store
+        self.executor = Executor(agent=self.agent)
+        self.controller = Controller(
+            agent=self.agent,
+            executor=self.executor,
+            llm=self.agent.llm,
+            store=self.store,
+            event_sink=self._handle_event_async,
+        )
+        # The view tracks its OWN outer asyncio task that drives
+        # controller.send. The controller has its own inner task; the
+        # outer one is what the key binding's busy-check looks at and
+        # what catches the CancelledError that propagates back through
+        # the controller's cancel broadcast. See the PRD design note
+        # on "the small redundancy" for why both exist.
+        self._current_stream_task: asyncio.Task | None = None
+        # Per-turn state reset at the top of every _send_message so a
+        # cancelled or completed turn does not leak into the next one.
+        self._turn_assistant_started: bool = False
+        self._turn_tool_arg_cache: dict[str, list[str]] = {}
         self._seed_store_from_agent()
 
     def _seed_store_from_agent(self) -> None:
@@ -815,23 +881,36 @@ class TerminalChat:
         return calls
 
     async def _send_message(self, text: str) -> None:
+        """Drive one turn through the controller and clean up after.
+
+        The view owns the OUTER asyncio task; the controller's
+        cancel() broadcasts to {llm, executor, controller-inner-task}
+        and the cancellation propagates back here as
+        :class:`asyncio.CancelledError`. The matching arm of the try
+        runs the v0.9.2 idle-state contract (flush ``llm_active``,
+        clear pendings, print "interrupted", drop the partial token
+        line).
+        """
         self.store.clear_pending_tool_calls()
         self._streaming_assistant = False
+        # tool_arg_cache lives for the duration of one _send_message
+        # call. store.apply() removes pending entries on tool_result
+        # before the renderer sees the event, so the renderer can no
+        # longer reach back into store.pending_tool_calls for the
+        # original arguments string — we record them here on tool_call
+        # and FIFO-pop on tool_result. Discarded at end of the call.
+        self._turn_assistant_started = False
+        self._turn_tool_arg_cache = {}
+        pre_message_count = len(self.agent.messages)
         try:
-            pre_message_count = len(self.agent.messages)
-            assistant_started = False
-            # tool_arg_cache lives for the duration of one _send_message
-            # call. store.apply() removes pending entries on tool_result
-            # before the renderer sees the event, so the renderer can no
-            # longer reach back into store.pending_tool_calls for the
-            # original arguments string — we record them here on tool_call
-            # and FIFO-pop on tool_result. Discarded at end of the call.
-            tool_arg_cache: dict[str, list[str]] = {}
-            async for event in self.agent.stream_reply(text):
-                self.store.apply(event)
-                assistant_started = await self._handle_event(
-                    event, assistant_started, tool_arg_cache
-                )
+            self._current_stream_task = asyncio.create_task(
+                self.controller.send(text)
+            )
+            try:
+                await self._current_stream_task
+            except asyncio.CancelledError:
+                await self._on_stream_cancelled()
+                return
             if self._streaming_assistant:
                 await self.view.write_raw("\n")
                 self._streaming_assistant = False
@@ -845,6 +924,52 @@ class TerminalChat:
         except Exception as exc:
             logger.exception("terminal chat worker failed")
             await self.view.print_notice(str(exc), style="bold red")
+        finally:
+            self._current_stream_task = None
+
+    def try_cancel_current_stream(self) -> bool:
+        """Key-binding entry point. Returns True iff cancel fired.
+
+        Delegates to ``controller.cancel`` so the broadcast goes
+        through the canonical surface. The bool return drives the
+        Ctrl+C precedence — when something was cancelled, the v0.9.1
+        arm-or-exit logic is bypassed.
+        """
+        return self.controller.cancel()
+
+    async def _on_stream_cancelled(self) -> None:
+        """Restore the idle-state contract after a cancelled turn.
+
+        Order matters: clearing pending tool calls FIRST keeps the
+        store visible-state consistent before we paint anything;
+        flipping ``llm_active`` through the reducer (instead of
+        touching the flag directly) keeps the single-source-of-truth
+        invariant intact; the token-line newline closes any partial
+        stream cleanly before the dim ``interrupted`` notice prints.
+        The queued user messages are deliberately NOT touched — the
+        worker loop's next ``await queue.get()`` picks them up.
+        """
+        self.store.clear_pending_tool_calls()
+        if self.store.llm_active:
+            self.store.apply(AgentEvent("llm_request_end"))
+        if self._streaming_assistant:
+            await self.view.write_raw("\n")
+            self._streaming_assistant = False
+        await self.view.print_notice("interrupted", style="dim yellow")
+
+    async def _handle_event_async(self, event: AgentEvent) -> None:
+        """Event sink injected into the Controller.
+
+        Wraps :py:meth:`_handle_event` with the per-turn state held on
+        ``self`` so the closure-free controller path stays clean —
+        the controller never sees ``assistant_started`` or the
+        per-turn arg cache.
+        """
+        self._turn_assistant_started = await self._handle_event(
+            event,
+            self._turn_assistant_started,
+            self._turn_tool_arg_cache,
+        )
 
     async def _render_new_reminders(self, pre_count: int) -> None:
         for raw in self.agent.messages[pre_count:]:

@@ -12,11 +12,14 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from neutrix.store import ChatStore
+
+if TYPE_CHECKING:
+    from neutrix.executor import Executor
 
 # Status names the LLM may pass to TaskUpdate. Matches Claude Code's
 # `TaskUpdateStatusSchema().or(z.literal("deleted"))` shape — "deleted"
@@ -205,21 +208,54 @@ def _list_dir(path: str = ".") -> str:
     return "\n".join(items) if items else "(empty)"
 
 
-def _run_shell(command: str, timeout: int = 30) -> str:
+def _run_shell(
+    command: str,
+    timeout: int = 30,
+    *,
+    executor: Executor | None = None,
+) -> str:
+    """Run a shell command in a fresh process group so it can be tree-killed.
+
+    ``start_new_session=True`` puts the child (and any grandchildren
+    it spawns through e.g. a shell pipeline) into its own process
+    group, so :func:`neutrix.executor._tree_kill` reaches the whole
+    tree with one ``killpg``. Registers the Popen with the
+    ``executor``'s cancellation pool before blocking on
+    ``communicate``; unregisters in ``finally`` even on the timeout
+    path.
+    """
     logger.info("shell tool: {!r}", command)
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=os.getcwd(),
+        start_new_session=True,
+    )
+    if executor is not None:
+        executor.register_cancellable(proc)
+    timed_out = False
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=os.getcwd(),
-        )
-    except subprocess.TimeoutExpired:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+            timed_out = True
+    finally:
+        if executor is not None:
+            executor.unregister_cancellable(proc)
+    if timed_out:
         return f"ERROR: command timed out after {timeout}s"
-    out = proc.stdout or ""
-    err = proc.stderr or ""
+    if (
+        executor is not None
+        and executor._cancel_requested
+        and proc.returncode is not None
+        and proc.returncode < 0
+    ):
+        return "[cancelled by user]"
     parts = [f"exit_code: {proc.returncode}"]
     if out:
         parts.append(f"stdout:\n{out}")
@@ -243,7 +279,7 @@ def _task_create(
 
 
 def _task_update(
-    taskId: str,  # ruff: noqa - LLM-facing name matches Claude Code's tool
+    taskId: str,
     status: str | None = None,
     subject: str | None = None,
     description: str | None = None,
@@ -428,14 +464,18 @@ def dispatch(
     arguments_json: str,
     *,
     store: ChatStore | None = None,
+    executor: Executor | None = None,
 ) -> str:
-    """Look up `name` in the registry and call it with parsed JSON args.
+    """Look up ``name`` in the registry and call it with parsed JSON args.
 
-    The ``store`` keyword is forwarded only to tools whose implementation
-    declares a ``store`` keyword parameter (currently ``TaskCreate``,
-    ``TaskUpdate``, ``TaskList``); all other tools see their original
-    signature. This keeps existing callers working while letting the
-    task tools mutate :class:`neutrix.store.ChatStore` directly.
+    The ``store`` keyword is forwarded only to tools whose
+    implementation declares a ``store`` keyword parameter (currently
+    ``TaskCreate``, ``TaskUpdate``, ``TaskList``). The ``executor``
+    keyword is forwarded only to tools that declare it (currently
+    ``run_shell``, which registers its Popen with the executor's
+    cancellation pool). Tools that declare neither see their original
+    signature, so the LLM-facing JSON schema stays free of any
+    plumbing kwargs.
 
     Returns the tool's string result (errors are returned as text, not raised).
     """
@@ -450,8 +490,11 @@ def dispatch(
         signature = inspect.signature(tool.func)
     except (TypeError, ValueError):
         signature = None
-    if signature is not None and "store" in signature.parameters:
-        args.setdefault("store", store)
+    if signature is not None:
+        if "store" in signature.parameters:
+            args.setdefault("store", store)
+        if "executor" in signature.parameters:
+            args.setdefault("executor", executor)
     try:
         return tool.func(**args)
     except TypeError as e:

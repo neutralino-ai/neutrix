@@ -16,6 +16,7 @@ from neutrix.config import (
     load_config,
     resolve_initial_slot,
 )
+from neutrix.llm import OpenAIChatLLM
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     slot = strong_slot or fast_slot
     assert slot is not None  # for type-checker; guarded above
 
-    agent = Agent(slot=slot, use_tools=not args.no_tools)
+    llm = OpenAIChatLLM(slot)
+    agent = Agent(slot=slot, llm=llm, use_tools=not args.no_tools)
     _configure_chat_logging()
 
     loaded_tasks: list = []
