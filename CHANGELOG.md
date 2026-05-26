@@ -4,6 +4,77 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.1] — 2026-05-26
+
+### Added
+- Bash- / Claude-style trailing-backslash line continuation in the
+  draft editor. Ending a buffer with ``\`` and pressing ``Enter``
+  strips the backslash and inserts a newline instead of submitting.
+  Mid-buffer backslashes are ignored (the user is editing earlier in
+  the draft) so plain ``Enter`` keeps its split semantics there.
+- ``Ctrl+Z`` now suspends ``neutrix`` to the background via
+  ``app.suspend_to_background()`` — prompt_toolkit's built-in shim
+  that disables raw mode, raises ``SIGTSTP``, then re-enters raw
+  mode on ``SIGCONT``. ``fg`` brings the chat back with the
+  draft buffer intact.
+
+### Changed
+- ``Ctrl+C`` AND empty-buffer ``Ctrl+D`` are now a double-press
+  exit with **independent per-chord timers**. The first press of
+  either key arms that chord's own 1-second window and renders a
+  dim-gray ``press Ctrl+C again to exit`` or
+  ``press Ctrl+D again to exit`` hint above the cursor — the
+  wording names exactly the key the user must press to confirm.
+  The second press of **the same key** within that chord's own
+  window exits: ``Ctrl+C`` → ``KeyboardInterrupt``,
+  ``Ctrl+D`` → ``EOFError``, both already caught by
+  ``_input_loop``. **Cross-key presses are non-destructive** —
+  pressing ``Ctrl+D`` while ``Ctrl+C`` was armed arms ``Ctrl+D``
+  on its own clock and refreshes the displayed hint to
+  ``press Ctrl+D again to exit``, but the ``Ctrl+C`` timer keeps
+  running on its original arming time. So ``Ctrl+C → Ctrl+D →
+  Ctrl+C`` (all within 1 s of the first press) exits via
+  ``KeyboardInterrupt`` — the intervening Ctrl+D did not touch
+  c-c's clock. **``Ctrl+D`` only enters the quit dance when the
+  buffer is empty**; with text in the draft, the default Emacs
+  forward-delete-character is preserved (guarded by a
+  ``prompt_toolkit.filters.Condition``). **The hint auto-fades on
+  its own** — each arming schedules a background task that
+  invalidates the app once that chord's window expires. Hint
+  color is ``fg:ansibrightblack`` — the same dim style as queued
+  user messages — so the affordance reads as part of the muted
+  UI hierarchy, not a warning (an earlier yellow palette was
+  rejected at review as visually too loud). Keypresses other than
+  the two quit chords neither cancel arming nor extend any
+  timer; each chord's window is set by that chord's own most
+  recent press alone (pure-timer model — the originally-drafted
+  Codex-style "any-key-cancels" rule was rejected at Phase-3
+  review). ``handle_sigint=False`` is now passed at each
+  ``prompt`` / ``prompt_async`` call so SIGINT reaches the
+  binding instead of being translated to ``KeyboardInterrupt``
+  upstream.
+- Newline keys: ``Ctrl+J`` and ``Alt+Enter`` insert a newline at
+  the cursor. ``Shift+Enter`` also inserts a newline on terminals
+  that emit ``Shift+Enter`` as ``Ctrl+J`` (gnome-terminal, xterm,
+  default macOS Terminal, Linux console). prompt_toolkit 3.0.x has
+  no ``Keys.ShiftEnter`` / ``Keys.ControlEnter`` entries, so
+  CSI-u-enabled terminals must wait for upstream support — out of
+  scope.
+
+### Non-changes (deliberately)
+- No mid-stream cancellation. The first ``Ctrl+C`` / ``Ctrl+D``
+  only arms the exit shortcut; an in-flight LLM call keeps
+  running until it finishes normally or the user double-presses
+  to exit the process. Plumbing into ``Agent.stream_reply`` is
+  v0.9.2 scope — see ``docs/PRDs/v0.9.2-cancellation.md``.
+- ``Ctrl+D`` on a non-empty draft does NOT exit; it keeps the
+  default forward-delete behavior because that's the more useful
+  thing the chord can do mid-draft.
+- ``ChatStore`` and the transcript format are untouched — v0.9.1
+  is view-only.
+
+See [docs/PRDs/v0.9.1-keyboard.md](docs/PRDs/v0.9.1-keyboard.md).
+
 ## [v0.9.0] — 2026-05-25
 
 ### Added

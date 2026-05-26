@@ -15,9 +15,12 @@ from neutrix.config import Config, Slot
 from neutrix.store import ChatStore
 from neutrix.terminal_chat import (
     MAX_PANEL_ROWS,
+    QuitArmingState,
     TerminalChat,
     ToolRecord,
+    apply_enter_or_continuation,
     approximate_token_count,
+    build_draft_key_bindings,
     delete_buffer_to_line_end,
     format_task_panel,
     move_buffer_to_line_start,
@@ -807,3 +810,524 @@ async def test_send_message_skips_folded_notice_when_no_reminder_landed(
     assert not any(
         c[1].startswith("system reminder: task list injected") for c in notice_calls
     )
+
+
+# ---- v0.9.1: keyboard ergonomics (Codex parity + backslash continuation) ----
+
+
+def test_quit_arming_state_fresh_is_outside_window():
+    """A pristine state has ``armed_at=-math.inf`` so the window is
+    always closed — no hint, no exit, no chord."""
+    state = QuitArmingState()
+    assert state.within_window() is False
+    assert state.within_window("c-c") is False
+    assert state.within_window("c-d") is False
+    assert state.hint_text() is None
+
+
+def test_quit_arming_state_arm_c_c_only_confirms_c_c():
+    """After ``arm("c-c")``: the renderer-mode predicate
+    (``within_window()``) is True, the c-c gate is True, but a c-d
+    press would NOT confirm — that's what makes cross-key presses
+    re-arm instead of exit."""
+    state = QuitArmingState()
+    state.arm("c-c")
+    assert state.within_window() is True
+    assert state.within_window("c-c") is True
+    assert state.within_window("c-d") is False
+    assert state.hint_text() == "press Ctrl+C again to exit"
+
+
+def test_quit_arming_state_arm_c_d_only_confirms_c_d():
+    """Symmetric with the c-c case; the hint string flips."""
+    state = QuitArmingState()
+    state.arm("c-d")
+    assert state.within_window("c-d") is True
+    assert state.within_window("c-c") is False
+    assert state.hint_text() == "press Ctrl+D again to exit"
+
+
+def test_quit_arming_state_cross_arm_keeps_other_chord_timer_alive(monkeypatch):
+    """Independent timers: arm("c-c") then arm("c-d") leaves c-c's
+    own window UNTOUCHED. The hint refreshes to the most recent
+    chord (c-d), but the c-c gate stays True so a third press of
+    Ctrl+C still exits. This is the proof that cross-key presses
+    are non-destructive."""
+    import time as _time
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(_time, "monotonic", lambda: fake_now[0])
+
+    state = QuitArmingState()
+    state.arm("c-c")
+    assert state.hint_text() == "press Ctrl+C again to exit"
+
+    # Time advances inside both chords' windows. arm c-d.
+    fake_now[0] += 0.3
+    state.arm("c-d")
+
+    # Hint refreshes to the most-recent chord — c-d.
+    assert state.hint_text() == "press Ctrl+D again to exit"
+    # BOTH chords are within their own windows now.
+    assert state.within_window("c-c") is True
+    assert state.within_window("c-d") is True
+
+
+def test_quit_arming_state_each_chord_expires_independently(monkeypatch):
+    """Walk time past c-c's window but still inside c-d's. c-c
+    becomes False; c-d stays True; the hint follows the last-armed
+    chord (c-d in this scenario)."""
+    import time as _time
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(_time, "monotonic", lambda: fake_now[0])
+
+    state = QuitArmingState()
+    state.arm("c-c")  # at t=0
+    fake_now[0] += 0.3
+    state.arm("c-d")  # at t=0.3
+
+    # Walk to t=1.05: c-c is expired (1.05 > 1.0), c-d still alive
+    # (1.05 - 0.3 = 0.75 < 1.0).
+    fake_now[0] = 1000.0 + 1.05
+    assert state.within_window("c-c") is False
+    assert state.within_window("c-d") is True
+    # Renderer-mode follows last_armed_key (c-d, still alive).
+    assert state.within_window() is True
+    assert state.hint_text() == "press Ctrl+D again to exit"
+
+
+def test_quit_arming_state_expires_after_window(monkeypatch):
+    """Past ``QUIT_WINDOW_S`` the chord's window closes; once the
+    last-armed chord is gone, ``hint_text()`` falls to None."""
+    import time as _time
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(_time, "monotonic", lambda: fake_now[0])
+
+    state = QuitArmingState()
+    state.arm("c-c")
+    assert state.within_window() is True
+
+    fake_now[0] += QuitArmingState.QUIT_WINDOW_S + 0.05
+    assert state.within_window() is False
+    assert state.within_window("c-c") is False
+    assert state.hint_text() is None
+
+
+def test_apply_enter_or_continuation_strips_trailing_backslash():
+    """Bash- / Claude-style continuation: trailing ``\\`` + Enter →
+    newline, backslash consumed, cursor parked at the new end."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+
+    buf = Buffer()
+    buf.document = Document("hello\\", cursor_position=6)
+
+    handled = apply_enter_or_continuation(buf)
+
+    assert handled is True
+    assert buf.text == "hello\n"
+    assert buf.cursor_position == len(buf.text)
+
+
+def test_apply_enter_or_continuation_no_op_when_no_trailing_backslash():
+    """Plain Enter: the helper returns False so the binding submits
+    instead of inserting a newline."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+
+    buf = Buffer()
+    buf.document = Document("hello", cursor_position=5)
+
+    assert apply_enter_or_continuation(buf) is False
+    assert buf.text == "hello"
+
+
+def test_apply_enter_or_continuation_ignores_mid_buffer_backslash():
+    """Continuation only fires at end-of-buffer; a backslash with text
+    after the cursor must NOT be eaten, because the user is editing
+    earlier in the draft and pressing Enter to split a line."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+
+    buf = Buffer()
+    buf.document = Document("hello\\world", cursor_position=6)
+
+    assert apply_enter_or_continuation(buf) is False
+    assert buf.text == "hello\\world"
+
+
+def test_build_draft_key_bindings_registers_newline_keys():
+    """Acceptance: c-j and (escape, enter) both route to the newline
+    handler. Other newline candidates (s-enter, c-enter) are not in
+    prompt_toolkit's Keys enum — see PRD goal #3."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.keys import Keys
+
+    bindings = build_draft_key_bindings()
+    keys_registered = [kb.keys for kb in bindings.bindings]
+
+    assert (Keys.ControlJ,) in keys_registered
+    # Keys.Enter is an alias for Keys.ControlM in prompt_toolkit 3.0.x.
+    assert (Keys.Escape, Keys.ControlM) in keys_registered
+
+
+def test_build_draft_key_bindings_registers_quit_and_suspend_keys():
+    """Acceptance: c-c, c-d (quit dance) and c-z (suspend) are bound.
+
+    The c-d binding additionally carries a non-trivial ``filter`` (the
+    buffer-empty :py:class:`prompt_toolkit.filters.Condition`) so that
+    non-empty-buffer Ctrl+D still forward-deletes. We assert the
+    binding exists AND that its filter is not the always-True default.
+    """
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.filters import to_filter
+    from prompt_toolkit.keys import Keys
+
+    bindings = build_draft_key_bindings()
+    keys_registered = [kb.keys for kb in bindings.bindings]
+
+    assert (Keys.ControlC,) in keys_registered
+    assert (Keys.ControlD,) in keys_registered
+    assert (Keys.ControlZ,) in keys_registered
+
+    # The c-d binding's filter must be something narrower than the
+    # always-True default — otherwise non-empty buffers would lose
+    # forward-delete.
+    always_true = to_filter(True)
+    c_d_bindings = [kb for kb in bindings.bindings if kb.keys == (Keys.ControlD,)]
+    assert c_d_bindings, "c-d binding missing"
+    assert c_d_bindings[0].filter is not always_true
+
+
+def test_above_input_shows_quit_hint_when_armed(tmp_path: Path):
+    """When the DraftReader's quit_state is armed, ``_above_input``
+    renders a dim-yellow ``press Ctrl+C again to exit`` line; when
+    disarmed it vanishes again. Covers the renderer side of the
+    v0.9.1 hint contract."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.formatted_text import FormattedText
+
+    agent = ToolAgent()
+    chat = TerminalChat(
+        agent,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=None,  # force a real DraftReader, not the stub
+        console=Console(file=StringIO(), force_terminal=False, color_system=None),
+    )
+    reader = chat.view._draft_reader
+    assert reader is not None  # sanity: prompt_toolkit branch active
+
+    # Disarmed: nothing to render, fall through to "".
+    assert chat._above_input() == ""
+
+    # Arm with c-c → the hint names Ctrl+C specifically and renders
+    # in the dim hierarchy color (not yellow — see PRD: the
+    # affordance is a soft hint, not a warning).
+    reader.quit_state.arm("c-c")
+    rendered = chat._above_input()
+    assert isinstance(rendered, FormattedText)
+    fragments = list(rendered)
+    assert fragments[-1] == (
+        "fg:ansibrightblack",
+        "press Ctrl+C again to exit\n",
+    )
+
+    # Re-arm with c-d → the hint flips to Ctrl+D (same dim style).
+    reader.quit_state.arm("c-d")
+    rendered = chat._above_input()
+    assert isinstance(rendered, FormattedText)
+    fragments = list(rendered)
+    assert fragments[-1] == (
+        "fg:ansibrightblack",
+        "press Ctrl+D again to exit\n",
+    )
+
+
+@pytest.mark.asyncio
+async def test_double_ctrl_c_exits_real_prompt_session_quickly():
+    """End-to-end: drive a real ``PromptSession`` with our bindings,
+    feed two ``\\x03`` bytes back-to-back, and assert ``prompt_async``
+    raises ``KeyboardInterrupt`` well within the 1-s quit window.
+
+    Catches regressions where the c-c binding fires but the
+    ``within_window()`` predicate disagrees with the timer assumption.
+    """
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x03\x03")
+        with pytest.raises(KeyboardInterrupt):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=1.0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_single_ctrl_c_alone_does_not_exit():
+    """End-to-end counterpart: a single ``\\x03`` arms the hint but
+    does NOT exit; ``prompt_async`` keeps running until cancelled.
+
+    Asserts the call blocks past the auto-fade deadline (so we know
+    the binding isn't silently exiting on the lone press).
+    """
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x03")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+
+
+@pytest.mark.asyncio
+async def test_double_ctrl_d_exits_real_prompt_session_with_eof():
+    """Two ``\\x04`` bytes on an empty buffer must raise ``EOFError``,
+    not ``KeyboardInterrupt``. The c-d branch shares
+    :class:`QuitArmingState` with c-c but exits with a different
+    exception so :py:meth:`_input_loop`'s existing ``except EOFError``
+    fires."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x04\x04")
+        with pytest.raises(EOFError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=1.0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_single_ctrl_d_alone_does_not_exit():
+    """A lone ``\\x04`` arms the hint but does NOT exit (symmetric
+    with the c-c counterpart)."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x04")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_then_ctrl_d_no_exit_both_timers_alive():
+    """Cross-key: c-c arms, then c-d arms independently. Neither
+    keystroke is a second tap of its own chord, so the call must
+    NOT exit. Both timers stay alive on their own clocks.
+
+    Asserts the prompt times out AND both chords are still within
+    their own windows.
+    """
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x03\x04")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+        # The hint follows the most-recent press (c-d), but BOTH
+        # timers should still be alive — independent clocks.
+        assert quit_state.last_armed_key == "c-d"
+        assert quit_state.hint_text() == "press Ctrl+D again to exit"
+        assert quit_state.within_window("c-c") is True
+        assert quit_state.within_window("c-d") is True
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_then_ctrl_c_no_exit_both_timers_alive():
+    """Symmetric: c-d arms then c-c arms; no exit; both timers
+    alive; the hint follows c-c (most recent)."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x04\x03")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=0.3,
+            )
+        assert quit_state.last_armed_key == "c-c"
+        assert quit_state.hint_text() == "press Ctrl+C again to exit"
+        assert quit_state.within_window("c-c") is True
+        assert quit_state.within_window("c-d") is True
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_then_ctrl_d_then_ctrl_c_exits_keyboard_interrupt():
+    """Independent-timer lock-in: c-c arms → c-d arms → c-c again
+    completes the c-c double-tap within c-c's ORIGINAL window. The
+    intervening c-d never touched c-c's clock, so the third tap
+    exits via ``KeyboardInterrupt``."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x03\x04\x03")
+        with pytest.raises(KeyboardInterrupt):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=1.0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_then_ctrl_c_then_ctrl_d_exits_eof():
+    """Symmetric lock-in: c-d arms → c-c arms → c-d again
+    completes the c-d double-tap within c-d's ORIGINAL window;
+    exits via ``EOFError``."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        pipe_input.send_text("\x04\x03\x04")
+        with pytest.raises(EOFError):
+            await asyncio.wait_for(
+                session.prompt_async(handle_sigint=False),
+                timeout=1.0,
+            )
+
+
+@pytest.mark.asyncio
+async def test_ctrl_d_on_non_empty_buffer_does_not_arm_quit():
+    """When the draft has text, Ctrl+D must keep its default
+    forward-delete-character behavior and NOT enter the quit dance.
+
+    Feed ``"hi\\x04"`` — typing ``hi``, then Ctrl+D with the cursor
+    at end-of-buffer. With the cursor at end there's nothing to
+    forward-delete, but the critical invariant is that the
+    QuitArmingState window stays closed (within_window() False)
+    so a subsequent lone Ctrl+D / Ctrl+C would not exit. After
+    submitting with Enter the call must complete normally with
+    text "hi"."""
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from neutrix.terminal_chat import QuitArmingState as _QuitArmingState
+    from neutrix.terminal_chat import build_draft_key_bindings
+
+    quit_state = _QuitArmingState()
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=build_draft_key_bindings(quit_state),
+        )
+        # ``hi`` then Ctrl+D (no-op at end-of-buffer for default
+        # delete-char-forward — important: NOT a quit) then Enter.
+        pipe_input.send_text("hi\x04\r")
+        result = await asyncio.wait_for(
+            session.prompt_async(handle_sigint=False),
+            timeout=1.0,
+        )
+        assert result == "hi"
+        assert quit_state.within_window() is False

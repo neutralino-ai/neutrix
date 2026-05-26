@@ -7,14 +7,16 @@ handles slash commands.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import sys
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import ClassVar, TextIO
 
 from loguru import logger
 from rich.console import Console
@@ -185,17 +187,18 @@ class DraftReader:
         message_supplier: Callable[[], object] = lambda: "",
     ) -> None:
         self._message_supplier = message_supplier
+        self.quit_state = QuitArmingState()
         self._session = self._build_session()
 
     def read(self) -> str:
         if self._session is None:
             return input("")
-        return self._session.prompt()
+        return self._session.prompt(handle_sigint=False)
 
     async def read_async(self) -> str:
         if self._session is None:
             return await asyncio.to_thread(input, "")
-        return await self._session.prompt_async()
+        return await self._session.prompt_async(handle_sigint=False)
 
     @property
     def uses_prompt_toolkit(self) -> bool:
@@ -217,6 +220,12 @@ class DraftReader:
         # blink that was visible whenever the assistant streamed
         # output (every stdout write hides-then-restores the prompt
         # area, which made the toolbar disappear for one frame).
+        # ``handle_sigint=False`` is passed to each ``prompt``/
+        # ``prompt_async`` call (it's a method arg, not a constructor
+        # arg) so SIGINT reaches our explicit c-c binding instead of
+        # being translated to KeyboardInterrupt before the binding
+        # fires (the binding implements the Codex-style double-press
+        # exit).
         placeholder = FormattedText(
             [("fg:ansibrightblack", "Message the assistant  (/help for commands)")]
         )
@@ -228,23 +237,175 @@ class DraftReader:
             placeholder=placeholder,
             prompt_continuation="",
             history=InMemoryHistory(),
-            key_bindings=build_draft_key_bindings(),
+            key_bindings=build_draft_key_bindings(self.quit_state),
         )
 
 
-def build_draft_key_bindings():
-    """Build explicit editor bindings for terminal draft input."""
+@dataclass
+class QuitArmingState:
+    """Pure-timer arming tracker for the Ctrl+C / Ctrl+D double-press.
+
+    Each chord (``"c-c"``, ``"c-d"``) carries its own independent
+    ``armed_at`` timestamp in :data:`armed_at`. Cross-key presses
+    never touch the other chord's clock; the displayed hint refreshes
+    to name the most recently pressed chord, but each timer keeps
+    running on its own schedule. Only the same chord can confirm —
+    a second press of THIS chord, within THIS chord's own window.
+
+    Earlier designs (shared-state confirm-either-key,
+    re-arm-with-reset-timer) were rejected at successive Phase-3
+    review gates — see ``docs/PRDs/v0.9.1-keyboard.md``.
+    """
+
+    QUIT_WINDOW_S: ClassVar[float] = 1.0
+    armed_at: dict[str, float] = field(default_factory=dict)
+    last_armed_key: str | None = None
+
+    def within_window(self, key: str | None = None) -> bool:
+        """Two-mode predicate.
+
+        ``key is None`` (renderer): True iff the most-recently-armed
+        chord is still within its own window — drives hint visibility.
+
+        ``key`` set (binding): True iff that chord's own timer is
+        still within :data:`QUIT_WINDOW_S`. Cross-key arms do not
+        affect this — each chord's timer is independent.
+        """
+        if key is None:
+            return self.hint_text() is not None
+        armed_at = self.armed_at.get(key, -math.inf)
+        return time.monotonic() - armed_at < self.QUIT_WINDOW_S
+
+    def arm(self, key: str) -> None:
+        self.armed_at[key] = time.monotonic()
+        self.last_armed_key = key
+
+    def hint_text(self) -> str | None:
+        """Renderer-facing hint string. Names the *most recently
+        pressed* chord, as long as its own window is still open.
+
+        The "fallback to the OTHER chord if its window is still
+        open" branch is unreachable: if the most-recent chord has
+        expired, the earlier chord — armed strictly further in
+        the past — must also have expired.
+        """
+        if self.last_armed_key is None:
+            return None
+        if not self.within_window(self.last_armed_key):
+            return None
+        if self.last_armed_key == "c-c":
+            return "press Ctrl+C again to exit"
+        if self.last_armed_key == "c-d":
+            return "press Ctrl+D again to exit"
+        return None
+
+
+def apply_enter_or_continuation(buffer) -> bool:
+    """Bash- / Claude-style trailing-backslash line continuation.
+
+    If the buffer ends with ``\\`` and the cursor is at end-of-buffer,
+    strip the backslash and insert a newline, returning ``True`` to
+    signal "treat this Enter as a newline, not a submit." Otherwise
+    returns ``False`` so the caller submits as normal.
+    """
+    if buffer.cursor_position != len(buffer.text):
+        return False
+    if not buffer.text.endswith("\\"):
+        return False
+    buffer.delete_before_cursor(count=1)
+    buffer.newline()
+    return True
+
+
+def build_draft_key_bindings(quit_state: QuitArmingState | None = None):
+    """Build explicit editor bindings for terminal draft input.
+
+    ``quit_state`` carries the Ctrl+C arming timer; pass a fresh
+    :class:`QuitArmingState` per :class:`DraftReader` so two sessions
+    don't share state. ``None`` is accepted for unit tests that
+    don't care about the quit dance.
+    """
     try:
+        from prompt_toolkit.application.current import get_app
+        from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
     except ImportError:
         return None
 
+    if quit_state is None:
+        quit_state = QuitArmingState()
+
     bindings = KeyBindings()
+
+    def _arm_or_exit(
+        event,
+        chord: str,
+        exit_exception: type[BaseException],
+    ) -> None:
+        """Shared body for the c-c and c-d quit-confirm bindings.
+
+        Independent per-chord arming: ``within_window(chord)`` is
+        True only if THIS chord's own timer is still within
+        :data:`QuitArmingState.QUIT_WINDOW_S`. A cross-key press
+        falls through to arm only its own chord, leaving the other
+        chord's clock untouched. So ``Ctrl+C → Ctrl+D → Ctrl+C``
+        within the original 1 s of the first press exits via
+        Ctrl+C: the intervening Ctrl+D never touched c-c's timer.
+        """
+        if quit_state.within_window(chord):
+            event.app.exit(exception=exit_exception)
+            return
+        quit_state.arm(chord)
+        event.app.invalidate()  # paint the hint now
+
+        # Schedule a redraw QUIT_WINDOW_S later so the hint clears on
+        # its own without needing the user to press another key. The
+        # background task lives on the app's task group and is
+        # cancelled automatically when prompt_async returns.
+        async def _fade_hint() -> None:
+            await asyncio.sleep(QuitArmingState.QUIT_WINDOW_S)
+            event.app.invalidate()
+
+        event.app.create_background_task(_fade_hint())
+
+    @bindings.add("c-c")
+    def _(event) -> None:
+        _arm_or_exit(event, "c-c", KeyboardInterrupt)
+
+    # Ctrl+D enters the quit dance ONLY when the buffer is empty;
+    # otherwise it falls through to prompt_toolkit's default Emacs
+    # binding (forward-delete-character). The Condition filter is what
+    # makes that fall-through work — without it the binding would
+    # always fire and the user could not forward-delete inside a
+    # draft. Shares the QuitArmingState instance with c-c, but
+    # per-chord arming means only the same key can confirm.
+    @Condition
+    def _buffer_is_empty() -> bool:
+        return not get_app().current_buffer.text
+
+    @bindings.add("c-d", filter=_buffer_is_empty)
+    def _(event) -> None:
+        _arm_or_exit(event, "c-d", EOFError)
+
+    @bindings.add("c-z")
+    def _(event) -> None:
+        event.app.suspend_to_background()
 
     @bindings.add("enter")
     def _(event) -> None:
-        event.app.exit(result=event.current_buffer.text)
+        buf = event.current_buffer
+        if apply_enter_or_continuation(buf):
+            return
+        event.app.exit(result=buf.text)
 
+    # Newline keys. Codex's textarea.rs:347-355 inserts \n for Ctrl+J,
+    # Ctrl+M, and Enter with any modifier. We can only bind what
+    # prompt_toolkit's key parser recognizes — ``s-enter`` and
+    # ``c-enter`` are not in its Keys enum (terminals usually send
+    # the same byte for Enter regardless of Shift/Ctrl unless CSI-u
+    # keyboard protocol is on, which prompt_toolkit doesn't yet
+    # ship). So we cover ``c-j`` and ``escape, enter`` (Alt+Enter),
+    # which work on every terminal.
     @bindings.add("c-j")
     def _(event) -> None:
         event.current_buffer.newline()
@@ -537,6 +698,14 @@ class TerminalChat:
            :func:`format_task_panel` for ordering and overflow rules.
         2. Queued user messages — dim, prefixed with ``QUEUED_PREFIX``,
            one per line, drawn on the lines just above the cursor.
+        3. The dim-gray quit-confirm hint, when the quit-shortcut
+           is armed (v0.9.1 — see :class:`QuitArmingState`). The
+           exact wording is chord-specific — ``press Ctrl+C again to
+           exit`` after Ctrl+C, ``press Ctrl+D again to exit`` after
+           Ctrl+D — so the user always sees the exact key they need
+           to press to confirm. Shares the ``fg:ansibrightblack``
+           dim style with queued messages — the affordance reads as
+           part of the muted hierarchy, not a warning.
 
         Returns an empty string when there's nothing to show so the
         input cursor sits at its natural position. Returns
@@ -545,7 +714,8 @@ class TerminalChat:
         """
         tasks = self.store.tasks
         queued = self.store.queued_user_messages
-        if not tasks and not queued:
+        quit_hint = self._quit_hint_text()
+        if not tasks and not queued and quit_hint is None:
             return ""
         try:
             from prompt_toolkit.formatted_text import FormattedText
@@ -558,14 +728,22 @@ class TerminalChat:
                 lines.append(text.rstrip("\n"))
             for q in queued:
                 lines.append(f"{QUEUED_PREFIX}{q.text}")
+            if quit_hint is not None:
+                lines.append(quit_hint)
             return "\n".join(lines) + "\n" if lines else ""
 
         fragments: list[tuple[str, str]] = list(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
+        if quit_hint is not None:
+            fragments.append(("fg:ansibrightblack", f"{quit_hint}\n"))
         if not fragments:
             return ""
         return FormattedText(fragments)
+
+    def _quit_hint_text(self) -> str | None:
+        reader = self.view._draft_reader
+        return reader.quit_state.hint_text() if reader is not None else None
 
     def _invalidate_app(self) -> None:
         """Force the running prompt_toolkit app to redraw, if any."""
