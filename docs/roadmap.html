@@ -154,22 +154,25 @@
 
 <h2>Upcoming</h2>
 
+
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.3-heartbeat.md">v0.9.3</a></span>
+  <span class="ver"><a href="PRDs/v0.9.4-heartbeat.md">v0.9.4</a></span>
   <span class="theme">
     Heartbeat liveness indicator
     <small>
       A one-line pulse above the input that says
-      <code>"⠋ LLM …"</code> while streaming and
-      <code>"⠋ tool: run_shell …"</code> while a tool runs.
-      Reads <code>store.llm_active</code> + <code>store.pending_tool_calls</code>.
+      <code>"⠋ LLM …"</code> while in <code>AWAITING_LLM</code>
+      and <code>"⠋ tool: run_shell …"</code> while in
+      <code>AWAITING_EXECUTOR</code>. Reads the v0.9.3
+      <code>ContextManager</code> state +
+      <code>store.pending_tool_calls</code>.
     </small>
   </span>
   <span class="badge planned">skeleton</span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.4-visibility-parity.md">v0.9.4</a></span>
+  <span class="ver"><a href="PRDs/v0.9.5-visibility-parity.md">v0.9.5</a></span>
   <span class="theme">
     Visibility parity: show what the LLM sees
     <small>
@@ -203,14 +206,37 @@
     <small>
       A second LLM that watches the store and revises the task list
       with judgment instead of mechanical bookkeeping. Plugs into
-      the v0.9.2 <code>Controller.cancel()</code> broadcast as a
-      fourth target.
+      the v0.9.3 <code>ContextManager</code> event surface as an
+      additional event consumer / cancel target.
     </small>
   </span>
   <span class="badge planned">skeleton</span>
 </div>
 
 <h2>Shipped</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.3-cancel-steer.md">v0.9.3</a></span>
+  <span class="theme">
+    Cancel as steer + <code>ContextManager</code> state machine
+    <small>
+      Switches cancel cleanup from <em>rollback</em> (v0.9.2) to
+      <em>append <code>[interrupted by user]</code></em>, so the
+      LLM can be steered ("instead, just <code>ls</code>") with
+      the prior tool intent in context. Reshapes the v0.9.2
+      <code>Controller</code> into a <code>ContextManager</code>
+      that owns <code>messages</code> and drives the LLM/tool loop
+      as an explicit state machine
+      (IDLE / AWAITING_LLM / AWAITING_EXECUTOR / CANCELLING).
+      <code>Agent</code> class is dissolved into CM. A pairing
+      layer in <code>llm.py</code> repairs orphan
+      <code>tool_use</code> blocks at API-send time.
+      <code>stream=False</code> again — streaming re-enables in a
+      later PRD. Legacy <code>tui.py</code> Textual app removed.
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
 
 <div class="entry">
   <span class="ver"><a href="PRDs/v0.9.2-cancellation.md">v0.9.2</a></span>

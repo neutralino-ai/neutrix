@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.9.3 splits — cancel as steer + ContextManager</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6a6a6a;
+    --dim: #9a9a9a;
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --border: #e3e3dc;
+    --accent: #b14a00;
+    --shipped: #2f7d32;
+    --inflight: #b14a00;
+    --planned: #6a6a6a;
+    --open: #b14a00;
+    --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 {
+    font-size: 24px;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .tagline {
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .note {
+    color: var(--dim);
+    margin: 0 0 24px;
+    font-size: 13px;
+  }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+  .split {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin: 0 0 14px;
+  }
+  .split .head {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .split .num {
+    font-weight: 600;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .split .name {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 4px 16px;
+    margin: 0;
+    font-size: 14px;
+  }
+  .split dt {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    padding-top: 5px;
+  }
+  .split dd {
+    margin: 0 0 8px;
+    color: var(--fg);
+  }
+  .split dd ul {
+    margin: 4px 0;
+    padding-left: 20px;
+  }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); font-style: normal; }
+  .quote {
+    color: var(--muted);
+    font-style: italic;
+  }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 48px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.9.3 splits — cancel as steer + ContextManager</h1>
+<p class="tagline">
+  Switch the cancel cleanup from <em>rollback</em> (v0.9.2) to
+  <em>append interruption signal</em>; reshape the v0.9.2
+  <code>Controller</code> into a <code>ContextManager</code> state
+  machine that owns the conversation loop.
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this file
+  is the durable record of the split-point discussion that happened
+  <strong>before</strong> the PRD was drafted. CC source under
+  <code>/datafs/users/dingxf/anthropic/cc2/src</code>. All splits below
+  are decided; the PRD's <code>## Claude Code reference</code> section
+  summarizes them.
+</p>
+
+<h2>Architectural rule (user-directed)</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">ContextManager owns <code>messages</code>; only it mutates <code>ChatStore</code></span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>Rule</dt>
+    <dd>
+      UI (TerminalChat / key bindings) emits <em>events</em> to the
+      <code>ContextManager</code>. CM is the single layer that decides
+      state, orchestrates LLM/Executor, and mutates
+      <code>messages</code> / <code>ChatStore</code>. Executor's job
+      narrows to subprocess + tool dispatch I/O. LLM's job narrows to
+      API I/O + outgoing-payload validity (pairing layer). UI renders
+      from <code>ChatStore.changes()</code> (already exists since v0.7);
+      no UI-side store mutations.
+    </dd>
+    <dt>Why</dt>
+    <dd>
+      User: <span class="quote">"don't mix responsibilities. ui don't
+      manipulate the chatstore. only controller did. ... contoller =>
+      context manager, right? not agent loop. its respnsibilty is for
+      building the messge sequence."</span>
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">1.</span>
+    <span class="name">Marker wording &amp; variant count</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Two literal strings keyed off <code>toolUse</code> flag —
+      <code>cc2/src/utils/messages.ts:207-209, 545</code>; callers at
+      <code>query.ts:1047, 1502</code>.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Alternative</strong> — single unified marker
+      <code>'[interrupted by user]'</code>. User: "use 'interrupted by
+      user'". The orphan tool_result fill encodes "tool was active",
+      so the user-message variant duplicates context.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">2.</span>
+    <span class="name">Where orphan tool_results get filled in</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Separate <strong>API-send-time pairing layer</strong>:
+      <code>ensureToolResultPairing()</code> at
+      <code>cc2/src/utils/messages.ts:5133</code>, called from
+      <code>claude.ts:1298</code>. Forward pass inserts synthetic
+      <code>tool_result</code> for any orphan <code>tool_use</code>;
+      reverse pass strips orphan <code>tool_result</code>s.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC</strong> — LLM-layer pairing in
+      <code>llm.py</code>. Pure function on the outgoing payload:
+      dedup by <code>tool_call_id</code> (first occurrence wins) +
+      synthesize tool_result for any orphan <code>tool_use</code>.
+      Does not mutate <code>messages</code>; operates on a copy of
+      the outgoing payload only — preserves the
+      ContextManager-as-sole-mutator rule. User:
+      <span class="quote">"tool_use must match tool_result and nothing
+      in between. this is the key. but this is llm restriction. so
+      llm take responsibility."</span>
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">3.</span>
+    <span class="name">Synthetic tool_result content</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Two literals depending on the path:
+      <ul>
+        <li>Defensive pairing:
+          <code>'[Tool result missing due to internal error]'</code>,
+          <code>is_error: true</code>
+          (<code>messages.ts:246-247</code>).</li>
+        <li>Intentional tool stop:
+          <code>CANCEL_MESSAGE</code> ("The user doesn't want to take
+          this action right now. STOP what you are doing and wait for
+          the user to tell you how to proceed."),
+          <code>is_error: true</code>
+          (<code>messages.ts:622-631</code>).</li>
+      </ul>
+      OpenAI's <code>tool</code> role has no <code>is_error</code>; we
+      drop that field.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Alternative</strong> — conditional content in the
+      pairing layer:
+      <ul>
+        <li>If the message list contains a
+          <code>[interrupted by user]</code> user message after the
+          orphan → synthetic content =
+          <code>'[cancelled by user]'</code>.</li>
+        <li>Otherwise → synthetic content =
+          <code>'[tool result missing]'</code>.</li>
+      </ul>
+      User: <span class="quote">"synthetic tool_result (missing) or
+      tool_result (cancled by user) depending on if there is a
+      'interupted' message."</span>
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">4.</span>
+    <span class="name">Skip marker when a queued user message follows</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Skips marker when <code>signal.reason === 'interrupt'</code>
+      (submit-interrupt). <code>cc2/src/query.ts:1044-1051, 1499-1505</code>.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Alternative</strong> — always append. User:
+      <span class="quote">"the cancel is an event. it's sent to
+      controller. controller make decisions. now it's dumb: if two
+      cancel in a row, ignore next."</span> v0.9.3's ContextManager is
+      explicitly dumb; no submit-while-busy-auto-cancels flow exists.
+      Future: if added, CM can be taught to skip then.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">5.</span>
+    <span class="name">Cancel routing: event-to-ContextManager</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      <code>createUserInterruptionMessage</code> yielded through the
+      query generator (<code>query.ts:1047, 1502</code>). Single
+      mutation path.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — cancel is an
+      <em>event</em> emitted by the UI to the ContextManager. CM is
+      the single decision-maker and mutator. CM broadcasts to
+      LLM.stop() + Executor.cancel(), then appends the marker.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">6.</span>
+    <span class="name">Partial assistant text preservation + streaming</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Streaming on; partial assistant content stays in history when
+      cancel fires; partial <code>tool_use</code> blocks repaired by
+      the pairing layer at next send.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC for the semantic</strong>; for v0.9.3,
+      <strong>disable streaming</strong>. User:
+      <span class="quote">"follow CC. but for now disable stream.
+      let's enable stream later."</span>
+      <code>OpenAIChatLLM.stream_response</code> reverts to
+      <code>stream=False</code> (rolls back v0.9.2's switch).
+      <code>LLM.stop()</code> cancels the awaiting HTTP request via
+      task-cancellation. No partial text exists at cancel time;
+      partial-text preservation re-enters scope when streaming
+      re-enables in a later PRD.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">7.</span>
+    <span class="name">View-side dim "interrupted" notice</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      No separate UI notice — the rendered
+      <code>[Request interrupted by user]</code> message in the
+      transcript IS the affordance.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC</strong> — drop the v0.9.2 dim view-side
+      notice. The <code>[interrupted by user]</code> message renders
+      as a regular user turn.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">8.</span>
+    <span class="name">Idempotency of repeated cancel</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Fire-once via AbortController architecture.</dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — ContextManager
+      handles dedup. <span class="quote">"controller handle that.
+      ui just provide input to controller."</span> +
+      <span class="quote">"if two cancel in a row, ignore next."</span>
+      CM rejects a second cancel event while already in CANCELLING.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">9.</span>
+    <span class="name">Fate of <code>Agent.rollback_to</code></span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>No analog.</dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Alternative</strong> — remove (YAGNI). Re-add cleanly
+      if <code>/undo</code> materializes. Together with the
+      <code>Agent.stream_reply</code> dismantling (see split #10),
+      the entire <code>Agent</code> class folds into ContextManager.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">10.</span>
+    <span class="name">Scope of ContextManager refactor</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>Context</dt>
+    <dd>
+      The ContextManager-as-state-machine design dismantles
+      <code>Agent.stream_reply</code> (the v0.9.2 async generator that
+      drove the LLM/tool loop). Without the generator, AgentEvents
+      and <code>TerminalChat._mirror_new_agent_messages</code> no
+      longer have a producer. The UI rendering path must switch to
+      subscribing to <code>ChatStore.changes()</code> (already exists
+      since v0.7). So the "broader scope" is <strong>forced by the
+      design</strong>, not optional.
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — bundle the broader
+      refactor into v0.9.3. User: "bundle it." Concretely:
+      <ul>
+        <li>v0.9.2's <code>Controller</code> reshapes into
+          <code>ContextManager</code> (substantial role expansion, not
+          a rename).</li>
+        <li><code>Agent.stream_reply</code> is dismantled; the loop
+          becomes the CM state machine.</li>
+        <li><code>Agent</code> class is dissolved into CM (messages,
+          system-reminder injection, LLM/tool wiring all move to
+          CM).</li>
+        <li><code>TerminalChat._mirror_new_agent_messages</code> is
+          removed; UI subscribes to <code>ChatStore.changes()</code>
+          for rendering.</li>
+        <li><code>_send_message</code> shrinks to:
+          <code>await ctx.handle_event(UserMessageEvent(text))</code>.</li>
+      </ul>
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">11.</span>
+    <span class="name">Executor → ContextManager event surface</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Each Tool is an <code>async function*</code> that yields
+      <code>progress</code> events during execution, then a final
+      <code>result</code>
+      (<code>cc2/src/query.ts</code> / <code>Tool.ts</code>). CC needs
+      <code>progress</code> for live output ("Bash running for 5s,
+      output so far: …").
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Alternative</strong> — minimal event surface for
+      v0.9.3: <code>tool_started(tool_call_id, tool_name, args)</code>
+      and <code>tool_finished(tool_call_id, tool_name, content,
+      ok)</code>. No <code>progress</code> events. No internal
+      Executor state machine. Earned by the user: "for now, keep it
+      simple. started / finished." Re-add <code>progress</code> when
+      streaming re-enables (post-v0.9.3).
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">12.</span>
+    <span class="name">Fate of queued user messages on Esc cancel</span>
+    <span class="badge decided">mid-impl</span>
+  </div>
+  <dl>
+    <dt>Context</dt>
+    <dd>
+      Surfaced mid-implementation: the v0.9.3 worker_loop drains
+      <code>asyncio.Queue</code> and dispatches each queued message
+      as the next <code>UserMessageEvent</code>. So pressing Esc while
+      a message is queued (typed during the busy turn) results in the
+      queued message being sent <em>after</em> the
+      <code>[interrupted by user]</code> marker is appended.
+    </dd>
+    <dt>CC behavior</dt>
+    <dd>
+      Bifurcated path (<code>cc2/src/hooks/useCancelRequest.ts:87-122</code>):
+      <ul>
+        <li><strong>Path A — Esc while idle</strong> (queue exists but
+          no LLM in flight): pops queued commands BACK into the
+          editable input buffer via
+          <code>handleQueuedCommandOnCancel()</code>
+          (<code>REPL.tsx:2166-2184</code>). User re-edits.</li>
+        <li><strong>Path B — Esc during active LLM response</strong>:
+          aborts the LLM (<code>signal.reason='user-cancel'</code>),
+          leaves the queue intact; queued messages get sent after
+          the cancel marker.</li>
+      </ul>
+    </dd>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC's Path B for both cases</strong> — keep the
+      v0.9.3 current behavior (send queued messages after the marker).
+      User: chose "Send queued messages after marker (current)".
+      Optimizes for "I cancelled to steer with what I already
+      typed"; the typed message becomes the steering prompt and the
+      LLM sees the prior tool intent + marker + steering input in one
+      go. CC's Path A (pop back to input draft on idle-cancel)
+      requires injecting text into the prompt_toolkit
+      <code>DraftReader</code> buffer the input loop owns — non-trivial
+      and not earned-by v0.9.3's scope. If users find the auto-send
+      surprising, the Path-A wiring can land in a later release.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">13.</span>
+    <span class="name">ContextManager class name</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — class name
+      <code>ContextManager</code>, file
+      <code>src/neutrix/context_manager.py</code>, variable
+      <code>ctx</code> (or <code>ctx_mgr</code> where two
+      <code>ctx</code>'s would collide). User: "use ContextManager."
+      Minor Python-naming overload with the
+      <code>__enter__</code>/<code>__exit__</code> protocol is
+      accepted as a tolerable cost for clarity of the term.
+    </dd>
+  </dl>
+</div>
+
+<h2>Out-of-scope (declared, not split)</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">—</span>
+    <span class="name">Cancel-mode taxonomy (Codex's background vs hard kill)</span>
+    <span class="badge decided">no CC analog</span>
+  </div>
+  <dl>
+    <dt>Note</dt>
+    <dd>v0.9.3 keeps the v0.9.2 single-mode contract.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">—</span>
+    <span class="name">Pure-compute tool cancellation</span>
+    <span class="badge decided">out of scope</span>
+  </div>
+  <dl>
+    <dt>Note</dt>
+    <dd>v0.9.2 carried this as a non-goal; v0.9.3 inherits.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">—</span>
+    <span class="name">Live tool output (CC's <code>progress</code> events)</span>
+    <span class="badge decided">deferred</span>
+  </div>
+  <dl>
+    <dt>Note</dt>
+    <dd>Earned-by when streaming re-enables and run_shell starts
+      yielding stdout chunks. Tracks separately from the v0.9.4
+      heartbeat (which reads CM's state for a "tool: run_shell …"
+      pulse line, not for streaming content).</dd>
+  </dl>
+</div>
+
+<footer>
+  Decisions above are final. The PRD's
+  <code>## Claude Code reference</code> section summarizes the
+  decisions in PRD shape; this HTML is the durable record of the
+  discussion that produced them.
+</footer>
+
+</body>
+</html>

@@ -4,6 +4,119 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.3] — 2026-05-27
+
+### Changed
+- **Cancel is now "steer", not "rollback".** Pressing Esc (or first
+  Ctrl+C while busy) keeps the interrupted turn in history and
+  appends a ``role:user`` message with content
+  ``[interrupted by user]`` so the next LLM call sees the prior
+  user turn, the partial assistant turn (if any), and the orphan
+  ``tool_calls`` — enough context to be steered ("instead, just
+  ``ls``") rather than blindly retrying. Follows Claude Code's
+  ``createUserInterruptionMessage`` semantic. The v0.9.2
+  rollback-to-snapshot behavior is gone; ``Agent.rollback_to`` is
+  removed.
+- **``Controller`` is substantially reshaped into ``ContextManager``,
+  not renamed.** v0.9.2's ``Controller`` was a ~50-line broadcaster
+  (``send`` wrapping ``stream_turn`` in a task; ``cancel`` calling
+  ``llm.stop`` / ``executor.cancel`` / ``task.cancel``). v0.9.3's
+  ``ContextManager`` absorbs the v0.9.2 ``Agent``'s message
+  ownership, runs an explicit
+  IDLE / AWAITING_LLM / AWAITING_EXECUTOR / CANCELLING state
+  machine, owns system-reminder injection, and is the SOLE mutator
+  of ``messages`` and ``ChatStore``. The v0.9.2 class is a small
+  subset of the v0.9.3 class; framing this as a "rename" would
+  understate the role expansion.
+- **``Agent`` class dissolved into ``ContextManager``.**
+  ``Agent.stream_reply`` (the v0.6.x-era async generator that drove
+  the LLM/tool loop) is dismantled and the loop becomes the CM
+  state machine. ``src/neutrix/agent.py`` and
+  ``src/neutrix/agent_loop.py`` are removed. Helpers
+  (``DEFAULT_SYSTEM_PROMPT``, ``build_task_reminder``,
+  ``is_task_reminder``, ``format_reminder_notice``,
+  ``assistant_turns_since_*``) move to
+  ``src/neutrix/context_manager.py``.
+- **Streaming is disabled.** ``OpenAIChatLLM.stream_response``
+  reverts to ``stream=False`` (rolls back v0.9.2's switch). One
+  awaited Chat Completions call returns one
+  ``LLMEvent("assistant", LLMResponse(...))``. Token-by-token
+  rendering is gone for this release; full-response wait. Streaming
+  re-enables in a later PRD with the CC-aligned "keep partial
+  text" semantic.
+- **``OpenAIChatLLM.stop()`` cancels the awaiting create task**
+  instead of closing the SDK's ``AsyncStream``. Same broadcast
+  contract; different mechanism aligned with ``stream=False``.
+- **UI subscribes to ``ChatStore.changes()`` for the message
+  transcript**, not just for the queue/task panel. The v0.9.2
+  ``TerminalChat._mirror_new_agent_messages`` and the
+  ``AgentEvent`` dispatch path are removed; the renderer walks new
+  ``store.messages`` records as they arrive.
+- **View-side dim ``interrupted`` notice is removed.** Following
+  Claude Code, the rendered ``[interrupted by user]`` message in
+  the transcript IS the affordance.
+- **``Executor`` surface narrowed.** No more
+  ``agent.messages`` mutation, no rollback snapshot. New event
+  protocol: ``ToolEvent("tool_started"|"tool_finished", {...})``
+  emitted by ``Executor.dispatch_all(tool_calls)``.
+  ``Executor.cancel()`` tree-kills the Popen pool only.
+
+### Added
+- ``ContextManager`` (``src/neutrix/context_manager.py``) — state
+  machine + ``handle_event(event)`` async surface +
+  ``cancel() -> bool`` sync convenience for key bindings. Event
+  types: ``UserMessageEvent``, ``CancelEvent``, ``SlotSwitchEvent``,
+  ``ClearEvent``, ``ReplaceHistoryEvent``.
+- ``_ensure_tool_result_pairing(messages)`` in
+  ``src/neutrix/llm.py`` — pure transform on the outgoing message
+  list. Dedups ``role:tool`` messages by ``tool_call_id`` (first
+  wins) and synthesizes a ``role:tool`` placeholder for any orphan
+  ``tool_use`` in the latest assistant message. Synthetic content
+  is ``[cancelled by user]`` if ``[interrupted by user]`` appears
+  after the orphan, otherwise ``[tool result missing]``. Runs at
+  API-send time on a copy of the payload — does not mutate
+  ``messages`` (preserves the CM-as-sole-mutator rule).
+- ``/clear`` and ``/load`` now cancel an in-flight turn first
+  (waiting for the drive task to unwind), then reset / replace
+  history.
+
+### Removed
+- ``src/neutrix/agent.py`` + ``src/neutrix/agent_loop.py``
+  (``Agent`` class folded into ``ContextManager``).
+- ``src/neutrix/controller.py`` (``Controller.send`` / ``cancel``
+  folded into ``ContextManager.handle_event`` / ``cancel``).
+- ``src/neutrix/tui.py`` and ``tests/test_tui.py`` — the legacy
+  Textual app, dormant for several releases and a standing v0.9.x
+  non-goal. Removed rather than rewired through the new
+  architecture; recoverable from git history if ever needed.
+- ``Agent.rollback_to`` (no callers after cancel-as-steer; can be
+  cleanly reintroduced on ``ContextManager.messages`` if ``/undo``
+  ever materializes).
+- The v0.9.2 dim view-side ``interrupted`` notice.
+
+### Deviations from the PRD worth knowing about
+- The PRD says CM owns the queued-input buffer; the implementation
+  keeps the queue in ``ChatStore.queued_user_messages`` (mutated by
+  the UI's ``_input_loop`` / ``_worker_loop``) so the existing
+  queue display above the input keeps working unchanged. CM still
+  drains naturally — each user message dequeued by the worker
+  becomes one ``UserMessageEvent`` to CM.
+
+### New split point surfaced mid-implementation
+- **Queued messages on Esc cancel.** A queued message (typed while
+  the assistant was busy) is sent as the next user turn AFTER the
+  ``[interrupted by user]`` marker. Follows Claude Code's "Path B"
+  (active-response cancel) for both cases. Optimizes for "I
+  cancelled to steer with what I already typed." CC's "Path A" —
+  popping queued commands back to the editable input on
+  idle-state Esc — is deferred (would require injecting text into
+  the ``prompt_toolkit`` ``DraftReader`` buffer the input loop
+  currently owns). Added as split point #12 in the splits HTML
+  during Phase 2 mid-implementation discovery.
+
+See [docs/PRDs/v0.9.3-cancel-steer.md](docs/PRDs/v0.9.3-cancel-steer.md)
+and [docs/splits/v0.9.3-cancel-steer.html](docs/splits/v0.9.3-cancel-steer.html).
+
 ## [v0.9.2] — 2026-05-26
 
 ### Added

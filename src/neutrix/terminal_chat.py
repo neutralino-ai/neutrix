@@ -1,8 +1,17 @@
-"""Append-only terminal chat renderer.
+"""Append-only terminal chat renderer wired to the ContextManager.
 
-The main chat uses ordinary terminal scrollback instead of a fullscreen app.
-The agent still owns conversation state; this module only renders events and
-handles slash commands.
+v0.9.3 removes the v0.9.2 controller + agent_loop pair. The UI now:
+
+- emits :class:`~neutrix.context_manager.UserMessageEvent` /
+  :class:`CancelEvent` / :class:`ClearEvent` / etc. to the
+  :class:`~neutrix.context_manager.ContextManager`;
+- renders by subscribing to :py:meth:`ChatStore.changes`, walking new
+  records as they arrive.
+
+The view never mutates :class:`ChatStore` or the CM's ``messages``
+list directly — that's the CM's job. Cancel is a sync method on the
+CM (the key binding can't await), kept honest by the
+:class:`CancelEvent` async surface for non-keyboard callers.
 """
 from __future__ import annotations
 
@@ -24,16 +33,17 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from neutrix import transcript
-from neutrix.agent_loop import (
-    Agent,
-    AgentEvent,
+from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
+from neutrix.context_manager import (
+    ClearEvent,
+    ContextManager,
+    ReplaceHistoryEvent,
+    SlotSwitchEvent,
+    UserMessageEvent,
     format_reminder_notice,
     is_task_reminder,
 )
-from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
-from neutrix.controller import Controller
-from neutrix.executor import Executor
-from neutrix.store import ChatStore, MessageRecord, Task, openai_to_record
+from neutrix.store import MessageRecord, Task
 from neutrix.tools import BUILTIN_TOOLS
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
@@ -89,19 +99,7 @@ def _task_sort_key(task: Task) -> tuple[int, int]:
 
 
 def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
-    """Render the always-on task panel as prompt_toolkit fragments.
-
-    Returns an empty list when ``tasks`` is empty so the input cursor
-    sits at its natural position. Otherwise sorts by
-    (in_progress → pending → completed, id ascending), caps the visible
-    rows at :data:`MAX_PANEL_ROWS`, and appends a dim
-    ``"  … +N in progress, N pending, N done\\n"`` overflow line if any
-    tasks were truncated.
-
-    Pure function — the panel content depends only on ``tasks``, which
-    lets tests assert ordering and overflow without spinning up the
-    full chat surface.
-    """
+    """Render the always-on task panel as prompt_toolkit fragments."""
     if not tasks:
         return []
     ordered = sorted(tasks, key=_task_sort_key)
@@ -132,9 +130,6 @@ def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
     return fragments
 
 
-# Width of the longest keyword, "tool_result". Keyword strings are
-# right-padded to this width so the body name aligns vertically between
-# the `-> tool_use` and `<- tool_result` lines (and across calls).
 TOOL_KEYWORD_WIDTH = len("tool_result")
 
 
@@ -159,7 +154,6 @@ class ToolRecord:
         return f"<- {'tool_result'.ljust(TOOL_KEYWORD_WIDTH)}{self._summary_body()}"
 
     def summary_parts(self) -> tuple[str, str, str]:
-        """Return (prefix, padded_keyword, suffix) for colored rendering."""
         return ("<- ", "tool_result".ljust(TOOL_KEYWORD_WIDTH), self._summary_body())
 
 
@@ -167,21 +161,7 @@ InputFunc = Callable[[str], str]
 
 
 class DraftReader:
-    """Bottom draft editor, using prompt_toolkit when it is installed.
-
-    ``message_supplier`` populates the area shown directly above the
-    input cursor (used for the queued-user-messages display). It is a
-    callable re-evaluated on each render, so
-    :py:meth:`prompt_toolkit.application.invalidate` refreshes it
-    without a periodic timer.
-
-    There is intentionally no bottom toolbar: in prompt_toolkit's
-    append-only-with-bottom-input mode, every stdout write (every
-    streamed token, every tool result) triggers a hide-restore cycle
-    of the prompt + toolbar area, which made the toolbar visibly
-    blink during the assistant's response. Status info is available
-    on demand via the ``/status`` command.
-    """
+    """Bottom draft editor — same shape as v0.9.2."""
 
     def __init__(
         self,
@@ -217,19 +197,6 @@ class DraftReader:
         except ImportError:
             return None
 
-        # No bottom_toolbar and no refresh_interval. The queued
-        # messages render above the input via ``message_supplier``;
-        # there is no other persistent UI region that would need
-        # periodic refresh, and removing the toolbar eliminates the
-        # blink that was visible whenever the assistant streamed
-        # output (every stdout write hides-then-restores the prompt
-        # area, which made the toolbar disappear for one frame).
-        # ``handle_sigint=False`` is passed to each ``prompt``/
-        # ``prompt_async`` call (it's a method arg, not a constructor
-        # arg) so SIGINT reaches our explicit c-c binding instead of
-        # being translated to KeyboardInterrupt before the binding
-        # fires (the binding implements the Codex-style double-press
-        # exit).
         placeholder = FormattedText(
             [("fg:ansibrightblack", "Message the assistant  (/help for commands)")]
         )
@@ -250,34 +217,13 @@ class DraftReader:
 
 @dataclass
 class QuitArmingState:
-    """Pure-timer arming tracker for the Ctrl+C / Ctrl+D double-press.
-
-    Each chord (``"c-c"``, ``"c-d"``) carries its own independent
-    ``armed_at`` timestamp in :data:`armed_at`. Cross-key presses
-    never touch the other chord's clock; the displayed hint refreshes
-    to name the most recently pressed chord, but each timer keeps
-    running on its own schedule. Only the same chord can confirm —
-    a second press of THIS chord, within THIS chord's own window.
-
-    Earlier designs (shared-state confirm-either-key,
-    re-arm-with-reset-timer) were rejected at successive Phase-3
-    review gates — see ``docs/PRDs/v0.9.1-keyboard.md``.
-    """
+    """Pure-timer arming tracker for the Ctrl+C / Ctrl+D double-press."""
 
     QUIT_WINDOW_S: ClassVar[float] = 1.0
     armed_at: dict[str, float] = field(default_factory=dict)
     last_armed_key: str | None = None
 
     def within_window(self, key: str | None = None) -> bool:
-        """Two-mode predicate.
-
-        ``key is None`` (renderer): True iff the most-recently-armed
-        chord is still within its own window — drives hint visibility.
-
-        ``key`` set (binding): True iff that chord's own timer is
-        still within :data:`QUIT_WINDOW_S`. Cross-key arms do not
-        affect this — each chord's timer is independent.
-        """
         if key is None:
             return self.hint_text() is not None
         armed_at = self.armed_at.get(key, -math.inf)
@@ -288,14 +234,6 @@ class QuitArmingState:
         self.last_armed_key = key
 
     def hint_text(self) -> str | None:
-        """Renderer-facing hint string. Names the *most recently
-        pressed* chord, as long as its own window is still open.
-
-        The "fallback to the OTHER chord if its window is still
-        open" branch is unreachable: if the most-recent chord has
-        expired, the earlier chord — armed strictly further in
-        the past — must also have expired.
-        """
         if self.last_armed_key is None:
             return None
         if not self.within_window(self.last_armed_key):
@@ -308,13 +246,7 @@ class QuitArmingState:
 
 
 def apply_enter_or_continuation(buffer) -> bool:
-    """Bash- / Claude-style trailing-backslash line continuation.
-
-    If the buffer ends with ``\\`` and the cursor is at end-of-buffer,
-    strip the backslash and insert a newline, returning ``True`` to
-    signal "treat this Enter as a newline, not a submit." Otherwise
-    returns ``False`` so the caller submits as normal.
-    """
+    """Bash- / Claude-style trailing-backslash line continuation."""
     if buffer.cursor_position != len(buffer.text):
         return False
     if not buffer.text.endswith("\\"):
@@ -331,17 +263,9 @@ def build_draft_key_bindings(
 ):
     """Build explicit editor bindings for terminal draft input.
 
-    ``quit_state`` carries the Ctrl+C arming timer; pass a fresh
-    :class:`QuitArmingState` per :class:`DraftReader` so two sessions
-    don't share state. ``None`` is accepted for unit tests that
-    don't care about the quit dance.
-
     ``cancel_hook`` is invoked on Esc and on the first Ctrl+C while
-    something is in flight. It returns ``True`` iff the cancel
-    actually fired (something was running). When ``None`` the hook
-    is treated as a permanent no-op — tests that don't drive a real
-    chat call ``build_draft_key_bindings()`` and rely on the keys
-    still working without exceptions.
+    something is in flight. It returns ``True`` iff the cancel actually
+    fired. The hook is :py:meth:`ContextManager.cancel` (sync).
     """
     try:
         from prompt_toolkit.application.current import get_app
@@ -369,26 +293,12 @@ def build_draft_key_bindings(
         chord: str,
         exit_exception: type[BaseException],
     ) -> None:
-        """Shared body for the c-c and c-d quit-confirm bindings.
-
-        Independent per-chord arming: ``within_window(chord)`` is
-        True only if THIS chord's own timer is still within
-        :data:`QuitArmingState.QUIT_WINDOW_S`. A cross-key press
-        falls through to arm only its own chord, leaving the other
-        chord's clock untouched. So ``Ctrl+C → Ctrl+D → Ctrl+C``
-        within the original 1 s of the first press exits via
-        Ctrl+C: the intervening Ctrl+D never touched c-c's timer.
-        """
         if quit_state.within_window(chord):
             event.app.exit(exception=exit_exception)
             return
         quit_state.arm(chord)
-        event.app.invalidate()  # paint the hint now
+        event.app.invalidate()
 
-        # Schedule a redraw QUIT_WINDOW_S later so the hint clears on
-        # its own without needing the user to press another key. The
-        # background task lives on the app's task group and is
-        # cancelled automatically when prompt_async returns.
         async def _fade_hint() -> None:
             await asyncio.sleep(QuitArmingState.QUIT_WINDOW_S)
             event.app.invalidate()
@@ -397,32 +307,14 @@ def build_draft_key_bindings(
 
     @bindings.add("c-c")
     def _(event) -> None:
-        # First Ctrl+C while a turn is in flight cancels and returns;
-        # only when nothing is in flight do we fall through to the
-        # v0.9.1 arm-or-exit dance. Cancel does NOT arm the quit
-        # shortcut — pressing Ctrl+C twice in quick succession during
-        # a busy turn cancels, then arms (it doesn't exit).
         if _try_cancel():
             return
         _arm_or_exit(event, "c-c", KeyboardInterrupt)
 
     @bindings.add("escape", eager=True)
     def _(event) -> None:
-        # eager=True swallows the meta-prefix before prompt_toolkit can
-        # compose ``Alt+B`` / ``Alt+F`` / ``Alt+D`` / ``Alt+Enter`` — a
-        # deliberate trade-off documented in the v0.9.2 PRD. Replacement
-        # for the load-bearing one (newline): Ctrl+J, registered below.
-        # The hook no-ops when nothing's in flight so the lone Esc
-        # while idle is a clean noop with no buffer mutation.
         _try_cancel()
 
-    # Ctrl+D enters the quit dance ONLY when the buffer is empty;
-    # otherwise it falls through to prompt_toolkit's default Emacs
-    # binding (forward-delete-character). The Condition filter is what
-    # makes that fall-through work — without it the binding would
-    # always fire and the user could not forward-delete inside a
-    # draft. Shares the QuitArmingState instance with c-c, but
-    # per-chord arming means only the same key can confirm.
     @Condition
     def _buffer_is_empty() -> bool:
         return not get_app().current_buffer.text
@@ -442,16 +334,6 @@ def build_draft_key_bindings(
             return
         event.app.exit(result=buf.text)
 
-    # Newline keys. Codex's textarea.rs:347-355 inserts \n for Ctrl+J,
-    # Ctrl+M, and Enter with any modifier. We can only bind what
-    # prompt_toolkit's key parser recognizes — ``s-enter`` and
-    # ``c-enter`` are not in its Keys enum (terminals usually send
-    # the same byte for Enter regardless of Shift/Ctrl unless CSI-u
-    # keyboard protocol is on, which prompt_toolkit doesn't yet
-    # ship). v0.9.2 grabs Esc as the cancellation key with
-    # eager=True, which forces the meta-prefix to dispatch before
-    # ``escape, enter`` can compose — so the v0.9.1 Alt+Enter binding
-    # is gone. Users insert newlines via Ctrl+J.
     @bindings.add("c-j")
     def _(event) -> None:
         event.current_buffer.newline()
@@ -468,12 +350,10 @@ def build_draft_key_bindings(
 
 
 def move_buffer_to_line_start(buffer) -> None:
-    """Move a prompt_toolkit buffer cursor to the current logical line start."""
     buffer.cursor_position += buffer.document.get_start_of_line_position()
 
 
 def delete_buffer_to_line_end(buffer) -> None:
-    """Delete from cursor to the current logical line end."""
     delete_count = buffer.document.get_end_of_line_position()
     if delete_count:
         buffer.delete(count=delete_count)
@@ -612,19 +492,26 @@ class TerminalView:
 
 
 class TerminalChat:
-    """Normal terminal chat loop with append-only output."""
+    """Normal terminal chat loop with append-only output.
+
+    v0.9.3 wires this view to :class:`ContextManager`. The view emits
+    events; the CM mutates state. The view never touches
+    :class:`ChatStore` directly — it reads via
+    :py:meth:`ChatStore.changes` and renders.
+    """
 
     def __init__(
         self,
-        agent: Agent,
+        ctx: ContextManager,
         *,
         config: Config,
         render_markdown: bool = True,
         input_func: InputFunc | None = None,
         console: Console | None = None,
     ) -> None:
-        self.agent = agent
+        self.ctx = ctx
         self.config = config
+        self.store = ctx.store
         self.view = TerminalView(
             message_supplier=self._above_input,
             render_markdown=render_markdown,
@@ -636,51 +523,24 @@ class TerminalChat:
         self._busy = False
         self._input_queue: asyncio.Queue[str] | None = None
         self._tool_records: list[ToolRecord] = []
-        self._streaming_assistant = False
-        self.store = ChatStore()
-        self.agent.store = self.store
-        self.executor = Executor(agent=self.agent)
-        self.controller = Controller(
-            agent=self.agent,
-            executor=self.executor,
-            llm=self.agent.llm,
-            store=self.store,
-            event_sink=self._handle_event_async,
-        )
-        # The view tracks its OWN outer asyncio task that drives
-        # controller.send. The controller has its own inner task; the
-        # outer one is what the key binding's busy-check looks at and
-        # what catches the CancelledError that propagates back through
-        # the controller's cancel broadcast. See the PRD design note
-        # on "the small redundancy" for why both exist.
-        self._current_stream_task: asyncio.Task | None = None
-        # Per-turn state reset at the top of every _send_message so a
-        # cancelled or completed turn does not leak into the next one.
-        self._turn_assistant_started: bool = False
-        self._turn_tool_arg_cache: dict[str, list[str]] = {}
-        self._seed_store_from_agent()
-
-    def _seed_store_from_agent(self) -> None:
-        """Mirror the agent's current message list into the store.
-
-        Called at construction and after /load and /clear. The agent still
-        owns the OpenAI-format list it feeds back to the LLM; the store
-        is the typed view future renderers will read.
-        """
-        for raw in self.agent.messages:
-            if isinstance(raw, dict):
-                self.store.append_message(openai_to_record(raw))
+        # Per-render lookup so a ``role:tool`` record can find the
+        # arguments string that the matching assistant ``tool_call``
+        # carried. Populated by the renderer as it walks assistant
+        # records with ``tool_calls``.
+        self._tool_call_lookup: dict[str, tuple[str, str]] = {}
+        # Index of the last rendered message. The render watcher walks
+        # forward through ``store.messages`` from this point.
+        self._rendered_message_count: int = 0
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
         asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
-        """Run prompt input and agent work concurrently."""
-        await self._render_transcript()
+        await self._render_initial_transcript()
         self._input_queue = asyncio.Queue()
         worker = asyncio.create_task(self._worker_loop())
-        invalidator = asyncio.create_task(self._invalidation_watcher())
+        renderer = asyncio.create_task(self._render_watcher())
         try:
             with self.view.output_patch():
                 await self._input_loop()
@@ -688,12 +548,18 @@ class TerminalChat:
                 await self._input_queue.join()
         finally:
             worker.cancel()
-            invalidator.cancel()
-            for task in (worker, invalidator):
+            renderer.cancel()
+            for task in (worker, renderer):
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+            # Final flush — pick up any records the render_watcher
+            # hadn't gotten to before its task was cancelled. The
+            # renderer subscribes to ChatStore.changes() and processes
+            # batches asynchronously; on shutdown there may still be
+            # unrendered records the worker just appended.
+            await self._render_new_records()
 
     async def _input_loop(self) -> None:
         while self._running:
@@ -724,60 +590,36 @@ class TerminalChat:
             self._busy = True
             self._invalidate_app()
             try:
-                await self.view.print_user(text)
-                self.store.append_message(
-                    MessageRecord(role="user", content=text)
-                )
-                await self._send_message(text)
+                await self.ctx.handle_event(UserMessageEvent(text))
+            except Exception as exc:
+                logger.exception("terminal chat worker failed")
+                await self.view.print_notice(str(exc), style="bold red")
             finally:
                 self._busy = False
                 self._invalidate_app()
                 self._input_queue.task_done()
 
     def _tool_status(self) -> str:
-        if not self.agent.use_tools:
+        if not self.ctx.use_tools:
             return "off"
-        enabled = getattr(self.agent, "effective_tools_enabled", None)
-        if callable(enabled) and not enabled():
+        if not self.ctx.effective_tools_enabled():
             return "unsupported"
         return "on"
 
     def _status_line(self) -> str:
-        """Single-line status string used by the ``/status`` command."""
-        slot = self.agent.slot
+        slot = self.ctx.slot
         parts = [
             slot.name,
             f"{slot.provider}/{slot.model}",
             f"tools:{self._tool_status()}",
-            f"msgs:{len(self.agent.messages)}",
+            f"msgs:{len(self.ctx.messages)}",
         ]
         if self._busy:
             parts.append("working")
         return " | ".join(parts)
 
     def _above_input(self):
-        """Content rendered directly above the input cursor.
-
-        Stacks (top → bottom):
-
-        1. The always-visible task panel (when any tasks exist) — see
-           :func:`format_task_panel` for ordering and overflow rules.
-        2. Queued user messages — dim, prefixed with ``QUEUED_PREFIX``,
-           one per line, drawn on the lines just above the cursor.
-        3. The dim-gray quit-confirm hint, when the quit-shortcut
-           is armed (v0.9.1 — see :class:`QuitArmingState`). The
-           exact wording is chord-specific — ``press Ctrl+C again to
-           exit`` after Ctrl+C, ``press Ctrl+D again to exit`` after
-           Ctrl+D — so the user always sees the exact key they need
-           to press to confirm. Shares the ``fg:ansibrightblack``
-           dim style with queued messages — the affordance reads as
-           part of the muted hierarchy, not a warning.
-
-        Returns an empty string when there's nothing to show so the
-        input cursor sits at its natural position. Returns
-        ``FormattedText`` when prompt_toolkit is installed; otherwise a
-        plain str fallback (used by tests that mock the input).
-        """
+        """Content rendered directly above the input cursor."""
         tasks = self.store.tasks
         queued = self.store.queued_user_messages
         quit_hint = self._quit_hint_text()
@@ -812,7 +654,6 @@ class TerminalChat:
         return reader.quit_state.hint_text() if reader is not None else None
 
     def _invalidate_app(self) -> None:
-        """Force the running prompt_toolkit app to redraw, if any."""
         try:
             from prompt_toolkit.application.current import get_app_or_none
         except ImportError:
@@ -821,52 +662,67 @@ class TerminalChat:
         if app is not None:
             app.invalidate()
 
-    async def _invalidation_watcher(self) -> None:
-        """Subscribe to store mutations and trigger one redraw per batch.
+    async def _render_watcher(self) -> None:
+        """Subscribe to store mutations; render new messages + redraw input.
 
-        Replaces the previous 0.5-s ``refresh_interval`` polling. The
-        screen now only refreshes when something actually changed
-        (queue, pending tool calls, new messages, streamed text), so
-        there is no rhythmic flash between updates.
+        Walks new ``store.messages`` records as they arrive and prints
+        each in the appropriate style. Also invalidates the prompt_toolkit
+        app so the queue/task panel above the cursor refreshes.
         """
         async for _ in self.store.changes():
+            await self._render_new_records()
             self._invalidate_app()
 
-    async def _render_transcript(self) -> None:
-        tool_call_lookup: dict[str, tuple[str, str]] = {}
-        for message in self.agent.messages:
-            role = str(message.get("role") or "")
-            content = message.get("content")
-            if role == "user" and is_task_reminder(content):
-                # v0.8.0 reminder body — render the folded notice instead
-                # of leaking the templated text as a plain user block.
-                await self.view.print_notice(
-                    format_reminder_notice(self.store.tasks), style="dim"
-                )
-                continue
-            if role == "system" and content:
-                await self.view.print_system(str(content))
-            elif role == "user" and content:
-                await self.view.print_user(str(content))
-            elif role == "assistant":
-                if content:
-                    await self.view.print_assistant(str(content))
-                for call_id, name, arguments in self._tool_calls_from_message(message):
-                    if call_id:
-                        tool_call_lookup[call_id] = (name, arguments)
-                    await self.view.print_tool_use(name, arguments)
-            elif role == "tool" and content is not None:
-                call_id = str(message.get("tool_call_id") or "")
-                name, arguments = tool_call_lookup.get(call_id, ("tool", "{}"))
-                await self._store_and_print_tool_result(name, arguments, str(content))
+    async def _render_initial_transcript(self) -> None:
+        """Render every record currently in the store, once at startup."""
+        self._tool_call_lookup.clear()
+        self._rendered_message_count = 0
+        await self._render_new_records()
 
-    def _tool_calls_from_message(
-        self, message: dict[str, object]
+    async def _render_new_records(self) -> None:
+        records = self.store.messages
+        while self._rendered_message_count < len(records):
+            record = records[self._rendered_message_count]
+            await self._render_record(record)
+            self._rendered_message_count += 1
+
+    async def _render_record(self, record: MessageRecord) -> None:
+        role = record.role
+        content = record.content
+        if role == "user" and isinstance(content, str) and is_task_reminder(content):
+            await self.view.print_notice(
+                format_reminder_notice(self.store.tasks), style="dim"
+            )
+            return
+        if role == "system":
+            if content:
+                await self.view.print_system(str(content))
+            return
+        if role == "user":
+            if content:
+                await self.view.print_user(str(content))
+            return
+        if role == "assistant":
+            if content:
+                await self.view.print_assistant(str(content))
+            for call_id, name, arguments in self._tool_calls_from_record(record):
+                if call_id:
+                    self._tool_call_lookup[call_id] = (name, arguments)
+                await self.view.print_tool_use(name, arguments)
+            return
+        if role == "tool":
+            call_id = record.tool_call_id or ""
+            name, arguments = self._tool_call_lookup.get(call_id, (record.tool_name or "tool", "{}"))
+            await self._store_and_print_tool_result(name, arguments, str(content or ""))
+            return
+
+    def _tool_calls_from_record(
+        self, record: MessageRecord
     ) -> list[tuple[str, str, str]]:
-        tool_calls = message.get("tool_calls")
+        extra = record.extra or {}
+        tool_calls = extra.get("tool_calls")
         if not isinstance(tool_calls, list):
             return []
-
         calls: list[tuple[str, str, str]] = []
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
@@ -880,156 +736,16 @@ class TerminalChat:
             calls.append((call_id, name, arguments))
         return calls
 
-    async def _send_message(self, text: str) -> None:
-        """Drive one turn through the controller and clean up after.
-
-        The view owns the OUTER asyncio task; the controller's
-        cancel() broadcasts to {llm, executor, controller-inner-task}
-        and the cancellation propagates back here as
-        :class:`asyncio.CancelledError`. The matching arm of the try
-        runs the v0.9.2 idle-state contract (flush ``llm_active``,
-        clear pendings, print "interrupted", drop the partial token
-        line).
-        """
-        self.store.clear_pending_tool_calls()
-        self._streaming_assistant = False
-        # tool_arg_cache lives for the duration of one _send_message
-        # call. store.apply() removes pending entries on tool_result
-        # before the renderer sees the event, so the renderer can no
-        # longer reach back into store.pending_tool_calls for the
-        # original arguments string — we record them here on tool_call
-        # and FIFO-pop on tool_result. Discarded at end of the call.
-        self._turn_assistant_started = False
-        self._turn_tool_arg_cache = {}
-        pre_message_count = len(self.agent.messages)
-        try:
-            self._current_stream_task = asyncio.create_task(
-                self.controller.send(text)
-            )
-            try:
-                await self._current_stream_task
-            except asyncio.CancelledError:
-                await self._on_stream_cancelled()
-                return
-            if self._streaming_assistant:
-                await self.view.write_raw("\n")
-                self._streaming_assistant = False
-            # The agent appended its assistant turn to its own list; mirror
-            # the latest message into the store as well so future renderers
-            # can read a complete typed transcript. Fold any v0.8.0 task
-            # reminder that landed during this turn into a dim notice so
-            # the user sees that the harness nudged the LLM.
-            await self._render_new_reminders(pre_message_count)
-            self._mirror_new_agent_messages()
-        except Exception as exc:
-            logger.exception("terminal chat worker failed")
-            await self.view.print_notice(str(exc), style="bold red")
-        finally:
-            self._current_stream_task = None
-
     def try_cancel_current_stream(self) -> bool:
         """Key-binding entry point. Returns True iff cancel fired.
 
-        Delegates to ``controller.cancel`` so the broadcast goes
-        through the canonical surface. The bool return drives the
-        Ctrl+C precedence — when something was cancelled, the v0.9.1
-        arm-or-exit logic is bypassed.
+        Delegates to :py:meth:`ContextManager.cancel`. The CM handles
+        idempotency (a second cancel while already cancelling returns
+        False). The renderer paints the ``[interrupted by user]`` user
+        message as soon as the CM appends it to the store, so the
+        affordance is visible without a separate dim notice.
         """
-        return self.controller.cancel()
-
-    async def _on_stream_cancelled(self) -> None:
-        """Restore the idle-state contract after a cancelled turn.
-
-        Order matters: clearing pending tool calls FIRST keeps the
-        store visible-state consistent before we paint anything;
-        flipping ``llm_active`` through the reducer (instead of
-        touching the flag directly) keeps the single-source-of-truth
-        invariant intact; the token-line newline closes any partial
-        stream cleanly before the dim ``interrupted`` notice prints.
-        The queued user messages are deliberately NOT touched — the
-        worker loop's next ``await queue.get()`` picks them up.
-        """
-        self.store.clear_pending_tool_calls()
-        if self.store.llm_active:
-            self.store.apply(AgentEvent("llm_request_end"))
-        if self._streaming_assistant:
-            await self.view.write_raw("\n")
-            self._streaming_assistant = False
-        await self.view.print_notice("interrupted", style="dim yellow")
-
-    async def _handle_event_async(self, event: AgentEvent) -> None:
-        """Event sink injected into the Controller.
-
-        Wraps :py:meth:`_handle_event` with the per-turn state held on
-        ``self`` so the closure-free controller path stays clean —
-        the controller never sees ``assistant_started`` or the
-        per-turn arg cache.
-        """
-        self._turn_assistant_started = await self._handle_event(
-            event,
-            self._turn_assistant_started,
-            self._turn_tool_arg_cache,
-        )
-
-    async def _render_new_reminders(self, pre_count: int) -> None:
-        for raw in self.agent.messages[pre_count:]:
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("role") != "user":
-                continue
-            if is_task_reminder(raw.get("content")):
-                await self.view.print_notice(
-                    format_reminder_notice(self.store.tasks), style="dim"
-                )
-
-    def _mirror_new_agent_messages(self) -> None:
-        """Append any agent messages not yet in the store."""
-        stored = len(self.store.messages)
-        for raw in self.agent.messages[stored:]:
-            if isinstance(raw, dict):
-                self.store.append_message(openai_to_record(raw))
-
-    async def _handle_event(
-        self,
-        event: AgentEvent,
-        assistant_started: bool,
-        tool_arg_cache: dict[str, list[str]],
-    ) -> bool:
-        if event.kind == "token":
-            if not assistant_started:
-                assistant_started = True
-                self._streaming_assistant = True
-            await self.view.write_raw(str(event.data))
-            return assistant_started
-
-        if self._streaming_assistant:
-            await self.view.write_raw("\n")
-            self._streaming_assistant = False
-
-        if event.kind == "assistant":
-            await self.view.print_assistant(str(event.data))
-            return True
-
-        if event.kind == "tool_call":
-            name = str(event.data["name"])
-            arguments = str(event.data["arguments"])
-            tool_arg_cache.setdefault(name, []).append(arguments)
-            await self.view.print_tool_use(name, arguments)
-            return assistant_started
-
-        if event.kind == "tool_result":
-            name = str(event.data["name"])
-            queued = tool_arg_cache.get(name) or []
-            arguments = queued.pop(0) if queued else "{}"
-            result = str(event.data["result"])
-            await self._store_and_print_tool_result(name, arguments, result)
-            return assistant_started
-
-        if event.kind == "error":
-            await self.view.print_notice(str(event.data), style="bold red")
-            return assistant_started
-
-        return assistant_started
+        return self.ctx.cancel()
 
     async def _store_and_print_tool_result(
         self, name: str, arguments: str, result: str
@@ -1053,7 +769,7 @@ class TerminalChat:
                 f"unknown command: /{cmd}. Try /help.", style="bold red"
             )
             return
-        if self._busy and cmd in {"fast", "strong", "save", "load", "clear", "onboard"}:
+        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard"}:
             await self.view.print_notice(
                 f"/{cmd} waits for the assistant to finish", style="yellow"
             )
@@ -1090,25 +806,9 @@ class TerminalChat:
         )
 
     async def _cmd_status(self, args: list[str]) -> None:
-        """Print the current slot, model, tool state, and message count.
-
-        Replaces the persistent bottom toolbar: the toolbar was visibly
-        blinking during streaming output because every stdout write
-        triggers a hide-restore cycle of the prompt area. Status info
-        is now available on demand here.
-        """
         await self.view.print_plain(self._status_line())
 
     async def _cmd_tasks(self, args: list[str]) -> None:
-        """Print the current task list (read directly from the store).
-
-        The LLM writes tasks via the TaskCreate / TaskUpdate tools; this
-        command is a read-only on-demand view of the same state.
-
-        The lines render through ``print_text`` (not ``print_plain``) so
-        the bracketed status tags ``[pending]`` etc. are not parsed as
-        Rich BBCode markup and disappear.
-        """
         tasks = self.store.tasks
         if not tasks:
             await self.view.print_notice("no tasks", style="dim")
@@ -1124,14 +824,14 @@ class TerminalChat:
 
     async def _switch_slot(self, name: str) -> None:
         slot = self.config.slot(name)
-        self.agent.switch(slot)
+        await self.ctx.handle_event(SlotSwitchEvent(slot=slot))
         await self.view.print_notice(
             f"switched to {name}: {slot.provider}/{slot.model}",
             style="green",
         )
 
     async def _cmd_model(self, args: list[str]) -> None:
-        slot = self.agent.slot
+        slot = self.ctx.slot
         await self.view.print_plain(
             "\n".join(
                 [
@@ -1151,8 +851,8 @@ class TerminalChat:
         out = transcript.save(
             path,
             self.store,
-            provider=self.agent.slot.provider,
-            model=self.agent.slot.model,
+            provider=self.ctx.slot.provider,
+            model=self.ctx.slot.model,
         )
         await self.view.print_notice(f"saved -> {out}", style="green")
 
@@ -1161,35 +861,38 @@ class TerminalChat:
             await self.view.print_notice("usage: /load PATH", style="bold red")
             return
         loaded, metadata = transcript.load(args[0])
-        self.agent.messages = list(metadata["raw_messages"])
-        self.store.reset()
-        self._seed_store_from_agent()
-        # Preserve tasks across /load — transcript.load() already populated
-        # the throwaway store; copy them onto the live store so the next
-        # /tasks (and the LLM via TaskList) sees them.
-        if loaded.tasks:
-            self.store.replace_tasks(loaded.tasks)
+        raw_messages = list(metadata["raw_messages"])
+        records = loaded.messages
+        await self.ctx.handle_event(
+            ReplaceHistoryEvent(
+                raw_messages=raw_messages,
+                records=records,
+                tasks=loaded.tasks,
+            )
+        )
         self._tool_records.clear()
+        self._tool_call_lookup.clear()
+        self._rendered_message_count = 0
         await self.view.print_notice(
-            f"loaded {args[0]} ({len(self.agent.messages)} msgs, "
-            f"{len(self.store.tasks)} tasks); current slot unchanged",
+            f"loaded {args[0]} ({len(raw_messages)} msgs, "
+            f"{len(loaded.tasks)} tasks); current slot unchanged",
             style="green",
         )
-        await self._render_transcript()
+        await self._render_new_records()
 
     async def _cmd_clear(self, args: list[str]) -> None:
-        self.agent.reset()
-        self.store.reset()
-        self._seed_store_from_agent()
+        await self.ctx.handle_event(ClearEvent())
         self._tool_records.clear()
+        self._tool_call_lookup.clear()
+        self._rendered_message_count = 0
         await self.view.print_notice("conversation cleared", style="green")
-        await self._render_transcript()
+        await self._render_new_records()
 
     async def _cmd_tools(self, args: list[str]) -> None:
         if args and args[0] in ("on", "off"):
-            self.agent.use_tools = args[0] == "on"
+            self.ctx.use_tools = args[0] == "on"
             await self.view.print_notice(
-                f"tool calling {'enabled' if self.agent.use_tools else 'disabled'}",
+                f"tool calling {'enabled' if self.ctx.use_tools else 'disabled'}",
                 style="green",
             )
             return

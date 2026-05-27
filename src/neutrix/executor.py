@@ -1,43 +1,59 @@
-"""Owns the in-flight turn: cancellable-process pool + rollback snapshot.
+"""Tool dispatch + cancellable Popen pool — no message ownership.
 
-The :class:`Executor` wraps an :class:`~neutrix.agent_loop.Agent` for one
-turn at a time. The agent is the stateless message router; the executor
-holds the per-turn state the controller needs to broadcast cancel against
-— specifically the pre-turn ``len(agent.messages)`` snapshot (used to
-roll history back so a cancelled turn doesn't leave the conversation in
-a 400-able shape) and the pool of ``subprocess.Popen`` handles tools
-have registered for tree-kill on cancel.
+v0.9.3 narrows the Executor's responsibilities to two things:
+
+1. **Subprocess pool.** Tools like :func:`neutrix.tools._run_shell`
+   register a :class:`subprocess.Popen` here before they block on
+   ``communicate()``. :py:meth:`Executor.cancel` tree-kills the whole
+   pool so the parked I/O calls return promptly.
+2. **Tool dispatch.** :py:meth:`Executor.dispatch_all` is an async
+   generator that yields :class:`ToolEvent` instances —
+   ``tool_started`` before each tool runs, ``tool_finished`` after.
+   The ContextManager iterates these and decides what to do.
+
+The v0.9.2 Executor owned the per-turn rollback snapshot and mutated
+``agent.messages``. v0.9.3 removes that: history is the
+ContextManager's job; the Executor only does tool I/O.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from loguru import logger
 
-from neutrix.agent_loop import Agent, AgentEvent
+from neutrix.store import ChatStore
+from neutrix.tools import dispatch
+
+
+@dataclass(frozen=True)
+class ToolEvent:
+    """Event yielded by :py:meth:`Executor.dispatch_all`.
+
+    Kinds:
+      ``tool_started``  — data={"tool_call_id", "tool_name", "args"}
+      ``tool_finished`` — data={"tool_call_id", "tool_name", "content", "ok"}
+    """
+
+    kind: str
+    data: dict[str, Any]
 
 
 @dataclass
 class Executor:
-    """Per-turn state holder + cancel entry-point.
+    """Cancellable Popen pool + tool dispatch loop.
 
-    Tools register a cancellable :class:`subprocess.Popen` with
-    :py:meth:`register_cancellable` before they block on
-    ``communicate()``; they unregister in a ``finally`` clause. On
-    cancel, the executor tree-kills every still-registered process,
-    rolls ``agent.messages`` back to the pre-turn length, and sets
-    :py:attr:`_cancel_requested` so the tool wrapper can render the
-    canonical ``[cancelled by user]`` placeholder when its Popen exits
-    negative.
+    ``store`` is forwarded to dispatch so Task* tools can mutate the
+    canonical store. Set by :class:`ContextManager` at wiring time.
     """
 
-    agent: Agent
+    store: ChatStore | None = None
     _pool: list[subprocess.Popen] = field(default_factory=list, repr=False)
-    _turn_snapshot_len: int | None = field(default=None, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
 
     def register_cancellable(self, proc: subprocess.Popen) -> None:
@@ -50,56 +66,66 @@ class Executor:
             pass
 
     def cancel(self) -> None:
-        """Tree-kill the pool, roll history back, flag cancel.
+        """Tree-kill every still-registered Popen; flag cancel.
 
-        Idempotent — a no-op when no turn is in flight (the snapshot
-        slot is the in-flight indicator). Synchronous so the controller
-        can call this from any task, including the one currently
-        awaiting on a tool registered with the pool.
+        Idempotent — safe to call when no turn is in flight. The
+        ``_cancel_requested`` flag lets :func:`neutrix.tools._run_shell`
+        return the canonical ``"[cancelled by user]"`` placeholder when
+        its Popen exits negative under our kill, instead of leaking a
+        terminated-by-signal exit-code line. The ContextManager
+        unrelatedly cancels the drive task so the
+        ``asyncio.to_thread`` parked on a pure-compute tool is
+        abandoned (pure-compute tool cancellation stays a non-goal —
+        the daemon thread runs to completion and its result is dropped).
         """
-        if self._turn_snapshot_len is None:
-            return
         self._cancel_requested = True
         for proc in list(self._pool):
             _tree_kill(proc)
         self._pool.clear()
-        self.agent.rollback_to(self._turn_snapshot_len)
 
-    async def stream_turn(
+    async def dispatch_all(
         self,
-        user_text: str,
-    ) -> AsyncIterator[AgentEvent]:
-        """Forward ``agent.stream_reply`` with pre/post-turn bookkeeping.
+        tool_calls: list[dict[str, str]],
+    ) -> AsyncIterator[ToolEvent]:
+        """Dispatch each tool sequentially; yield events as they happen.
 
-        Sets the rollback snapshot at the top of the turn and clears
-        it (plus the pool, defensively) on unwind. The cancel flag is
-        reset for each fresh turn so a previously cancelled turn does
-        not poison the next one. When the cancel flag is set during
-        the turn (via :py:meth:`cancel`), the rollback is RE-applied
-        on unwind so any post-cancel message synthesis (the agent's
-        run-to-completion epilogue, executed if the LLM iterator
-        merely runs out instead of raising :class:`CancelledError`)
-        is undone — that's what makes the idle-state contract
-        ``agent.messages == pre`` hold whether or not the outer task
-        is also cancelled.
+        Each tool call yields one ``tool_started`` then one
+        ``tool_finished``. Dispatch runs via :func:`asyncio.to_thread`
+        so the event loop stays responsive for the cancel broadcast.
+        Sequential rather than concurrent — v0.9.3 keeps the v0.9.2
+        ordering since the LLMs we drive rarely emit multiple
+        tool_calls in one round and concurrent dispatch is an unused
+        optimization.
+
+        Each ``tool_call`` is a dict ``{"id", "name", "arguments"}``.
+        The ``arguments`` field is the JSON string the LLM produced.
         """
-        snapshot_len = len(self.agent.messages)
-        self._turn_snapshot_len = snapshot_len
         self._cancel_requested = False
-        try:
-            async for event in self.agent.stream_reply(
-                user_text, executor=self
-            ):
-                yield event
-        finally:
-            # PEP 525 safe — no yield in finally. Pure assignment +
-            # in-place clears.
-            was_cancelled = self._cancel_requested
-            self._turn_snapshot_len = None
-            self._cancel_requested = False
-            self._pool.clear()
-            if was_cancelled:
-                self.agent.rollback_to(snapshot_len)
+        for tc in tool_calls:
+            tcid = str(tc.get("id") or "")
+            name = str(tc.get("name") or "")
+            args = str(tc.get("arguments") or "")
+            yield ToolEvent(
+                "tool_started",
+                {"tool_call_id": tcid, "tool_name": name, "args": args},
+            )
+            try:
+                result = await asyncio.to_thread(
+                    dispatch, name, args, store=self.store, executor=self
+                )
+            except Exception as exc:  # pragma: no cover - dispatch itself catches
+                logger.exception("dispatch raised for {}", name)
+                result = f"ERROR: tool crashed: {exc}"
+            ok = not (isinstance(result, str) and result.startswith("ERROR:"))
+            yield ToolEvent(
+                "tool_finished",
+                {
+                    "tool_call_id": tcid,
+                    "tool_name": name,
+                    "content": result,
+                    "ok": ok,
+                },
+            )
 
 
 def _tree_kill(proc: subprocess.Popen, grace_seconds: float = 0.2) -> None:

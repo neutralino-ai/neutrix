@@ -1,4 +1,4 @@
-"""`neutrix` CLI entry point: load config, build Agent, launch terminal chat."""
+"""`neutrix` CLI entry point: load config, build ContextManager, launch chat."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,6 @@ from pathlib import Path
 from loguru import logger
 
 from neutrix import __version__, transcript
-from neutrix.agent import Agent
 from neutrix.config import (
     CONFIG_PATH,
     ConfigError,
@@ -16,7 +15,10 @@ from neutrix.config import (
     load_config,
     resolve_initial_slot,
 )
+from neutrix.context_manager import DEFAULT_SYSTEM_PROMPT, ContextManager
+from neutrix.executor import Executor
 from neutrix.llm import OpenAIChatLLM
+from neutrix.store import ChatStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,29 +92,42 @@ def main(argv: list[str] | None = None) -> int:
     assert slot is not None  # for type-checker; guarded above
 
     llm = OpenAIChatLLM(slot)
-    agent = Agent(slot=slot, llm=llm, use_tools=not args.no_tools)
-    _configure_chat_logging()
+    store = ChatStore()
+    executor = Executor(store=store)
 
+    seed_messages: list[dict] = [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
     loaded_tasks: list = []
     if args.load:
         try:
             loaded_store, metadata = transcript.load(args.load)
-            agent.messages = list(metadata["raw_messages"])
+            seed_messages = list(metadata["raw_messages"]) or seed_messages
             loaded_tasks = list(loaded_store.tasks)
             logger.info(
                 "loaded transcript: {} msgs, {} tasks",
-                len(agent.messages),
+                len(seed_messages),
                 len(loaded_tasks),
             )
         except Exception as e:
             print(f"neutrix: error loading transcript: {e}", file=sys.stderr)
             return 1
 
+    ctx = ContextManager(
+        slot=slot,
+        llm=llm,
+        executor=executor,
+        store=store,
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        use_tools=not args.no_tools,
+        messages=seed_messages,
+    )
+    if loaded_tasks:
+        ctx.store.replace_tasks(loaded_tasks)
+
+    _configure_chat_logging()
+
     from neutrix.terminal_chat import TerminalChat
 
-    chat = TerminalChat(agent, config=config, render_markdown=not args.no_markdown)
-    if loaded_tasks:
-        chat.store.replace_tasks(loaded_tasks)
+    chat = TerminalChat(ctx, config=config, render_markdown=not args.no_markdown)
     chat.run()
     return 0
 
