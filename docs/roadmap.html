@@ -99,6 +99,34 @@
     color: var(--planned);
     background: #ececec;
   }
+  .badge.p0 {
+    color: #a00020;
+    background: #fbe3e7;
+  }
+  .badge.p1 {
+    color: #b14a00;
+    background: #fbeada;
+  }
+  .badge.p2 {
+    color: #1f5e8a;
+    background: #e2eef7;
+  }
+  .badge.p3 {
+    color: var(--planned);
+    background: #ececec;
+  }
+  .entry .badges {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-end;
+  }
+  .priority-legend {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 0 0 24px;
+  }
+  .priority-legend .badge { margin-right: 6px; }
   details.shipped-history {
     margin: 4px 0 0;
     color: var(--muted);
@@ -160,10 +188,39 @@
   hooks are <em>post-v1.0</em> (v1.x).
 </p>
 
-<h2>Upcoming — cancel / state-machine arc (closing)</h2>
+<p class="priority-legend">
+  Render order is by <strong>priority tier</strong>, then by logical
+  sequence within each tier:
+  <span class="badge p0">P0</span> blocks daily use right now;
+  <span class="badge p1">P1</span> important for the v1.0 lock;
+  <span class="badge p2">P2</span> nice to have pre-v1.0;
+  <span class="badge p3">P3</span> deferred to post-v1.0 (v1.x).
+</p>
+
+<h2>P0 — daily-blocking / user-reported urgent</h2>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.5-emergency-compact.md">v0.9.5</a></span>
+  <span class="ver"><a href="PRDs/v0.9.5-llm-error-surface.md">v0.9.5</a></span>
+  <span class="theme">
+    LLM error surface (stalled / timeout / inline error)
+    <small>
+      User-reported during v0.9.4 dogfooding: when the LLM API hangs
+      silently, the heartbeat keeps breathing but neither neutrix
+      nor the LLM is making progress, and the user has no signal
+      until the SDK's ~10-minute default timeout fires. Two-layer
+      fix matching CC: ~5&nbsp;s of silence → heartbeat color shift
+      + <code>● LLM (stalled)</code> label (UI hint); ~60&nbsp;s →
+      hard abort + inline assistant error message.
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge p0">P0</span>
+    <span class="badge planned">skeleton</span>
+  </span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.6-emergency-compact.md">v0.9.6</a></span>
   <span class="theme">
     Emergency mechanical <code>/compact</code>
     <small>
@@ -171,14 +228,58 @@
       50 % of <code>ContextManager.messages</code> mechanically —
       no LLM summarization, no automatic trigger, no configurable
       ratio. Tool-round-boundary aware. The bridge that keeps users
-      working until smart compaction lands at v0.11.1.
+      working until smart compaction lands at v0.10.5.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
+  <span class="badges">
+    <span class="badge p0">P0</span>
+    <span class="badge planned">skeleton</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.6-streaming-steer.md">v0.9.6</a></span>
+  <span class="ver"><a href="PRDs/v0.9.7-rewind.md">v0.9.7</a></span>
+  <span class="theme">
+    Rewind / branch from prior turn
+    <small>
+      User-reported urgent. <code>Up-arrow</code> on empty buffer
+      recalls prior user turns for editing; submit a recalled turn
+      rolls <code>ContextManager.messages</code> back to that
+      point. <code>/rewind N</code> drops the last N turns without
+      recalling text. Tool-round-boundary aware. Rewound turns
+      render with a dim <code>[rewound]</code> marker.
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge p0">P0</span>
+    <span class="badge planned">skeleton</span>
+  </span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.0-subagent.md">v0.10.0</a></span>
+  <span class="theme">
+    Subagent framework (<code>Agent</code> tool)
+    <small>
+      User-reported urgent for v1.0 (context-explode structural fix).
+      CC analog: the <code>Agent</code> tool that spawns a fresh-context
+      worker, runs it to completion, returns the final assistant text.
+      Each subagent owns its own <code>ContextManager</code>; the
+      parent's context grows by one tool-result line, not by the
+      subagent's full transcript. Visible in the parent transcript
+      as a folded <code>[subagent]</code> block; cancellable via Esc.
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge p0">P0</span>
+    <span class="badge planned">skeleton</span>
+  </span>
+</div>
+
+<h2>P1 — important for the v1.0 lock</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.1-streaming-steer.md">v0.10.1</a></span>
   <span class="theme">
     Re-enable streaming with cancel-as-steer
     <small>
@@ -190,13 +291,14 @@
       <code>tool_use</code>. Closes the cancel arc.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">skeleton</span>
+  </span>
 </div>
 
-<h2>Upcoming — visibility &amp; renderer-purity arc</h2>
-
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.0-visibility-parity.md">v0.10.0</a></span>
+  <span class="ver"><a href="PRDs/v0.10.2-visibility-parity.md">v0.10.2</a></span>
   <span class="theme">
     Visibility parity — show what the LLM sees
     <small>
@@ -209,11 +311,14 @@
       channel sent to the LLM is omitted from the user view.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">skeleton</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.1-tuiview-purify.md">v0.10.1</a></span>
+  <span class="ver"><a href="PRDs/v0.10.3-tuiview-purify.md">v0.10.3</a></span>
   <span class="theme">
     TUIView as pure renderer + FakeView swap-test
     <small>
@@ -222,33 +327,18 @@
       (<code>_tool_records</code> folded-tray) move onto the store;
       a <code>FakeView</code> in <code>tests/</code> proves the
       renderer is swappable. Architectural hygiene that makes the
-      v0.11.0 Advisor's "store is the only mutator" assumption
+      v0.10.4 Advisor's "store is the only mutator" assumption
       defensible.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.2-rewind.md">v0.10.2</a></span>
-  <span class="theme">
-    Rewind / branch from prior turn
-    <small>
-      User-reported urgent. <code>Up-arrow</code> on empty buffer
-      recalls prior user turns for editing; submit a recalled turn
-      rolls <code>ContextManager.messages</code> back to that
-      point. <code>/rewind N</code> drops the last N turns without
-      recalling text. Tool-round-boundary aware. Rewound turns
-      render with a dim <code>[rewound]</code> marker.
-    </small>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">skeleton</span>
   </span>
-  <span class="badge planned">skeleton</span>
 </div>
 
-<h2>Upcoming — agentic-depth arc</h2>
-
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.11.0-smart-advisor.md">v0.11.0</a></span>
+  <span class="ver"><a href="PRDs/v0.10.4-smart-advisor.md">v0.10.4</a></span>
   <span class="theme">
     Smart Advisor — third actor with LLM-driven task judgment
     <small>
@@ -258,59 +348,49 @@
       additional event consumer / cancel target.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">skeleton</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.11.1-compaction.md">v0.11.1</a></span>
+  <span class="ver"><a href="PRDs/v0.10.5-compaction.md">v0.10.5</a></span>
   <span class="theme">
     Smart conversation compaction
     <small>
       CC analog: <code>manageConversation</code> / <code>/compact</code>
-      with LLM-summarized older turns. Builds on v0.9.5's mechanical
+      with LLM-summarized older turns. Builds on v0.9.6's mechanical
       <code>/compact</code> by adding an automatic threshold trigger
       and a summarizer call against the cut segment. Required before
       v1.0 — Advisor without compaction hits the cliff faster, not
       slower.
     </small>
   </span>
-  <span class="badge planned">skeleton</span>
-</div>
-
-<h2>Upcoming — subagent arc</h2>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.12.0-subagent.md">v0.12.0</a></span>
-  <span class="theme">
-    Subagent framework (<code>Agent</code> tool)
-    <small>
-      User-reported urgent for v1.0 (context-explode structural fix).
-      CC analog: the <code>Agent</code> tool that spawns a fresh-context
-      worker, runs it to completion, returns the final assistant text.
-      Each subagent owns its own <code>ContextManager</code>; the parent's
-      context grows by one tool-result line, not by the subagent's full
-      transcript. Visible in the parent transcript as a folded
-      <code>[subagent]</code> block; cancellable via Esc.
-    </small>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">skeleton</span>
   </span>
-  <span class="badge planned">skeleton</span>
 </div>
 
-<h2>Upcoming — v1.0 lock</h2>
+<h2>v1.0 lock</h2>
 
 <div class="entry">
   <span class="ver">v1.0.0</span>
   <span class="theme">
     Sealed v1.0 surface
     <small>
-      Tag the cumulative result of v0.8.3–v0.12.0 as the v1.0
+      Tag the cumulative result of v0.8.3–v0.10.5 as the v1.0
       product. Freeze SemVer (post-v1.0 breaking changes require
       a major bump). Polish items (markdown rendering, cost / token
       tracking on <code>/status</code>, skills, MCP, hooks, web
       frontend, parallel / recursive subagents) all land as v1.x.
     </small>
   </span>
-  <span class="badge planned">target</span>
+  <span class="badges">
+    <span class="badge p1">P1</span>
+    <span class="badge planned">target</span>
+  </span>
 </div>
 
 <h2>Shipped</h2>
