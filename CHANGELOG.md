@@ -4,6 +4,47 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.4] — 2026-05-27
+
+### Added
+- **Heartbeat liveness indicator.** A single ``●`` glyph + short
+  label renders at the top of the message-area while the
+  ``ContextManager`` is in ``AWAITING_LLM`` (``● LLM``),
+  ``AWAITING_EXECUTOR`` (``● tool: {name}`` — name from the head of
+  ``store.pending_tool_calls``), or ``CANCELLING``
+  (``● cancelling…``). The dot breathes (trough→peak→trough) on a
+  **40-frame truecolor gradient at ~100 ms/tick with ±10% jitter,
+  giving a 4.0-second cycle** (~15 BPM, middle of the human
+  resting-calm respiratory range, 12-20 BPM). The smooth gradient
+  interpolates through ~40 distinct hex gray shades between
+  ``rgb(60,60,60)`` and ``rgb(255,255,255)`` along a raised-cosine
+  curve; the label stays bright. Disappears (renders nothing) when
+  state returns to ``IDLE``. Pure renderer change: reads
+  ``ContextManager.state`` and ``store.pending_tool_calls``; no new
+  store fields. New module-level helpers ``format_heartbeat``,
+  ``heartbeat_loop``, and ``jittered_sleep`` in
+  ``neutrix.terminal_chat`` are unit-testable in isolation. Stack
+  order above the input is now: heartbeat → task panel → queued
+  user messages → quit hint → input cursor. See
+  [docs/PRDs/v0.9.4-heartbeat.md](docs/PRDs/v0.9.4-heartbeat.md)
+  and [docs/splits/v0.9.4-heartbeat.html](docs/splits/v0.9.4-heartbeat.html)
+  (14 split-point decisions — 11 original + 3 Phase-2 reopen on
+  cycle period, smoothing method, and tick jitter).
+
+### Changed
+- **``TaskCreate`` description rewritten to push full-upfront task
+  planning.** Bundled fix per the forward-only versioning rule:
+  during live use the LLM tended to call ``TaskCreate`` for one
+  task at a time instead of capturing the user's full multi-step
+  plan upfront. The tool description now opens with *"Use this
+  tool proactively to capture the user's full multi-step plan as
+  separate tasks, not piece by piece"* and emphasizes
+  *"immediately capture every distinct step the request implies as
+  its own task, BEFORE starting work on any of them"*. Description
+  only — signature, parameters, and lifecycle clauses unchanged.
+
+See [docs/PRDs/v0.9.4-heartbeat.md](docs/PRDs/v0.9.4-heartbeat.md).
+
 ## [v0.9.3] — 2026-05-27
 
 ### Changed

@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -39,16 +40,66 @@ from neutrix.context_manager import (
     ContextManager,
     ReplaceHistoryEvent,
     SlotSwitchEvent,
+    State,
     UserMessageEvent,
     format_reminder_notice,
     is_task_reminder,
 )
-from neutrix.store import MessageRecord, Task
+from neutrix.store import ChatStore, MessageRecord, Task
 from neutrix.tools import BUILTIN_TOOLS
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 
 MAX_PANEL_ROWS = 5
+
+HEARTBEAT_GLYPH = "●"
+HEARTBEAT_CYCLE_FRAMES = 40                  # 40 x 100 ms ~ 4 s breath
+HEARTBEAT_TICK_MS = 100                      # nominal; jittered ±10% per frame
+HEARTBEAT_JITTER_RATIO = 0.10
+HEARTBEAT_TROUGH_RGB: tuple[int, int, int] = (60, 60, 60)
+HEARTBEAT_PEAK_RGB: tuple[int, int, int] = (255, 255, 255)
+HEARTBEAT_LABEL_STYLE = "fg:ansiwhite bold"
+
+
+def _build_brightness_cycle() -> tuple[str, ...]:
+    """Precompute HEARTBEAT_CYCLE_FRAMES hex-color style strings along
+    a raised-cosine breathing curve from trough (frame 0) to peak
+    (frame N/2) to trough (frame N).
+    """
+    cycle: list[str] = []
+    trough = HEARTBEAT_TROUGH_RGB
+    peak = HEARTBEAT_PEAK_RGB
+    for frame in range(HEARTBEAT_CYCLE_FRAMES):
+        # Raised cosine in [0, 1]: 0 at frame 0 and N, 1 at frame N/2.
+        progress = (1 - math.cos(2 * math.pi * frame / HEARTBEAT_CYCLE_FRAMES)) / 2
+        r = round(trough[0] + (peak[0] - trough[0]) * progress)
+        g = round(trough[1] + (peak[1] - trough[1]) * progress)
+        b = round(trough[2] + (peak[2] - trough[2]) * progress)
+        cycle.append(f"fg:#{r:02x}{g:02x}{b:02x}")
+    return tuple(cycle)
+
+
+HEARTBEAT_BRIGHTNESS_CYCLE: tuple[str, ...] = _build_brightness_cycle()
+
+
+async def jittered_sleep(
+    nominal_seconds: float,
+    *,
+    jitter_ratio: float = HEARTBEAT_JITTER_RATIO,
+    rng: random.Random | None = None,
+) -> None:
+    """Sleep ``nominal_seconds`` with a uniform ±jitter_ratio multiplier.
+
+    Default RNG is the :mod:`random` module-level singleton; tests
+    can pass a seeded :class:`random.Random` for determinism. With
+    ``jitter_ratio=0.0`` the sleep is exact (no randomness).
+    """
+    if jitter_ratio <= 0:
+        await asyncio.sleep(nominal_seconds)
+        return
+    sampler = rng.uniform if rng is not None else random.uniform
+    factor = sampler(1.0 - jitter_ratio, 1.0 + jitter_ratio)
+    await asyncio.sleep(nominal_seconds * factor)
 
 _TASK_PANEL_ICON = {
     "in_progress": "◼",
@@ -128,6 +179,75 @@ def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
         if parts:
             fragments.append(("fg:ansibrightblack", f"  … +{', '.join(parts)}\n"))
     return fragments
+
+
+async def heartbeat_loop(
+    state_supplier: Callable[[], State],
+    store: ChatStore,
+    on_tick: Callable[[], None],
+    *,
+    sleep_seconds: float = HEARTBEAT_TICK_MS / 1000,
+    sleep_fn: Callable[[float], Awaitable[None]] | None = None,
+) -> None:
+    """Drive the heartbeat: tick while busy, wait on store changes when idle.
+
+    While ``state_supplier()`` is busy (anything except
+    :attr:`State.IDLE`), awaits ``sleep_fn(sleep_seconds)`` and then
+    calls ``on_tick``. When the state is :attr:`State.IDLE`, blocks
+    on the next :py:meth:`ChatStore.changes` yield — CM state
+    transitions always accompany a store mutation, so the next busy
+    phase wakes the loop. Cleanly cancellable.
+
+    The default ``sleep_fn`` is :func:`jittered_sleep` which applies
+    ±10% noise to each tick for an organic, less-mechanical breathing
+    cadence. Tests pass a deterministic sleep (plain
+    :func:`asyncio.sleep`) to stabilize timing assertions.
+    """
+    if sleep_fn is None:
+        sleep_fn = jittered_sleep
+    changes = store.changes()
+    try:
+        while True:
+            while state_supplier() == State.IDLE:
+                await changes.__anext__()
+            while state_supplier() != State.IDLE:
+                await sleep_fn(sleep_seconds)
+                on_tick()
+    finally:
+        await changes.aclose()
+
+
+def format_heartbeat(
+    state: State,
+    store: ChatStore,
+    tick: int,
+) -> list[tuple[str, str]]:
+    """Render the liveness pulse above the input as prompt_toolkit fragments.
+
+    Returns ``[]`` when ``state == IDLE``. Otherwise returns two
+    fragments: the breathing glyph (``HEARTBEAT_GLYPH`` styled per
+    ``HEARTBEAT_BRIGHTNESS_CYCLE[tick % HEARTBEAT_CYCLE_FRAMES]``)
+    and a static label that names the current phase. The glyph fades
+    smoothly along a truecolor gradient; the label stays bright
+    (split #2 — Steve-Jobs-mode breathing dot, split #13 — truecolor
+    smoothing).
+    """
+    if state == State.IDLE:
+        return []
+    if state == State.AWAITING_LLM:
+        label = "LLM"
+    elif state == State.AWAITING_EXECUTOR:
+        pending = store.pending_tool_calls
+        label = f"tool: {pending[0].name}" if pending else "tool"
+    elif state == State.CANCELLING:
+        label = "cancelling…"
+    else:  # pragma: no cover - defensive for future states
+        label = state.value
+    glyph_style = HEARTBEAT_BRIGHTNESS_CYCLE[tick % HEARTBEAT_CYCLE_FRAMES]
+    return [
+        (glyph_style, f"{HEARTBEAT_GLYPH} "),
+        (HEARTBEAT_LABEL_STYLE, f"{label}\n"),
+    ]
 
 
 TOOL_KEYWORD_WIDTH = len("tool_result")
@@ -531,6 +651,8 @@ class TerminalChat:
         # Index of the last rendered message. The render watcher walks
         # forward through ``store.messages`` from this point.
         self._rendered_message_count: int = 0
+        # Monotonic frame counter feeding the heartbeat brightness cycle.
+        self._heartbeat_tick: int = 0
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
@@ -541,6 +663,7 @@ class TerminalChat:
         self._input_queue = asyncio.Queue()
         worker = asyncio.create_task(self._worker_loop())
         renderer = asyncio.create_task(self._render_watcher())
+        heartbeat = asyncio.create_task(self._heartbeat_ticker())
         try:
             with self.view.output_patch():
                 await self._input_loop()
@@ -549,7 +672,8 @@ class TerminalChat:
         finally:
             worker.cancel()
             renderer.cancel()
-            for task in (worker, renderer):
+            heartbeat.cancel()
+            for task in (worker, renderer, heartbeat):
                 try:
                     await task
                 except asyncio.CancelledError:
@@ -620,10 +744,13 @@ class TerminalChat:
 
     def _above_input(self):
         """Content rendered directly above the input cursor."""
+        heartbeat = format_heartbeat(
+            self.ctx.state, self.store, self._heartbeat_tick
+        )
         tasks = self.store.tasks
         queued = self.store.queued_user_messages
         quit_hint = self._quit_hint_text()
-        if not tasks and not queued and quit_hint is None:
+        if not heartbeat and not tasks and not queued and quit_hint is None:
             return ""
         try:
             from prompt_toolkit.formatted_text import FormattedText
@@ -632,6 +759,9 @@ class TerminalChat:
 
         if FormattedText is None:
             lines: list[str] = []
+            heartbeat_text = "".join(text for _style, text in heartbeat).rstrip("\n")
+            if heartbeat_text:
+                lines.append(heartbeat_text)
             for _style, text in format_task_panel(tasks):
                 lines.append(text.rstrip("\n"))
             for q in queued:
@@ -640,7 +770,8 @@ class TerminalChat:
                 lines.append(quit_hint)
             return "\n".join(lines) + "\n" if lines else ""
 
-        fragments: list[tuple[str, str]] = list(format_task_panel(tasks))
+        fragments: list[tuple[str, str]] = list(heartbeat)
+        fragments.extend(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
         if quit_hint is not None:
@@ -661,6 +792,23 @@ class TerminalChat:
         app = get_app_or_none()
         if app is not None:
             app.invalidate()
+
+    async def _heartbeat_ticker(self) -> None:
+        """Run the heartbeat liveness pulse for the lifetime of the chat.
+
+        See :func:`heartbeat_loop` for the loop semantics. The tick
+        counter is incremented and the prompt_toolkit app invalidated
+        once per frame while CM is busy; idle phases consume no CPU.
+        """
+        def on_tick() -> None:
+            self._heartbeat_tick += 1
+            self._invalidate_app()
+
+        await heartbeat_loop(
+            state_supplier=lambda: self.ctx.state,
+            store=self.store,
+            on_tick=on_tick,
+        )
 
     async def _render_watcher(self) -> None:
         """Subscribe to store mutations; render new messages + redraw input.

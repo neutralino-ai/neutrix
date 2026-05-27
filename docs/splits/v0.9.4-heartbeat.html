@@ -1,0 +1,887 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.9.4 splits — heartbeat liveness indicator</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6a6a6a;
+    --dim: #9a9a9a;
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --border: #e3e3dc;
+    --accent: #b14a00;
+    --shipped: #2f7d32;
+    --inflight: #b14a00;
+    --planned: #6a6a6a;
+    --open: #b14a00;
+    --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 {
+    font-size: 24px;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .tagline {
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .note {
+    color: var(--dim);
+    margin: 0 0 24px;
+    font-size: 13px;
+  }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+  .split {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin: 0 0 14px;
+  }
+  .split .head {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .split .num {
+    font-weight: 600;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .split .name {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 4px 16px;
+    margin: 0;
+    font-size: 14px;
+  }
+  .split dt {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    padding-top: 5px;
+  }
+  .split dd {
+    margin: 0 0 8px;
+    color: var(--fg);
+  }
+  .split dd ul {
+    margin: 4px 0;
+    padding-left: 20px;
+  }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); font-style: normal; }
+  .split .recommend { color: var(--accent); font-style: normal; }
+  .quote {
+    color: var(--muted);
+    font-style: italic;
+  }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 48px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.9.4 splits — heartbeat liveness indicator</h1>
+<p class="tagline">
+  A single pulsing glyph + short label above the input while the
+  <code>ContextManager</code> is in <code>AWAITING_LLM</code> or
+  <code>AWAITING_EXECUTOR</code>. Reads the v0.9.3 state machine;
+  no new store fields.
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this file
+  is the durable record of the split-point discussion that happens
+  <strong>before</strong> the PRD is drafted. CC source under
+  <code>/datafs/users/dingxf/anthropic/cc2/src</code>. Eleven original
+  splits + one Phase-2 reopen (split #3 cadence, joined by new splits
+  #12-#14 on cycle period, smoothing method, and tick jitter — see
+  below) are now <span class="badge decided">decided</span>; the
+  v0.9.4 PRD's <code>## Claude Code reference</code> section embeds
+  the summary. Decision labels follow the rule:
+  <strong>Follow CC</strong> / <strong>Alternative</strong> /
+  <strong>User-directed different</strong> / <strong>No CC analog</strong>.
+</p>
+
+<p class="note">
+  <strong>Phase-2 reopen (2026-05-27):</strong> first implementation
+  shipped at the Phase-3 gate with a 720&nbsp;ms cycle (~83 BPM).
+  User rejected: <em>"beating too fast. it should give people feeling
+  of rythem of breathing"</em>. The reject re-opened split #3 and
+  surfaced three new split points (#12 cycle period, #13 smoothing
+  method, #14 randomness) that the original survey missed. New
+  decisions, recorded turn-by-turn below.
+</p>
+
+<h2>Context — what CC does, in one paragraph</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">CC's spinner, summarized</span>
+    <span class="badge decided">survey</span>
+  </div>
+  <dl>
+    <dt>Glyph</dt>
+    <dd>
+      Six platform-aware Unicode chars cycled forward+backward — macOS/Linux
+      <code>['·', '✢', '✳', '✶', '✻', '✽']</code> giving a
+      breathing rhythm. <code>cc2/src/components/Spinner/utils.ts:4-10</code>,
+      <code>SpinnerGlyph.tsx:7</code>.
+    </dd>
+    <dt>Cadence</dt>
+    <dd>
+      <strong>120 ms</strong> per frame. Reduced-motion fallback: single
+      <code>●</code> on a 2 s cycle. <code>SpinnerAnimationRow.tsx:131</code>.
+    </dd>
+    <dt>Phase set</dt>
+    <dd>
+      Five distinct modes: <code>requesting</code> /
+      <code>responding</code> / <code>thinking</code> /
+      <code>tool-input</code> / <code>tool-use</code>.
+      Each content-block event in the stream transitions mode.
+      <code>cc2/src/utils/messages.ts:2985-3020</code>.
+    </dd>
+    <dt>Label</dt>
+    <dd>
+      A random verb from a 200+ list (<code>constants/spinnerVerbs.ts</code>),
+      sampled once per mount, stable for the turn. Tool-active mode swaps
+      in the task's <code>activeForm</code> when present
+      (<code>Spinner.tsx:166-171</code>).
+    </dd>
+    <dt>Position</dt>
+    <dd>
+      Two-row footprint above the input prompt.
+      <code>cc2/src/screens/REPL.tsx:4587</code>.
+    </dd>
+    <dt>Cancel</dt>
+    <dd>
+      No intermediate state; <code>resetLoadingState()</code> clears
+      the spinner the moment Esc fires.
+      <code>REPL.tsx:2106</code>.
+    </dd>
+    <dt>Time / tokens</dt>
+    <dd>
+      Elapsed seconds shown during thinking (min 2 s display).
+      Token count emerges after <code>SHOW_TOKENS_AFTER_MS = 30_000</code>.
+      Both update on a 50 ms animation clock. <code>SpinnerAnimationRow.tsx:19</code>.
+    </dd>
+    <dt>Permission</dt>
+    <dd>
+      Spinner keeps animating during the tool-permission gate; the
+      elapsed-time counter is paused (<code>pauseStartTimeRef</code>).
+      <code>REPL.tsx:2078-2086</code>.
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">1.</span>
+    <span class="name">Phase set — how many distinct labels?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Five (<code>requesting</code> / <code>responding</code> /
+      <code>thinking</code> / <code>tool-input</code> /
+      <code>tool-use</code>) driven by streaming content-block events.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>1 — "working" only.</li>
+        <li>2 — "LLM" / "tool: {name}" (gated on the CM state).</li>
+        <li>3 — "LLM (waiting)" / "LLM (streaming)" / "tool: {name}".</li>
+        <li>5 — match CC.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — 2-phase</strong>. v0.9.4 only has two CM
+      <em>busy</em> states (<code>AWAITING_LLM</code>,
+      <code>AWAITING_EXECUTOR</code>); v0.9.6 reintroduces streaming
+      but neutrix has no thinking blocks. Don't import phase
+      granularity for features we don't have. If v0.9.6 wants to split
+      <code>AWAITING_LLM</code> into pre-first-token vs streaming, that's
+      a v0.9.6 split point — not v0.9.4's.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — 2-phase + CANCELLING.</strong>
+      Maps 1:1 to neutrix's <code>ContextManager</code> state machine
+      (<code>AWAITING_LLM</code> → "LLM",
+      <code>AWAITING_EXECUTOR</code> → "tool: {name}",
+      <code>CANCELLING</code> → "cancelling…"). v0.9.x has no streaming
+      or thinking blocks to justify CC's 5-phase granularity; if
+      v0.9.6 needs streaming sub-phases, those become their own
+      split point.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">2.</span>
+    <span class="name">Glyph set</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      ✻-family Unicode flower forms cycled forward+backward.
+      Platform-aware (Windows substitutes <code>*</code>; xterm-ghostty
+      drops <code>✽</code>).
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Braille spinner <code>⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏</code> (the prior PRD draft).</li>
+        <li>CC's <code>['·', '✢', '✳', '✶', '✻', '✽']</code> with
+          forward+backward cycle.</li>
+        <li>Dots <code>. .. ...</code> (Codex-style).</li>
+        <li>Single static glyph + dim/bright pulse on a clock.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC</strong> — the ✻-family with the
+      forward+backward cycle. The breathing rhythm reads as
+      "alive-and-thinking" rather than "spinning frantically." Braille
+      spinners blur at typical 14–16 px terminal sizes; CC's flowers
+      are crisper. Accept the platform-substitution rule so Windows
+      and xterm-ghostty don't render a hollow box.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — single
+      <code>●</code> with brightness pulse over 6 frames, no shape
+      rotation. User: <span class="quote">"suggest more. what
+      would Steven Jobs do?"</span> In a redo round the agent
+      surfaced four Jobs-mode alternatives (breathing dot,
+      label-only fade, the CC ✻ family, 3-dot Codex). User chose
+      the breathing dot — single character, calmer than CC's
+      10-frame ✻ rotation, reads as alive without ornamental
+      motion. Diverges from CC.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">3.</span>
+    <span class="name">Tick cadence (re-opened Phase 2)</span>
+    <span class="badge decided">decided (revised)</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>120 ms (~8 Hz) per frame.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>100 ms (10 Hz).</li>
+        <li>120 ms (CC).</li>
+        <li>200 ms (the prior PRD draft, 5 Hz).</li>
+        <li>250 ms (4 Hz, lower redraw cost).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC</strong> — 120 ms. Below ~150 ms the eye reads
+      "alive"; above ~200 ms it reads "stuttering." Redraw cost is
+      negligible because the heartbeat is a single line in an
+      invalidation-driven render path.
+    </dd>
+    <dt class="decision">Decision (Phase-1, since revised)</dt>
+    <dd class="decision">
+      <strong>Follow CC</strong> — 120 ms / ~8 Hz per frame. Matches
+      the agent's recommendation and CC byte-for-byte.
+    </dd>
+    <dt class="decision">Decision (revised Phase 2, 2026-05-27)</dt>
+    <dd class="decision">
+      <strong>Alternative — 100 ms nominal with ±10% jitter.</strong>
+      Now coupled to split #12 (cycle period) and split #14
+      (randomness): with 40 frames × 100 ms = 4.0 s breathing cycle,
+      the per-frame jitter (~90–110 ms) keeps the eye reading "alive"
+      while desyncing from CPU clocks for an organic feel. Diverges
+      from CC.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">4.</span>
+    <span class="name">Label policy — static phase names vs verb personality</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Random verb from a 200+ list (<code>Pondering</code>,
+      <code>Cogitating</code>, …), sampled once per turn, stable across
+      ticks. Tool runs override with task <code>activeForm</code>
+      when set.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Static <code>"LLM"</code> / <code>"tool: {name}"</code>.</li>
+        <li>Verbed but neutral: <code>"thinking…"</code> /
+          <code>"running {name}…"</code>.</li>
+        <li>CC's full random-verb list (200+).</li>
+        <li>A small curated 10-verb list with the same sample-once policy.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — static phase names</strong>:
+      <code>"LLM"</code> when <code>AWAITING_LLM</code>;
+      <code>"tool: {name}"</code> when <code>AWAITING_EXECUTOR</code>.
+      The phase IS the information; personality is post-v1.0
+      polish. Static text means the heartbeat is also a debugging
+      affordance — the user can see at a glance which state the CM
+      is in. (Could revisit at v1.x as a small "personality" PR if
+      users miss it.)
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — static phase names.</strong>
+      <code>"LLM"</code> / <code>"tool: {name}"</code> /
+      <code>"cancelling…"</code>. Phase IS the information;
+      doubles as a debug affordance for inspecting CM state.
+      Random-verb personality (CC's 200+ list) is a v1.x polish
+      item if anyone misses it.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">5.</span>
+    <span class="name">Tool-name detail in <code>AWAITING_EXECUTOR</code></span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Custom <code>activeForm</code> when a task is set (e.g.
+      "Running bash…"). Args not echoed inline.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><code>tool: {name}</code> only.</li>
+        <li><code>tool: {name} {first-N-bytes-of-args}</code>.</li>
+        <li><code>tool</code> generic, no name.</li>
+        <li><code>tool: {name} ({k} args)</code>.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative</strong> — name only. The
+      <code>-&gt; tool_use   {name} {args}</code> line (v0.8.2 colored
+      keyword) printed when the call started already shows the args;
+      the heartbeat duplicates nothing. Keeps the line short on
+      narrow terminals.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — name only.</strong>
+      <code>"tool: {name}"</code>, no args. Args appear on the
+      preceding <code>-&gt; tool_use   {name} {args}</code>
+      transcript line (v0.8.2 colored keyword); the heartbeat
+      duplicates nothing and fits narrow terminals.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">6.</span>
+    <span class="name">Multi-pending tool case</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Multiple pending tools render as multiple lines in the tasks
+      list; the spinner labels at most one phase per render.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>First-only — pick head of <code>pending_tool_calls</code>.</li>
+        <li>Count — <code>tools: 3 running</code>.</li>
+        <li>List — <code>tools: read_file, run_shell, list_dir</code>.</li>
+        <li>Multi-row — one heartbeat line per pending tool.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — first-only</strong>. v0.9.x has no
+      parallelism (one tool at a time per round). Multi-row /
+      count belong to whichever release adds parallel tool dispatch
+      — defer the split until then. YAGNI.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — first-only.</strong>
+      Head of <code>store.pending_tool_calls</code>. v0.9.x has no
+      parallel tool dispatch (one tool per round); multi-row /
+      count splits belong to the release that adds parallelism.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">7.</span>
+    <span class="name">Cancel transition state — render CANCELLING or vanish?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      No transition. <code>resetLoadingState()</code> hides the
+      spinner immediately on Esc. <code>REPL.tsx:2106</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Follow CC — vanish immediately on Esc.</li>
+        <li>Render <code>cancelling…</code> while the CM is in
+          <code>CANCELLING</code>; vanish on transition to IDLE.</li>
+        <li>Render <code>cancelled</code> briefly (~500 ms) then
+          vanish.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative</strong> — render <code>cancelling…</code>
+      while in <code>CANCELLING</code>. v0.9.3 introduced
+      <code>CANCELLING</code> as a real state in the CM state
+      machine; the heartbeat is the natural surface that reveals it.
+      neutrix's cancel window is measurable (200 ms grace +
+      tree-kill); CC's cancel is instant so vanish-immediately
+      reads fine for them. Showing the state aligns user-view
+      with the project's core abstraction.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — render <code>cancelling…</code></strong>
+      while CM is in <code>CANCELLING</code>. Aligns user-view with
+      the project's core state-machine abstraction. neutrix's cancel
+      window is measurable (~200 ms tree-kill) so the state
+      visibility carries information CC's vanish-immediately
+      doesn't. Diverges from CC.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">8.</span>
+    <span class="name">Elapsed-time / token overlay</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Elapsed seconds shown during thinking blocks (min 2 s display);
+      token count emerges after 30 s. Both update on a 50 ms clock.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>None — heartbeat is a liveness signal only.</li>
+        <li>Elapsed seconds always.</li>
+        <li>Elapsed only after threshold (e.g. 10 s).</li>
+        <li>Elapsed + token count after 30 s (full CC parity).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — none in v0.9.4</strong>. The PRD's
+      original non-goal stands. Adding elapsed display now means
+      another state field (start-time-of-current-state) and a new
+      tick path. Defer to a focused v1.x patch if users feel the
+      lack. Heartbeat is a liveness signal, not a meter.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — none.</strong>
+      Heartbeat is a liveness signal, not a meter. Elapsed-seconds
+      / token-count overlay belongs to the v1.x <code>/status</code>
+      cost-tracking patch, not v0.9.4.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">9.</span>
+    <span class="name">Position in the message-area stack</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Two-row footprint above the input prompt.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Above task panel (top of message-area).</li>
+        <li>Between task panel and queue (eye-line above cursor).</li>
+        <li>Below queue, directly above the input cursor.</li>
+        <li>On the input prompt line (replaces the prompt prefix).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC for the spirit</strong> (right above the
+      cursor's eye-line) but slot it between task panel and queue —
+      stack order: task panel → heartbeat → queued messages →
+      cursor. Heartbeat is transient; task panel is durable;
+      heartbeat below the panel reads as "current activity within
+      the broader plan."
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different</strong> — heartbeat at the
+      <em>top</em> of the message-area, above the task panel.
+      Stack order: heartbeat → task panel → queued messages →
+      input cursor. User picked option 2 (above task panel) over
+      the agent's option 1 (between panel and queue). Rationale:
+      the heartbeat is the most immediate signal and should be the
+      first thing the eye lands on when scanning. Diverges from
+      agent recommendation.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">10.</span>
+    <span class="name">Idle-hide debounce</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Not relevant — streaming fills the gap between
+      <code>requesting</code> and <code>responding</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>No debounce — heartbeat hides whenever CM transitions to IDLE.</li>
+        <li>Debounce 250 ms — heartbeat stays visible for 250 ms of
+          continuous IDLE before hiding.</li>
+        <li>Phase-aware — debounce only between consecutive busy
+          phases, not on real "done."</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — no debounce in v0.9.4</strong>. The CM
+      transitions from <code>AWAITING_EXECUTOR</code> directly to
+      <code>AWAITING_LLM</code> in the agent loop (no intervening
+      IDLE), so the blink the prior PRD worried about doesn't
+      happen on the common path. If it manifests in v0.9.6 once
+      streaming returns, the debounce becomes a 3-line follow-up.
+      Keep v0.9.4 mechanically simple.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — no debounce.</strong>
+      CM transitions <code>AWAITING_EXECUTOR</code> →
+      <code>AWAITING_LLM</code> directly in the agent loop (no
+      intervening <code>IDLE</code>), so the blink doesn't happen
+      on the common path. If v0.9.6 streaming reveals an edge
+      case, the debounce becomes a small follow-up patch.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">11.</span>
+    <span class="name">Reduced-motion / NO_COLOR-style opt-out</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Single <code>●</code> on a 2 s cycle when reduced motion is
+      enabled (OS-level a11y setting).
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>No fallback — always animate.</li>
+        <li>Honor <code>NO_COLOR=1</code> env var by switching to a single
+          static glyph.</li>
+        <li>YAML config flag <code>ui.reduced_motion: true</code>.</li>
+        <li>Full CC parity — OS-level reduced-motion detection.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>No CC analog — defer</strong>. Reduced-motion
+      detection is a polish item nobody has asked for; OS-level
+      detection in Python TUIs is involved. YAGNI for v0.9.4.
+      Revisit post-v1.0 if a user requests it.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>No CC analog — defer.</strong>
+      The breathing-dot from split #2 is already calm — the
+      reduced-motion concern that drives CC's fallback is less
+      acute here. YAGNI for v0.9.4. Add a YAML
+      <code>ui.reduced_motion</code> flag in a v1.x patch if a
+      user requests it.
+    </dd>
+  </dl>
+</div>
+
+<h2>Phase-2 reopen: cycle period, smoothing, jitter</h2>
+
+<p class="note">
+  The first implementation set the cycle at 6&nbsp;frames × 120&nbsp;ms =
+  720&nbsp;ms (~83 BPM). User feedback at the Phase-3 gate:
+  <em>"it's beating too fast … it should give people feeling of
+  rythem of breathing"</em>. Research:
+</p>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">Cognitive-science / physiological reference</span>
+    <span class="badge decided">survey</span>
+  </div>
+  <dl>
+    <dt>Resting calm</dt>
+    <dd>
+      Adult resting respiratory rate: <strong>12–20 breaths/min</strong>
+      (3.0–5.0 s per full cycle). Below 12 is unusual; above 25
+      flags stress / illness.
+      (<a href="https://www.medicalnewstoday.com/articles/324409">Medical News Today</a>,
+      <a href="https://www.lung.org/blog/respiratory-rate-vital-signs">American Lung Association</a>.)
+    </dd>
+    <dt>Coherent breathing</dt>
+    <dd>
+      Meditation / HRV-training rate: <strong>5–6 breaths/min</strong>
+      (10–12 s per cycle). Targets ~0.1&nbsp;Hz where heart-rate
+      oscillations resonate. Stronger calming effect, but too slow
+      for an ambient liveness indicator — would read as "dead" between
+      dim phases.
+      (<a href="https://www.groovylab.org/vagusvital/blog/coherent-breathing-6-bpm/">VagusVital review</a>.)
+    </dd>
+    <dt>CC actual</dt>
+    <dd>
+      SPINNER_FRAMES is built as
+      <code>[...DEFAULT_CHARACTERS, ...[...DEFAULT_CHARACTERS].reverse()]</code> =
+      12 frames at 120 ms each =
+      <strong>1.44 s per cycle</strong> (~42 BPM). Faster than
+      resting calm.
+      (<code>cc2/src/components/Spinner/SpinnerGlyph.tsx:7</code>.)
+    </dd>
+    <dt>CC reduced-motion</dt>
+    <dd>
+      Single <code>●</code> at <strong>2.0 s cycle</strong>
+      (1 s visible, 1 s dim). Calmer than normal mode.
+      (<code>cc2/src/components/Spinner/SpinnerGlyph.tsx:9</code>.)
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">12.</span>
+    <span class="name">Cycle period — how long is "one breath"?</span>
+    <span class="badge decided">user-directed</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      1.44 s (normal); 2.0 s (reduced-motion). Both faster than calm
+      resting breathing.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>2.0 s — CC reduced-motion parity (~30 BPM).</li>
+        <li>3.0 s — resting calm middle (~20 BPM).</li>
+        <li>4.0 s — slow calm (~15 BPM).</li>
+        <li>6.0 s — coherent-breathing range (~10 BPM).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>3.0 s</strong> — middle of the human resting-calm
+      band. Calm without going meditation-slow; the dot's dim phase
+      stays short enough that the user never wonders if the app
+      stalled.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different — 4.0 s per cycle</strong>
+      (~15 BPM). User picked the slow-calm tier over the agent's
+      3.0 s middle-tier recommendation. Locks split #3's tick to
+      ≈100 ms with 40 frames for a smooth-feeling 4-second breath.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">13.</span>
+    <span class="name">Smoothing — how to avoid stepwise feel at slow cycle?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Doesn't apply — CC achieves smoothness by changing the
+      <em>character shape</em> (the ✻-family progression) rather
+      than brightness. neutrix is locked to a single <code>●</code>
+      (split #2, user-directed), so brightness is the only channel.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Stay ANSI (3 shades: bright / medium / dim), few frames,
+            slow tick — steps visibly every ≥1 s; risks looking
+            broken.</li>
+        <li>Stay ANSI but introduce a 4th shade via the
+            <code>dim</code> modifier on bright/normal — marginal
+            improvement, still steps.</li>
+        <li>Truecolor gradient — interpolate through ~20–40 hex
+            gray shades (e.g. <code>#3c3c3c</code> →
+            <code>#ffffff</code>) at fast tick. Genuinely smooth
+            breath; needs truecolor terminal.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Truecolor gradient</strong>. Every modern terminal
+      (iTerm2, Alacritty, Kitty, Ghostty, gnome-terminal, Windows
+      Terminal, etc.) supports 24-bit color; the few that don't
+      degrade to ANSI via prompt_toolkit's color-depth fallback.
+      With a 4-second cycle the smoothness is what makes the
+      animation read as "breathing" vs "blinking."
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Truecolor gradient.</strong> 40 hex gray shades
+      interpolated along a raised-cosine curve from peak
+      <code>rgb(255,255,255)</code> to trough
+      <code>rgb(60,60,60)</code>. Brightness curve is
+      <code>(1 - cos(2π · frame / 40)) / 2</code> scaled into the
+      gray range. Label keeps its bold-bright ANSI style (split #4
+      / #7 unchanged).
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">14.</span>
+    <span class="name">Randomness — strict period or organic jitter?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Strict periodic. Uses <code>setInterval</code> at 120 ms.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>None — strict period (CC parity).</li>
+        <li>Tick jitter — sleep interval randomized within ±X%.</li>
+        <li>Phase offset — randomize the starting frame each time
+            the cycle re-activates.</li>
+        <li>Brightness jitter — random shade selection on each
+            tick.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>±10% tick jitter only.</strong> Cheapest and most
+      organic — desyncs the cycle from CPU-clock-multiple periods,
+      so two consecutive breaths look subtly different without
+      "glitching." Phase offset adds delight at boot but the
+      heartbeat re-activates every turn; brightness jitter looks
+      buggy.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>±10% tick jitter, no phase offset, no brightness
+      jitter.</strong> Each frame sleeps for
+      <code>HEARTBEAT_TICK_MS · uniform(0.9, 1.1)</code>. Tests
+      override the jitter with a fixed-seed RNG (or pass a custom
+      sleep function) for determinism.
+    </dd>
+  </dl>
+</div>
+
+<footer>
+  After the user reads this file and marks each Decision, the PRD
+  at <code>docs/PRDs/v0.9.4-heartbeat.md</code> gets refreshed with
+  the embedded decisions in its <code>## Claude Code reference</code>
+  section. Until then, the PRD body retains its skeleton status.
+</footer>
+
+</body>
+</html>

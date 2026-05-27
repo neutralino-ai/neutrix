@@ -144,60 +144,108 @@
 <body>
 
 <h1>neutrix roadmap</h1>
-<p class="tagline">A minimal TUI chat client for OpenAI-compatible LLM APIs.</p>
+<p class="tagline">A terminal agentic chat client for OpenAI-compatible LLM APIs.</p>
 <p class="note">
   This page is the user-visible map of where the project is going.
   Per <code>CLAUDE.md</code>, every PRD acceptance updates this
   page before implementation starts. Entries link to their PRDs
   under <code>docs/PRDs/</code>.
 </p>
+<p class="note">
+  <strong>v1.0 destination:</strong> a TUI Claude-Code-shaped
+  agentic client — cancel-as-steer, lifecycle-driven store,
+  visibility parity, smart Advisor, conversation compaction,
+  subagent dispatch, rewind / branch. Sealed surface at v1.0.
+  Markdown rendering, cost tracking, web frontend, MCP, skills,
+  hooks are <em>post-v1.0</em> (v1.x).
+</p>
 
-<h2>Upcoming</h2>
-
+<h2>Upcoming — cancel / state-machine arc (closing)</h2>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.4-heartbeat.md">v0.9.4</a></span>
+  <span class="ver"><a href="PRDs/v0.9.5-emergency-compact.md">v0.9.5</a></span>
   <span class="theme">
-    Heartbeat liveness indicator
+    Emergency mechanical <code>/compact</code>
     <small>
-      A one-line pulse above the input that says
-      <code>"⠋ LLM …"</code> while in <code>AWAITING_LLM</code>
-      and <code>"⠋ tool: run_shell …"</code> while in
-      <code>AWAITING_EXECUTOR</code>. Reads the v0.9.3
-      <code>ContextManager</code> state +
-      <code>store.pending_tool_calls</code>.
+      User-reported urgent. A slash command that drops the oldest
+      50 % of <code>ContextManager.messages</code> mechanically —
+      no LLM summarization, no automatic trigger, no configurable
+      ratio. Tool-round-boundary aware. The bridge that keeps users
+      working until smart compaction lands at v0.11.1.
     </small>
   </span>
   <span class="badge planned">skeleton</span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.5-visibility-parity.md">v0.9.5</a></span>
+  <span class="ver"><a href="PRDs/v0.9.6-streaming-steer.md">v0.9.6</a></span>
   <span class="theme">
-    Visibility parity: show what the LLM sees
+    Re-enable streaming with cancel-as-steer
+    <small>
+      Switch <code>OpenAIChatLLM.stream_response</code> back to
+      <code>stream=True</code> (rolled back in v0.9.3). On Esc:
+      close the stream eagerly, <em>keep</em> the partial assistant
+      text in history, append <code>[interrupted by user]</code>, let
+      the LLM-side pairing layer repair any orphan
+      <code>tool_use</code>. Closes the cancel arc.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<h2>Upcoming — visibility &amp; renderer-purity arc</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.0-visibility-parity.md">v0.10.0</a></span>
+  <span class="theme">
+    Visibility parity — show what the LLM sees
     <small>
       Renders the system prompt, tool schemas, and
       <code>&lt;system-reminder&gt;</code> injections in the
-      transcript (folded). Encodes the invariant that no channel
-      the LLM receives is hidden from the user.
+      transcript (folded). Adds a
+      <code>.claude/rules/visibility-parity.md</code> rule, an
+      <code>LLMRoundBundle</code> snapshot, a <code>Ctrl+E</code>
+      fold/expand affordance, and an invariant test asserting no
+      channel sent to the LLM is omitted from the user view.
     </small>
   </span>
   <span class="badge planned">skeleton</span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.0-tuiview-purify.md">v0.10.0</a></span>
+  <span class="ver"><a href="PRDs/v0.10.1-tuiview-purify.md">v0.10.1</a></span>
   <span class="theme">
-    TUIView as pure renderer + visible task panel + FakeView swap-test
+    TUIView as pure renderer + FakeView swap-test
     <small>
       Closes the v0.7-arc onion refactor. View becomes a pure
-      reader of <code>ChatStore</code>; a <code>FakeView</code> in tests
-      proves the renderer is swappable — the prerequisite for the v1.0
-      web-frontend bet.
+      reader of <code>ChatStore</code>; residual writes
+      (<code>_tool_records</code> folded-tray) move onto the store;
+      a <code>FakeView</code> in <code>tests/</code> proves the
+      renderer is swappable. Architectural hygiene that makes the
+      v0.11.0 Advisor's "store is the only mutator" assumption
+      defensible.
     </small>
   </span>
   <span class="badge planned">skeleton</span>
 </div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.2-rewind.md">v0.10.2</a></span>
+  <span class="theme">
+    Rewind / branch from prior turn
+    <small>
+      User-reported urgent. <code>Up-arrow</code> on empty buffer
+      recalls prior user turns for editing; submit a recalled turn
+      rolls <code>ContextManager.messages</code> back to that
+      point. <code>/rewind N</code> drops the last N turns without
+      recalling text. Tool-round-boundary aware. Rewound turns
+      render with a dim <code>[rewound]</code> marker.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<h2>Upcoming — agentic-depth arc</h2>
 
 <div class="entry">
   <span class="ver"><a href="PRDs/v0.11.0-smart-advisor.md">v0.11.0</a></span>
@@ -213,7 +261,86 @@
   <span class="badge planned">skeleton</span>
 </div>
 
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.11.1-compaction.md">v0.11.1</a></span>
+  <span class="theme">
+    Smart conversation compaction
+    <small>
+      CC analog: <code>manageConversation</code> / <code>/compact</code>
+      with LLM-summarized older turns. Builds on v0.9.5's mechanical
+      <code>/compact</code> by adding an automatic threshold trigger
+      and a summarizer call against the cut segment. Required before
+      v1.0 — Advisor without compaction hits the cliff faster, not
+      slower.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<h2>Upcoming — subagent arc</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.12.0-subagent.md">v0.12.0</a></span>
+  <span class="theme">
+    Subagent framework (<code>Agent</code> tool)
+    <small>
+      User-reported urgent for v1.0 (context-explode structural fix).
+      CC analog: the <code>Agent</code> tool that spawns a fresh-context
+      worker, runs it to completion, returns the final assistant text.
+      Each subagent owns its own <code>ContextManager</code>; the parent's
+      context grows by one tool-result line, not by the subagent's full
+      transcript. Visible in the parent transcript as a folded
+      <code>[subagent]</code> block; cancellable via Esc.
+    </small>
+  </span>
+  <span class="badge planned">skeleton</span>
+</div>
+
+<h2>Upcoming — v1.0 lock</h2>
+
+<div class="entry">
+  <span class="ver">v1.0.0</span>
+  <span class="theme">
+    Sealed v1.0 surface
+    <small>
+      Tag the cumulative result of v0.8.3–v0.12.0 as the v1.0
+      product. Freeze SemVer (post-v1.0 breaking changes require
+      a major bump). Polish items (markdown rendering, cost / token
+      tracking on <code>/status</code>, skills, MCP, hooks, web
+      frontend, parallel / recursive subagents) all land as v1.x.
+    </small>
+  </span>
+  <span class="badge planned">target</span>
+</div>
+
 <h2>Shipped</h2>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.4-heartbeat.md">v0.9.4</a></span>
+  <span class="theme">
+    Heartbeat liveness indicator (+ bundled TaskCreate prompt fix)
+    <small>
+      A single <code>●</code> at the top of the message-area while
+      the <code>ContextManager</code> is in <code>AWAITING_LLM</code>
+      (<code>● LLM</code>), <code>AWAITING_EXECUTOR</code>
+      (<code>● tool: {name}</code>), or <code>CANCELLING</code>
+      (<code>● cancelling…</code>). The dot breathes
+      trough→peak→trough on a 40-frame truecolor gradient at
+      ~100&nbsp;ms/tick with ±10% jitter — a 4.0-second cycle
+      (~15&nbsp;BPM, middle of the human resting-calm respiratory
+      range). Reads the v0.9.3 state machine and
+      <code>store.pending_tool_calls</code>; pure-renderer addition,
+      no new store fields
+      (<a href="splits/v0.9.4-heartbeat.html">14 split-point decisions</a>,
+      11 original + 3 Phase-2 reopen on cycle period / smoothing /
+      jitter after the first 720&nbsp;ms implementation was rejected
+      as "beating too fast").
+      Bundles a small user-reported fix: <code>TaskCreate</code> tool
+      description rewritten to push full-upfront task planning.
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
 
 <div class="entry">
   <span class="ver"><a href="PRDs/v0.9.3-cancel-steer.md">v0.9.3</a></span>
@@ -278,8 +405,8 @@
     <small>
       Adds <code>llm_request_start</code> / <code>llm_request_end</code>
       and a single <code>ChatStore.apply(event)</code> reducer. Makes the
-      store the canonical "what's in flight" surface, unblocks v0.9.3
-      heartbeat and v0.10.0 FakeView. Invisible to the user.
+      store the canonical "what's in flight" surface, unblocks v0.9.4
+      heartbeat and v0.10.1 FakeView. Invisible to the user.
     </small>
   </span>
   <span class="badge shipped">shipped</span>

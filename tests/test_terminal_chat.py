@@ -23,6 +23,7 @@ from neutrix.llm import (
 )
 from neutrix.store import ChatStore
 from neutrix.terminal_chat import (
+    HEARTBEAT_GLYPH,
     QuitArmingState,
     TerminalChat,
     ToolRecord,
@@ -655,6 +656,74 @@ async def test_queue_display_while_busy_shows_queued_user_messages(tmp_path: Pat
     rendered = output.getvalue()
     assert "first" in rendered
     assert "second" in rendered
+
+
+# ---- heartbeat above-input integration (v0.9.4) -------------------------
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_renders_above_input_while_busy(tmp_path: Path) -> None:
+    """During AWAITING_LLM, the heartbeat sits at the TOP of the
+    above-input stack, ahead of the task panel and the queue (split #9).
+    """
+    llm = BlockingLLM()
+    ctx = _make_ctx(llm, use_tools=False)
+    ctx.store.add_task("first task")
+    output = StringIO()
+    input_values: Queue[str] = Queue()
+
+    def input_func(_p: str) -> str:
+        return input_values.get(timeout=5)
+
+    chat = TerminalChat(
+        ctx,
+        config=_config(tmp_path),
+        render_markdown=False,
+        input_func=input_func,
+        console=Console(file=output, force_terminal=False, color_system=None, width=100),
+    )
+    task = asyncio.create_task(chat.run_async())
+
+    input_values.put("hi")
+    await asyncio.wait_for(llm.started.get(), timeout=2.0)
+    # Enqueue a second user message so all three above-input rows have content.
+    input_values.put("second")
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if chat.store.queued_user_messages:
+            break
+
+    rendered = _render(chat._above_input())
+    assert HEARTBEAT_GLYPH in rendered
+    assert "LLM" in rendered
+    assert "first task" in rendered
+    assert f"{QUEUED_PREFIX}second" in rendered
+
+    # Stack order: heartbeat → task panel → queue.
+    heartbeat_pos = rendered.index(HEARTBEAT_GLYPH)
+    task_pos = rendered.index("first task")
+    queue_pos = rendered.index(f"{QUEUED_PREFIX}second")
+    assert heartbeat_pos < task_pos < queue_pos
+
+    llm.releases.put_nowait("done first")
+    await asyncio.wait_for(llm.started.get(), timeout=2.0)
+    llm.releases.put_nowait("done second")
+    input_values.put("/quit")
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_absent_above_input_when_idle(tmp_path: Path) -> None:
+    """At IDLE, the heartbeat renders nothing — only tasks/queue/hint."""
+    llm = FakeLLM()
+    ctx = _make_ctx(llm)
+    ctx.store.add_task("idle task")
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, ["/quit"])
+
+    rendered = _render(chat._above_input())
+    assert HEARTBEAT_GLYPH not in rendered
+    assert "LLM" not in rendered
+    assert "idle task" in rendered
 
 
 # ---- QuitArmingState (unchanged semantics) ------------------------------

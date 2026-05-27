@@ -38,19 +38,19 @@ _STORE_REQUIRED_TOOLS = frozenset({"TaskCreate", "TaskUpdate", "TaskList"})
 # itself drives the LLM to actually start, update, and complete tasks.
 
 _TASK_CREATE_DESCRIPTION = """\
-Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+Use this tool proactively to capture the user's full multi-step plan as **separate tasks**, not piece by piece. This helps you track progress, organize complex work, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
 
 ## When to Use This Tool
 
 Use this tool proactively in these scenarios:
 
+- After receiving new instructions — immediately capture every distinct step the request implies as its own task, BEFORE starting work on any of them. Do NOT add tasks one at a time as you discover them mid-work; the user expects to see the full plan upfront.
 - Complex multi-step tasks - When a task requires 3 or more distinct steps or actions
 - Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
 - Plan mode - When using plan mode, create a task list to track the work
 - User explicitly requests todo list - When the user directly asks you to use the todo list
 - User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
-- After receiving new instructions - Immediately capture user requirements as tasks
 - When you start working on a task - Mark it as in_progress BEFORE beginning work
 - After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation
 
