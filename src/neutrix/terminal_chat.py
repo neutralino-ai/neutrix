@@ -171,6 +171,13 @@ def approximate_token_count(result: str) -> int:
     return len(WORD_RE.findall(result))
 
 
+def format_token_count(n: int) -> str:
+    """Render an approximate token count for the /compact notice."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
 def compact_inline(value: object, *, limit: int = 160) -> str:
     """Collapse a value to one terminal line with a bounded length."""
     text = " ".join(str(value).split())
@@ -974,7 +981,7 @@ class TerminalChat:
                 f"unknown command: /{cmd}. Try /help.", style="bold red"
             )
             return
-        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard"}:
+        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard", "compact"}:
             await self.view.print_notice(
                 f"/{cmd} waits for the assistant to finish", style="yellow"
             )
@@ -1002,6 +1009,7 @@ class TerminalChat:
                     "  /save [PATH]        save session (default: sessions/<ts>.json)",
                     "  /load PATH          load session",
                     "  /clear              start a fresh conversation",
+                    "  /compact            drop the oldest ~50% of history (no summary)",
                     "  /tools              list tools",
                     "  /tools on|off       enable/disable tool calling",
                     "  /tool [N]           list folded tool results or expand one",
@@ -1092,6 +1100,23 @@ class TerminalChat:
         self._rendered_message_count = 0
         await self.view.print_notice("conversation cleared", style="green")
         await self._render_new_records()
+
+    async def _cmd_compact(self, args: list[str]) -> None:
+        outcome = await self.ctx.compact()
+        if not outcome.did_compact:
+            await self.view.print_notice(
+                "nothing to compact (conversation too short)", style="dim"
+            )
+            return
+        # Notice-only: the kept tail is already in scrollback, so suppress
+        # re-printing it and re-align the render index to the compacted
+        # store length (v0.9.6 split #9).
+        self._rendered_message_count = len(self.store.messages)
+        await self.view.print_notice(
+            f"compacted {outcome.turns_dropped} turns "
+            f"(~{format_token_count(outcome.approx_tokens_dropped)} tokens dropped)",
+            style="dim",
+        )
 
     async def _cmd_tools(self, args: list[str]) -> None:
         if args and args[0] in ("on", "off"):

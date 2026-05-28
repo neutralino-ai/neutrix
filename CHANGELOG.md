@@ -4,6 +4,46 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.6] — 2026-05-28
+
+### Added
+- **Emergency mechanical ``/compact``.** A slash command that drops the
+  oldest ~50 % of ``ContextManager.messages`` with no LLM call — the
+  bridge until smart, summary-based compaction lands at v0.10.5. The
+  cut preserves the leading ``system`` prefix, snaps *forward* past any
+  ``role:tool`` message so the kept tail never begins on an orphan
+  ``tool_result`` (which ``llm.py``'s pairing layer does not repair),
+  and inserts one ``role:user`` placeholder
+  ``<system-compact>{N} earlier turns removed by /compact (no
+  summary)</system-compact>`` between the prefix and the kept tail.
+  Prints a dim ``compacted N turns (~K tokens dropped)`` notice and
+  suppresses re-printing the already-visible tail. ``/compact`` takes
+  no arguments, refuses while the assistant is working, and is a clean
+  no-op when the conversation is too short to drop a tool-round-safe
+  slice. Re-running further-halves; it never stacks placeholders.
+  (12 split-point decisions, all autonomous;
+  1 Follow CC / 8 Alternative / 3 No CC analog —
+  see [docs/splits/v0.9.6-emergency-compact.html](docs/splits/v0.9.6-emergency-compact.html).)
+- **``neutrix.compaction`` module.** Pure
+  ``compact_messages(messages, *, keep_ratio=0.5) ->
+  (new_messages, CompactionOutcome)`` plus an ``is_compact_marker``
+  helper (unused by the v0.9.6 renderer; provided for v0.10.2
+  visibility-parity, mirroring ``is_task_reminder``). The cut
+  computation is isolated so v0.10.5 can reuse it and swap the
+  placeholder step for a summarizer.
+- **``ContextManager.compact()``.** Async direct method (mirrors
+  ``cancel()``) that compacts both ``messages`` and the typed
+  ``ChatStore`` so ``/save`` persists the compacted state, while
+  **preserving tasks** (compaction trims context, not the live work
+  list). The same method is the seam v0.10.5's auto-trigger watchdog
+  will call.
+
+### Changed
+- **``/compact`` joins the busy-guard set** (``fast``/``strong``/
+  ``save``/``load``/``onboard``/``compact``) and the ``/help`` listing.
+
+See [docs/PRDs/v0.9.6-emergency-compact.md](docs/PRDs/v0.9.6-emergency-compact.md).
+
 ## [v0.9.5] — 2026-05-28
 
 ### Added

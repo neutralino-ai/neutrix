@@ -65,6 +65,7 @@ from typing import Any, Literal, Protocol
 
 from loguru import logger
 
+from neutrix.compaction import CompactionOutcome, compact_messages
 from neutrix.config import Slot
 from neutrix.executor import Executor, ToolEvent
 from neutrix.llm import (
@@ -282,6 +283,36 @@ class ContextManager:
     def switch(self, slot: Slot) -> None:
         self.slot = slot
         self.llm.switch(slot)
+
+    # ---------------------------------------------------------------- compact
+
+    async def compact(self) -> CompactionOutcome:
+        """Mechanically drop the oldest ~50 % of history (v0.9.6).
+
+        Direct method (not an event) so the caller gets the dropped
+        counts back, mirroring :py:meth:`cancel`. Compacts BOTH
+        ``messages`` (the LLM payload) and ``store`` (render/save
+        source) and PRESERVES tasks — compaction trims context, not the
+        live work list. ``_cancel_and_wait`` is a no-op when IDLE (the
+        ``/compact`` command refuses while busy) but keeps the method
+        safe for a future event-driven caller.
+
+        Returns a :class:`~neutrix.compaction.CompactionOutcome`;
+        ``did_compact=False`` leaves history untouched (conversation too
+        short to drop a tool-round-safe slice).
+        """
+        await self._cancel_and_wait()
+        new_messages, outcome = compact_messages(self.messages)
+        if not outcome.did_compact:
+            return outcome
+        tasks = self.store.tasks
+        self.messages = new_messages
+        self.store.reset()
+        for msg in new_messages:
+            self.store.append_message(_record_from_openai(msg))
+        if tasks:
+            self.store.replace_tasks(tasks)
+        return outcome
 
     # -------------------------------------------------- internal handlers
 

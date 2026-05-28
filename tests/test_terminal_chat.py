@@ -397,6 +397,50 @@ def test_terminal_chat_clear_resets_history(tmp_path: Path) -> None:
     assert [m["role"] for m in ctx.messages] == ["system"]
 
 
+def _seeded_body(n_pairs: int) -> list[dict[str, Any]]:
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": "system prompt"}]
+    for i in range(n_pairs):
+        msgs.append({"role": "user", "content": f"user message number {i}"})
+        msgs.append({"role": "assistant", "content": f"assistant reply number {i}"})
+    return msgs
+
+
+def test_terminal_chat_compact_notice_and_no_reprint(tmp_path: Path) -> None:
+    """/compact prints a dim notice, shrinks history, and does NOT
+    re-print the kept tail (already in scrollback — split #9)."""
+    llm = FakeLLM()
+    ctx = _make_ctx(llm, use_tools=False, seed_messages=_seeded_body(10))
+    chat, output, _prompts = _make_chat(ctx, tmp_path, ["/compact", "/quit"])
+    chat.run()
+
+    text = output.getvalue()
+    assert "compacted 10 turns" in text
+    assert "tokens dropped" in text
+    # History was compacted: system + one marker + 10 kept body messages.
+    assert [m["role"] for m in ctx.messages][:2] == ["system", "user"]
+    markers = [
+        m
+        for m in ctx.messages
+        if isinstance(m.get("content"), str)
+        and m["content"].startswith("<system-compact>")
+    ]
+    assert len(markers) == 1
+    assert len(ctx.messages) == 12
+    # The newest kept message was rendered once (at startup) and NOT
+    # reprinted after compaction.
+    assert text.count("user message number 9") == 1
+
+
+def test_terminal_chat_compact_too_short_is_noop_notice(tmp_path: Path) -> None:
+    """/compact on a trivially short conversation reports nothing to do."""
+    llm = FakeLLM()
+    ctx = _make_ctx(llm, use_tools=False, seed_messages=_seeded_body(0))
+    chat, output, _prompts = _make_chat(ctx, tmp_path, ["/compact", "/quit"])
+    chat.run()
+    assert "nothing to compact" in output.getvalue()
+    assert [m["role"] for m in ctx.messages] == ["system"]
+
+
 # ---- cancel-as-steer (the v0.9.3 contract) -----------------------------
 
 
