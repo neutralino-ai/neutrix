@@ -62,19 +62,27 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class Slot:
-    """A resolved (slot, provider, model, credentials) bundle."""
+    """A resolved (slot, provider, model, credentials) bundle.
+
+    ``llm_timeout_s`` (v0.9.5) bounds one LLM round end-to-end. A
+    background watchdog in :class:`~neutrix.context_manager.ContextManager`
+    fires :py:meth:`cm.cancel(reason='timeout')` after this many
+    seconds of being parked in ``AWAITING_LLM``. Per-slot so a slow
+    local model can be given more headroom than a hosted-API slot.
+    """
 
     name: str
     provider: str
     model: str
     base_url: str
     api_key: str
+    llm_timeout_s: float = 300.0
 
 
 @dataclass(frozen=True)
 class Config:
-    providers: dict[str, dict[str, str]]
-    slots: dict[str, dict[str, str]]
+    providers: dict[str, dict[str, Any]]
+    slots: dict[str, dict[str, Any]]
     path: Path
 
     def slot(self, name: str) -> Slot:
@@ -104,12 +112,14 @@ class Config:
                 f"provider {prov_name!r} has no api_key in {self.path}; "
                 f"edit it and re-run"
             )
+        llm_timeout_s = _read_llm_timeout(spec, name=name, path=self.path)
         return Slot(
             name=name,
             provider=prov_name,
             model=model,
             base_url=base_url,
             api_key=api_key,
+            llm_timeout_s=llm_timeout_s,
         )
 
 
@@ -159,6 +169,33 @@ def save_config(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return out
+
+
+def _read_llm_timeout(spec: dict[str, Any], *, name: str, path: Path) -> float:
+    """Parse ``llm_timeout_s`` from a slot spec; default 300.0 when absent.
+
+    The 300 s default (v0.9.5 post-gate) gives slow hosted reasoning
+    models such as deepseek-v4-pro headroom — a healthy long reply
+    isn't killed, while a genuine silent hang still aborts well inside
+    the SDK's 600 s read-timeout. Raises :class:`ConfigError` on
+    non-numeric or non-positive values.
+    """
+    raw = spec.get("llm_timeout_s")
+    if raw is None:
+        return 300.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"slot {name!r} in {path}: llm_timeout_s must be numeric, "
+            f"got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ConfigError(
+            f"slot {name!r} in {path}: llm_timeout_s must be positive, "
+            f"got {value}"
+        )
+    return value
 
 
 def _serialize_provider(prov: Any) -> dict[str, Any]:

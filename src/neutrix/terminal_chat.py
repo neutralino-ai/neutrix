@@ -53,22 +53,55 @@ QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 MAX_PANEL_ROWS = 5
 
 HEARTBEAT_GLYPH = "●"
-HEARTBEAT_CYCLE_FRAMES = 40                  # 40 x 100 ms ~ 4 s breath
-HEARTBEAT_TICK_MS = 100                      # nominal; jittered ±10% per frame
+# Breathing cadence. v0.9.5 raises the refresh from 10 Hz (the v0.9.4
+# 100 ms/tick) to 120 Hz so the fade reads as a continuous glow rather
+# than ~10 visible brightness steps/s — 10 fps sits below the
+# smooth-motion perception floor. The 4 s period (resting-calm
+# ~15 BPM) is unchanged; the frame count scales with the refresh so
+# one breath still spans exactly one period.
+HEARTBEAT_BREATH_PERIOD_S = 4.0
+HEARTBEAT_REFRESH_HZ = 120
+HEARTBEAT_CYCLE_FRAMES = round(HEARTBEAT_REFRESH_HZ * HEARTBEAT_BREATH_PERIOD_S)  # 480
+HEARTBEAT_TICK_MS = 1000 / HEARTBEAT_REFRESH_HZ  # ≈ 8.33 ms/frame
 HEARTBEAT_JITTER_RATIO = 0.10
 HEARTBEAT_TROUGH_RGB: tuple[int, int, int] = (60, 60, 60)
 HEARTBEAT_PEAK_RGB: tuple[int, int, int] = (255, 255, 255)
+# Stalled palette (v0.9.5 split #3): the breathing rhythm continues
+# — only the gradient anchors swap. Low-brightness red to bright red
+# so the dot keeps reading as "alive, but waiting too long."
+HEARTBEAT_STALLED_TROUGH_RGB: tuple[int, int, int] = (60, 0, 0)
+HEARTBEAT_STALLED_PEAK_RGB: tuple[int, int, int] = (255, 60, 60)
+# Single-knob stall threshold (v0.9.5 post-gate revision): the stall
+# hint is derived from the slot's hard timeout rather than carrying a
+# separate magic number, so raising llm_timeout_s for a slow model
+# also pushes the hint out and stops it flickering on healthy slow
+# calls. Floored so a tiny per-slot timeout still leaves an
+# early-warning window.
+HEARTBEAT_STALL_FRACTION = 1 / 6
+HEARTBEAT_STALL_FLOOR_S = 10.0
 HEARTBEAT_LABEL_STYLE = "fg:ansiwhite bold"
 
 
-def _build_brightness_cycle() -> tuple[str, ...]:
+def stall_threshold_for(llm_timeout_s: float) -> float:
+    """Derive the stall-hint threshold from the hard timeout.
+
+    ``max(HEARTBEAT_STALL_FLOOR_S, llm_timeout_s * HEARTBEAT_STALL_FRACTION)``.
+    At the 300 s default this is ~50 s; raise the per-slot timeout and
+    the hint moves out with it. The floor keeps a usable window when a
+    slot sets an aggressively short timeout.
+    """
+    return max(HEARTBEAT_STALL_FLOOR_S, llm_timeout_s * HEARTBEAT_STALL_FRACTION)
+
+
+def _build_brightness_cycle(
+    trough: tuple[int, int, int],
+    peak: tuple[int, int, int],
+) -> tuple[str, ...]:
     """Precompute HEARTBEAT_CYCLE_FRAMES hex-color style strings along
     a raised-cosine breathing curve from trough (frame 0) to peak
     (frame N/2) to trough (frame N).
     """
     cycle: list[str] = []
-    trough = HEARTBEAT_TROUGH_RGB
-    peak = HEARTBEAT_PEAK_RGB
     for frame in range(HEARTBEAT_CYCLE_FRAMES):
         # Raised cosine in [0, 1]: 0 at frame 0 and N, 1 at frame N/2.
         progress = (1 - math.cos(2 * math.pi * frame / HEARTBEAT_CYCLE_FRAMES)) / 2
@@ -79,7 +112,12 @@ def _build_brightness_cycle() -> tuple[str, ...]:
     return tuple(cycle)
 
 
-HEARTBEAT_BRIGHTNESS_CYCLE: tuple[str, ...] = _build_brightness_cycle()
+HEARTBEAT_BRIGHTNESS_CYCLE: tuple[str, ...] = _build_brightness_cycle(
+    HEARTBEAT_TROUGH_RGB, HEARTBEAT_PEAK_RGB
+)
+HEARTBEAT_STALLED_CYCLE: tuple[str, ...] = _build_brightness_cycle(
+    HEARTBEAT_STALLED_TROUGH_RGB, HEARTBEAT_STALLED_PEAK_RGB
+)
 
 
 async def jittered_sleep(
@@ -221,21 +259,35 @@ def format_heartbeat(
     state: State,
     store: ChatStore,
     tick: int,
+    *,
+    last_progress_at: float | None = None,
+    stall_threshold_s: float = HEARTBEAT_STALL_FLOOR_S,
 ) -> list[tuple[str, str]]:
     """Render the liveness pulse above the input as prompt_toolkit fragments.
 
     Returns ``[]`` when ``state == IDLE``. Otherwise returns two
-    fragments: the breathing glyph (``HEARTBEAT_GLYPH`` styled per
-    ``HEARTBEAT_BRIGHTNESS_CYCLE[tick % HEARTBEAT_CYCLE_FRAMES]``)
-    and a static label that names the current phase. The glyph fades
-    smoothly along a truecolor gradient; the label stays bright
-    (split #2 — Steve-Jobs-mode breathing dot, split #13 — truecolor
-    smoothing).
+    fragments: the breathing glyph (``HEARTBEAT_GLYPH`` styled per the
+    active cycle table) and a static label that names the current
+    phase. The glyph fades smoothly along a truecolor gradient; the
+    label stays bright (split #2 — Steve-Jobs-mode breathing dot,
+    split #13 — truecolor smoothing).
+
+    When ``state == AWAITING_LLM`` and ``last_progress_at`` is set and
+    more than ``stall_threshold_s`` seconds ago, the palette swaps to
+    ``HEARTBEAT_STALLED_CYCLE`` (red gradient) and the label becomes
+    ``"LLM (stalled)"`` — v0.9.5 split #1 / #2 / #3. The stall hint is
+    UI-only; the hard timeout is enforced by
+    :class:`~neutrix.context_manager.ContextManager`'s watchdog.
     """
     if state == State.IDLE:
         return []
+    is_stalled = (
+        state == State.AWAITING_LLM
+        and last_progress_at is not None
+        and (time.monotonic() - last_progress_at) > stall_threshold_s
+    )
     if state == State.AWAITING_LLM:
-        label = "LLM"
+        label = "LLM (stalled)" if is_stalled else "LLM"
     elif state == State.AWAITING_EXECUTOR:
         pending = store.pending_tool_calls
         label = f"tool: {pending[0].name}" if pending else "tool"
@@ -243,7 +295,8 @@ def format_heartbeat(
         label = "cancelling…"
     else:  # pragma: no cover - defensive for future states
         label = state.value
-    glyph_style = HEARTBEAT_BRIGHTNESS_CYCLE[tick % HEARTBEAT_CYCLE_FRAMES]
+    cycle = HEARTBEAT_STALLED_CYCLE if is_stalled else HEARTBEAT_BRIGHTNESS_CYCLE
+    glyph_style = cycle[tick % HEARTBEAT_CYCLE_FRAMES]
     return [
         (glyph_style, f"{HEARTBEAT_GLYPH} "),
         (HEARTBEAT_LABEL_STYLE, f"{label}\n"),
@@ -745,7 +798,11 @@ class TerminalChat:
     def _above_input(self):
         """Content rendered directly above the input cursor."""
         heartbeat = format_heartbeat(
-            self.ctx.state, self.store, self._heartbeat_tick
+            self.ctx.state,
+            self.store,
+            self._heartbeat_tick,
+            last_progress_at=self.ctx.last_progress_at,
+            stall_threshold_s=stall_threshold_for(self.ctx.slot.llm_timeout_s),
         )
         tasks = self.store.tasks
         queued = self.store.queued_user_messages

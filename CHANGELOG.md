@@ -4,6 +4,90 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.5] — 2026-05-28
+
+### Added
+- **LLM stall hint (single-knob, derived from the timeout).** While
+  ``ContextManager`` is parked in ``AWAITING_LLM`` and no response
+  has arrived after ``stall_threshold_for(slot.llm_timeout_s)`` —
+  ``max(10.0, llm_timeout_s / 6)``, ≈50 s at the 300 s default — the
+  heartbeat glyph palette swaps from the v0.9.4 grayscale gradient to
+  a parallel red gradient (``HEARTBEAT_STALLED_CYCLE``, anchors
+  ``rgb(60,0,0) → rgb(255,60,60)``, same 40-frame raised-cosine
+  breath) and the label flips ``● LLM`` → ``● LLM (stalled)``. UI
+  only — no abort. Deriving the stall from the hard timeout means
+  raising ``llm_timeout_s`` for a slow model pushes the hint out with
+  it, so it stops flickering on healthy-but-slow calls. Renderer-side
+  math on a new ``ContextManager.last_progress_at`` field; suppressed
+  during ``AWAITING_EXECUTOR`` (tool runs have their own latency
+  budget).
+- **LLM hard timeout (300 s default).** A background watchdog task
+  spawned on every ``AWAITING_LLM`` entry sleeps ``slot.llm_timeout_s``
+  then fires ``cm.cancel(reason='timeout')``. The cancel flows through
+  the v0.9.3 ``llm.stop()`` machinery; the drive loop's
+  ``CancelledError`` catch appends a fresh assistant message
+  ``[LLM timeout after Ns]`` and returns CM to ``IDLE``. A
+  ``logger.error("LLM call timed out after {}s", elapsed)`` line
+  records the event. The 300 s default replaces the SDK's 600 s
+  (10 min) default silent hang while leaving headroom for slow hosted
+  reasoning models such as deepseek-v4-pro; per-slot override tunes it
+  further.
+- **Per-slot ``llm_timeout_s`` YAML field.** Added to the slot
+  schema; default ``300.0`` when absent. A fast hosted slot can be
+  tightened; a slow local model can be given more headroom.
+  ``llm_timeout_s: 600.0`` style is parsed as float; non-numeric or
+  non-positive values raise ``ConfigError`` at slot resolution.
+- **``CancelReason`` literal + ``cancel(reason=...)`` API.** The
+  v0.9.3 ``cm.cancel()`` gained a ``reason: Literal['user',
+  'timeout']`` kwarg (default ``'user'``); ``CancelEvent`` carries
+  the same field. ``reason='user'`` keeps the v0.9.3 cancel-as-steer
+  ``[interrupted by user]`` marker; ``reason='timeout'`` skips the
+  user marker and lets the drive loop's ``_finalize_cancel`` append
+  the timeout assistant message instead.
+
+### Changed
+- **``format_heartbeat`` signature.** Added keyword-only
+  ``last_progress_at: float | None = None`` and
+  ``stall_threshold_s: float`` (default the
+  ``HEARTBEAT_STALL_FLOOR_S`` floor). Existing v0.9.4 callers (and
+  the v0.9.4 unit tests) work unchanged because the kwargs default
+  to "stall hint off." The live caller passes
+  ``stall_threshold_for(slot.llm_timeout_s)``.
+- **``ContextManager._do_cancel``.** The
+  ``_append_user_message(INTERRUPTED_BY_USER_MARKER)`` step is now
+  gated on ``self.cancel_reason == 'user'``. Reads/writes to
+  ``cancel_reason`` are ordered so a no-op second cancel cannot
+  clobber the reason set by the first.
+- **Heartbeat refresh 10 Hz → 120 Hz (bundled polish).** The
+  breathing glyph now updates 120×/s (``HEARTBEAT_REFRESH_HZ = 120``,
+  ``HEARTBEAT_CYCLE_FRAMES = 480``, ~8.33 ms/frame) instead of the
+  v0.9.4 10×/s. 10 fps sat below the smooth-motion perception floor,
+  so the fade read as discrete steps; 120 Hz makes it a continuous
+  glow. The 4 s breath period (resting-calm ~15 BPM) and the
+  raised-cosine curve are unchanged. Unrelated to the LLM error
+  surface — rides this release per the forward-only versioning rule.
+
+### Notes
+- **No retry after a watchdog timeout — by design.** Transient HTTP
+  failures (429 / 5xx / 529) are retried by the openai SDK
+  (``max_retries=2``) *inside* the timeout envelope, so the cases
+  where a retry helps are already covered invisibly. The watchdog
+  cancel raises ``asyncio.CancelledError``, which is outside the
+  SDK's retry path; a timeout means "the full budget elapsed,"
+  which on a generous 300 s budget signals a real hang, not a
+  transient blip — auto-retrying would just risk doubling the wait.
+  The user resends (optionally after ``/fast`` / ``/strong``).
+- The deriving of the stall threshold from ``llm_timeout_s`` keeps
+  the SDK's in-envelope retry chain (a 5xx backoff cycle, typically
+  <15 s) well under the stall threshold (~50 s at the default), so
+  retries no longer paint a transient red hint. The clean
+  idle-vs-working distinction still lands with v0.10.1
+  streaming-per-chunk ``last_progress_at`` bumping.
+
+See [docs/PRDs/v0.9.5-llm-error-surface.md](docs/PRDs/v0.9.5-llm-error-surface.md)
+and [docs/splits/v0.9.5-llm-error-surface.html](docs/splits/v0.9.5-llm-error-surface.html)
+(12 split-point decisions).
+
 ## [v0.9.4] — 2026-05-27
 
 ### Added

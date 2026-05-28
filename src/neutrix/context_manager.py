@@ -57,10 +57,11 @@ not optional.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from loguru import logger
 
@@ -86,6 +87,8 @@ TASK_MANAGEMENT_TOOLS = frozenset({"TaskCreate", "TaskUpdate"})
 
 LLM_ERROR_PREFIX = "[LLM error: "
 
+CancelReason = Literal["user", "timeout"]
+
 
 class State(str, Enum):
     """Conversation-loop state. See module docstring for transitions."""
@@ -108,12 +111,17 @@ class UserMessageEvent:
 
 @dataclass(frozen=True)
 class CancelEvent:
-    """User pressed Esc / Ctrl+C-while-busy.
+    """User pressed Esc / Ctrl+C-while-busy, or the LLM watchdog fired.
 
     Handled synchronously by :py:meth:`ContextManager.handle_event` —
     the UI can also call :py:meth:`ContextManager.cancel` directly
-    from a sync key binding.
+    from a sync key binding. ``reason`` distinguishes the user-initiated
+    cancel (v0.9.3 ``[interrupted by user]`` marker) from the
+    timeout-watchdog cancel (v0.9.5 ``[LLM timeout after Ns]``
+    assistant marker).
     """
+
+    reason: CancelReason = "user"
 
 
 @dataclass(frozen=True)
@@ -182,7 +190,10 @@ class ContextManager:
     use_tools: bool = True
     messages: list[dict[str, Any]] = field(default_factory=list)
     state: State = field(default=State.IDLE, init=False)
+    last_progress_at: float | None = field(default=None, init=False)
+    cancel_reason: CancelReason = field(default="user", init=False)
     _drive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _llm_timeout_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # The system prompt anchors message[0]. Seed both messages and
@@ -224,6 +235,9 @@ class ContextManager:
         raises for a normal user-initiated cancel.
         """
         if isinstance(event, CancelEvent):
+            if self.state in (State.IDLE, State.CANCELLING):
+                return
+            self.cancel_reason = event.reason
             self._do_cancel()
             return
         if isinstance(event, UserMessageEvent):
@@ -246,11 +260,20 @@ class ContextManager:
             return
         logger.warning("ContextManager: unknown event {!r}", event)
 
-    def cancel(self) -> bool:
+    def cancel(self, *, reason: CancelReason = "user") -> bool:
         """Sync convenience for :class:`CancelEvent`. Returns True iff
-        something was actually in flight (state was non-IDLE)."""
+        something was actually in flight (state was non-IDLE).
+
+        ``reason="user"`` (the default) replays the v0.9.3 cancel-as-steer
+        behavior — an ``[interrupted by user]`` user marker is appended
+        to ``messages`` so the next LLM call sees the steer.
+        ``reason="timeout"`` is invoked by the LLM watchdog: no user
+        marker, and the drive loop appends a fresh
+        ``[LLM timeout after Ns]`` assistant message on unwind.
+        """
         if self.state in (State.IDLE, State.CANCELLING):
             return False
+        self.cancel_reason = reason
         self._do_cancel()
         return True
 
@@ -289,10 +312,15 @@ class ContextManager:
         # parked I/O wakes up.
         self.executor.cancel()
         self.llm.stop()
-        # Append the marker. Orphan tool_use in the latest assistant
-        # message is intentionally NOT repaired here — the pairing
-        # layer in llm.py handles it on the next API send.
-        self._append_user_message(INTERRUPTED_BY_USER_MARKER)
+        # User-initiated cancel: append the steer marker. Timeout
+        # cancels skip the user marker — the drive loop's
+        # ``_finalize_cancel`` will append the
+        # ``[LLM timeout after Ns]`` assistant message instead.
+        # Orphan tool_use in the latest assistant message is
+        # intentionally NOT repaired here — the pairing layer in
+        # llm.py handles it on the next API send.
+        if self.cancel_reason == "user":
+            self._append_user_message(INTERRUPTED_BY_USER_MARKER)
         # Cancel the drive task so any asyncio.to_thread parked on a
         # pure-compute tool is abandoned (PRD non-goal — the daemon
         # thread runs to completion; its result is silently dropped).
@@ -352,22 +380,31 @@ class ContextManager:
         try:
             while True:
                 self.state = State.AWAITING_LLM
+                self.last_progress_at = time.monotonic()
+                self._llm_timeout_task = asyncio.create_task(
+                    self._llm_timeout_watchdog()
+                )
                 self._maybe_inject_system_reminder()
                 try:
-                    assistant_msg = await self._call_llm()
-                except asyncio.CancelledError:
-                    self._consume_cancel()
-                    return
-                except Exception as exc:
-                    err = _compact_error(exc)
-                    logger.warning("LLM call failed: {}", err)
-                    self._append_assistant_message(
-                        {
-                            "role": "assistant",
-                            "content": f"{LLM_ERROR_PREFIX}{err}]",
-                        }
-                    )
-                    return
+                    try:
+                        assistant_msg = await self._call_llm()
+                    except asyncio.CancelledError:
+                        self._consume_cancel()
+                        self._finalize_cancel()
+                        return
+                    except Exception as exc:
+                        err = _compact_error(exc)
+                        logger.warning("LLM call failed: {}", err)
+                        self._append_assistant_message(
+                            {
+                                "role": "assistant",
+                                "content": f"{LLM_ERROR_PREFIX}{err}]",
+                            }
+                        )
+                        return
+                finally:
+                    self._cancel_watchdog()
+                    self.last_progress_at = None
 
                 if self.state == State.CANCELLING:
                     return
@@ -404,6 +441,59 @@ class ContextManager:
             return
         if cancelling > 0:
             task.uncancel()
+
+    async def _llm_timeout_watchdog(self) -> None:
+        """Background task: cancel the LLM call after ``slot.llm_timeout_s``.
+
+        Spawned on every :attr:`State.AWAITING_LLM` entry; cancelled by
+        :py:meth:`_cancel_watchdog` on exit (success, error, or
+        user-cancel) so it never fires after the LLM has already
+        finished. Forward-compatible with v0.10.1 streaming: the same
+        ``last_progress_at`` field will be bumped on each stream chunk
+        so this watchdog can be reshaped to "no progress for Ns" without
+        renaming.
+
+        The post-sleep state guard handles the rare LLM-responded-
+        microseconds-before-timeout race: if the state has already
+        moved out of AWAITING_LLM, the watchdog quietly retires.
+        """
+        try:
+            await asyncio.sleep(self.slot.llm_timeout_s)
+        except asyncio.CancelledError:
+            return
+        if self.state != State.AWAITING_LLM:
+            return
+        elapsed = self.slot.llm_timeout_s
+        logger.error("LLM call timed out after {}s", elapsed)
+        self.cancel(reason="timeout")
+
+    def _cancel_watchdog(self) -> None:
+        task = self._llm_timeout_task
+        self._llm_timeout_task = None
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
+
+    def _finalize_cancel(self) -> None:
+        """Per-reason cleanup after the drive task absorbs a cancel.
+
+        For ``reason="user"`` the v0.9.3 ``[interrupted by user]`` marker
+        was already appended in :py:meth:`_do_cancel`; nothing more to
+        do here. For ``reason="timeout"`` no marker was appended (the
+        user did not interrupt), so the drive loop appends a fresh
+        ``[LLM timeout after Ns]`` assistant message that the next
+        transcript render picks up. ``cancel_reason`` resets to the
+        default so a later turn does not inherit the prior reason.
+        """
+        if self.cancel_reason == "timeout":
+            elapsed = int(self.slot.llm_timeout_s)
+            self._append_assistant_message(
+                {
+                    "role": "assistant",
+                    "content": f"[LLM timeout after {elapsed}s]",
+                }
+            )
+        self.cancel_reason = "user"
 
     async def _call_llm(self) -> dict[str, Any]:
         """Make one LLM round; return the assistant message dict."""

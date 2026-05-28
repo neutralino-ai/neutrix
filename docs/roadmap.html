@@ -207,16 +207,21 @@
       User-reported during v0.9.4 dogfooding: when the LLM API hangs
       silently, the heartbeat keeps breathing but neither neutrix
       nor the LLM is making progress, and the user has no signal
-      until the SDK's ~10-minute default timeout fires. Two-layer
-      fix matching CC: ~5&nbsp;s of silence → heartbeat color shift
-      + <code>● LLM (stalled)</code> label (UI hint); ~60&nbsp;s →
-      hard abort + inline assistant error message.
+      until the SDK's ~10-minute default timeout fires. Two layers:
+      ~50&nbsp;s of silence → heartbeat palette swap to red +
+      <code>● LLM (stalled)</code> label (UI hint, no abort);
+      ~300&nbsp;s → background watchdog fires
+      <code>cm.cancel(reason='timeout')</code>, transcript records
+      <code>[LLM timeout after 300s]</code>. Per-slot tunable via
+      a new <code>llm_timeout_s</code> YAML field (default 300&nbsp;s);
+      the stall hint is derived as <code>max(10, timeout/6)</code>.
+      Forward-compatible with v0.10.1 streaming
+      (<a href="splits/v0.9.5-llm-error-surface.html">12 split-point
+      decisions</a>; 9 Alternative / 3 Follow CC; thresholds revised
+      at acceptance for slow models).
     </small>
   </span>
-  <span class="badges">
-    <span class="badge p0">P0</span>
-    <span class="badge planned">skeleton</span>
-  </span>
+  <span class="badge shipped">shipped</span>
 </div>
 
 <div class="entry">

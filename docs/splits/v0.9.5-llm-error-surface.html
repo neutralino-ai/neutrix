@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.9.5 splits — LLM error surface</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6a6a6a;
+    --dim: #9a9a9a;
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --border: #e3e3dc;
+    --accent: #b14a00;
+    --shipped: #2f7d32;
+    --inflight: #b14a00;
+    --planned: #6a6a6a;
+    --open: #b14a00;
+    --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 {
+    font-size: 24px;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  .tagline {
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .note {
+    color: var(--dim);
+    margin: 0 0 24px;
+    font-size: 13px;
+  }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+  .split {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin: 0 0 14px;
+  }
+  .split .head {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .split .num {
+    font-weight: 600;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .split .name {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 4px 16px;
+    margin: 0;
+    font-size: 14px;
+  }
+  .split dt {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    padding-top: 5px;
+  }
+  .split dd {
+    margin: 0 0 8px;
+    color: var(--fg);
+  }
+  .split dd ul {
+    margin: 4px 0;
+    padding-left: 20px;
+  }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); font-style: normal; }
+  .split .recommend { color: var(--accent); font-style: normal; }
+  .quote {
+    color: var(--muted);
+    font-style: italic;
+  }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 48px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.9.5 splits — LLM error surface (stalled / timeout / inline error)</h1>
+<p class="tagline">
+  Two-layer feedback when the LLM API is slow or hung: a soft UI hint
+  at ~5&nbsp;s of silence, a hard abort at ~60&nbsp;s. Pure addition
+  to the v0.9.4 heartbeat + the existing
+  <code>LLM_ERROR_PREFIX</code> catch in
+  <code>ContextManager._drive</code>.
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this file
+  is the durable record of the split-point discussion that happens
+  <strong>before</strong> the PRD is drafted. CC source under
+  <code>/datafs/users/dingxf/anthropic/cc2/src</code>. Twelve split
+  points are all now <span class="badge decided">decided</span> as
+  of 2026-05-27; the v0.9.5 PRD's <code>## Claude Code reference</code>
+  section embeds the summary. Decision labels follow the rule:
+  <strong>Follow CC</strong> / <strong>Alternative</strong> /
+  <strong>User-directed different</strong> / <strong>No CC analog</strong>.
+</p>
+
+<p class="note">
+  <strong>Tally:</strong> 3 <em>Follow CC</em> (#10, #11, #12) &middot;
+  9 <em>Alternative</em> (#1–9). The Alternatives cluster around
+  the non-streaming v0.9.x state: where CC's design is tuned for
+  per-token streaming (3&nbsp;s stall, fade animation, env-var-only
+  config, SDK-level timeout), we adapt for one-big-await semantics
+  (5&nbsp;s, pulse on red palette, YAML per-slot config, background
+  watchdog through the v0.9.3 cancel infrastructure). The watchdog
+  choice (split #7) is the architecturally significant one: it makes
+  the cancel and timeout paths share machinery, so v0.10.1 streaming
+  can extend the same field (<code>last_progress_at</code>) and the
+  same watchdog without redesign.
+</p>
+
+<h2>Context — what CC does, in one paragraph</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">CC's two-layer error surface, summarized</span>
+    <span class="badge decided">survey</span>
+  </div>
+  <dl>
+    <dt>Soft stall hint</dt>
+    <dd>
+      <strong>3&nbsp;s</strong> of no streaming tokens →
+      <code>isStalled</code> flag flips; spinner intensity rises and
+      fades over a further 2&nbsp;s; clears on the next chunk. Hardcoded
+      threshold; not user-tunable.
+      <code>cc2/src/components/Spinner/useStalledAnimation.ts:42-44</code>.
+      Suppressed while a tool is active.
+    </dd>
+    <dt>Streaming watchdog</dt>
+    <dd>
+      Default <strong>90&nbsp;s</strong> of no SSE bytes → fetch
+      controller aborted, <code>APIConnectionTimeoutError("Request
+      timed out")</code> raised. Opt-in via
+      <code>CLAUDE_ENABLE_STREAM_WATCHDOG</code>; threshold via
+      <code>CLAUDE_STREAM_IDLE_TIMEOUT_MS</code>.
+      <code>cc2/src/services/api/claude.ts:1877-1878</code>,
+      <code>:2334</code>.
+    </dd>
+    <dt>HTTP timeout</dt>
+    <dd>
+      Default <strong>600&nbsp;s</strong> on the SDK client, set at
+      construction. Configurable via <code>API_TIMEOUT_MS</code>
+      env var.
+      <code>cc2/src/services/api/client.ts:144</code>. Non-streaming
+      fallback uses a tighter <strong>120&nbsp;s (remote) /
+      300&nbsp;s (local)</strong> default.
+      <code>cc2/src/services/api/claude.ts:807-810</code>.
+    </dd>
+    <dt>Auto-retry</dt>
+    <dd>
+      429 / 5xx / 529 → exponential backoff
+      (<code>BASE_DELAY_MS = 500</code>; 2^attempt; capped at 32&nbsp;s)
+      with 25% random jitter. <code>Retry-After</code> header
+      overrides. Timers reset per attempt; up to
+      <code>maxRetries</code> attempts.
+      <code>cc2/src/services/api/withRetry.ts:55,543-547,696</code>.
+    </dd>
+    <dt>Error surface</dt>
+    <dd>
+      A synthetic <code>AssistantMessage</code> with
+      <code>isApiErrorMessage: true</code> is appended to the
+      transcript — same render path as a real assistant message but
+      flagged for analytics. Content is the literal string
+      <code>"Request timed out"</code> for
+      <code>APIConnectionTimeoutError</code>.
+      <code>cc2/src/services/api/errors.ts:169,435-442</code>.
+    </dd>
+    <dt>Cancel vs timeout</dt>
+    <dd>
+      Same transcript path — both render as
+      <code>isApiErrorMessage</code> synthetic messages — but
+      different error classification (<code>"aborted"</code> vs
+      <code>"api_timeout"</code>) for analytics. User sees only the
+      content text.
+      <code>cc2/src/services/api/errors.ts:967-977</code>.
+    </dd>
+  </dl>
+</div>
+
+<h2>Context — what neutrix has today (v0.9.4)</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">neutrix LLM surface, summarized</span>
+    <span class="badge decided">survey</span>
+  </div>
+  <dl>
+    <dt>LLM call</dt>
+    <dd>
+      <code>OpenAIChatLLM.stream_response</code> at
+      <code>src/neutrix/llm.py:185</code> wraps
+      <code>self._client.chat.completions.create(...)</code> in
+      <code>asyncio.ensure_future</code>, awaits the task, yields one
+      <code>LLMEvent</code>. <code>stream=False</code> (v0.9.3); no
+      partial chunks.
+    </dd>
+    <dt>No timeout</dt>
+    <dd>
+      <code>AsyncOpenAI(base_url=..., api_key=...)</code> at
+      <code>llm.py:183</code> — no <code>timeout=</code>. Falls back
+      to the openai SDK default ~600&nbsp;s (10&nbsp;min). This is the
+      root cause of the user-observed "LLM dead, neutrix waiting
+      forever" symptom.
+    </dd>
+    <dt>Cancel path</dt>
+    <dd>
+      <code>OpenAIChatLLM.stop()</code> at
+      <code>llm.py:226</code> calls
+      <code>task.cancel()</code> on the in-flight create-task. The
+      parked <code>await</code> in <code>stream_response</code>
+      raises <code>CancelledError</code>; the
+      <code>ContextManager._drive</code> loop at
+      <code>context_manager.py:358</code> catches it via
+      <code>_consume_cancel</code>.
+    </dd>
+    <dt>Error catch</dt>
+    <dd>
+      <code>context_manager.py:361-370</code> — any
+      <code>Exception</code> from <code>_call_llm</code> becomes an
+      assistant message <code>"{LLM_ERROR_PREFIX}{err}]"</code> with
+      <code>LLM_ERROR_PREFIX = "[LLM error: "</code>. Returns from
+      <code>_drive</code>; CM state → IDLE.
+    </dd>
+    <dt>Heartbeat</dt>
+    <dd>
+      <code>format_heartbeat</code> at
+      <code>src/neutrix/terminal_chat.py:220</code> reads
+      <code>state</code> and renders a single breathing
+      <code>●</code> + a state-derived label
+      (<code>● LLM</code> / <code>● tool: {name}</code> /
+      <code>● cancelling…</code>). The breathing animation comes from
+      <code>HEARTBEAT_BRIGHTNESS_CYCLE</code>; pure renderer, no new
+      store fields. Today the same affordance shows whether the LLM
+      is computing or silently hung.
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">1.</span>
+    <span class="name">Stall threshold — how long before the soft hint fires?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      <strong>3&nbsp;s</strong> of no streaming tokens. Hardcoded;
+      calibrated for the streaming path where any silence longer than
+      typical inter-token spacing is suspicious.
+      <code>useStalledAnimation.ts:42</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>3&nbsp;s</strong> — mirror CC. Aggressive for our
+          non-streaming path; ordinary fast-model responses (~2–4&nbsp;s)
+          may briefly flicker the stall affordance.</li>
+        <li><strong>5&nbsp;s</strong> — skeleton PRD direction; a
+          generous floor above typical fast-completion latency.</li>
+        <li><strong>8&nbsp;s</strong> — only fires after most models
+          would have answered. Lower false-positive rate but the user
+          stares longer before they get a signal.</li>
+        <li><strong>Configurable, default 5&nbsp;s</strong> — env var
+          <code>NEUTRIX_LLM_STALL_HINT_MS</code> for the slow-model
+          power user; ships with a sensible default.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — 5&nbsp;s, hardcoded for v0.9.5</strong>.
+      CC's 3&nbsp;s is calibrated for streaming; without streaming
+      we'd flicker the hint on routine fast calls (DeepSeek-V3,
+      gpt-4o-mini commonly answer in 2–4&nbsp;s for short prompts).
+      Keep it hardcoded for v0.9.5 to match CC's discipline; if usage
+      shows a model regularly straddles the threshold, promote to an
+      env var in a follow-up.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — 5&nbsp;s, hardcoded.</strong> CC's
+      3&nbsp;s was calibrated for streaming; our non-streaming
+      path needs more headroom above routine fast-completion
+      latency. Hardcoded to match CC's discipline; promote to env
+      var only if usage shows the need.
+      <br><br>
+      <strong>Revised at acceptance (2026-05-28):</strong> the
+      fixed 5&nbsp;s flickered on healthy slow models
+      (deepseek-v4-pro). Replaced by a <em>derived</em> threshold
+      <code>max(10, llm_timeout_s / 6)</code> ≈ 50&nbsp;s at the
+      300&nbsp;s default — a single knob that scales the hint with
+      the per-slot timeout. Code-only tiny tweak per user direction.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">2.</span>
+    <span class="name">Stall hint visual — what changes when the hint fires?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Spinner intensity ramps over 2&nbsp;s; subtle visual shift, no
+      label change. The verb beneath the spinner stays the same.
+      <code>useStalledAnimation.ts:42-44</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Color shift only</strong> — heartbeat's
+          truecolor gradient switches from amber to red; label
+          unchanged. Mirrors CC most closely.</li>
+        <li><strong>Label suffix only</strong> — <code>● LLM</code>
+          becomes <code>● LLM (stalled)</code>; color unchanged.
+          Unambiguous in screen-readers / monochrome terminals.</li>
+        <li><strong>Both</strong> — color shift AND label suffix.
+          Glanceable + accessible.</li>
+        <li><strong>Glyph swap</strong> — <code>●</code> becomes
+          something else (e.g. <code>○</code> or <code>!</code>). More
+          intrusive than a color shift; risks reading as "broken".</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Both</strong>. Color shift gives the glanceable signal
+      ("something is different"); label suffix names what's happening
+      ("it's stalled, not just slow"). Accessibility cost is near-zero
+      since the label was already there. CC ships color-only because
+      the spinner's verb text would be visually noisy to swap mid-cycle;
+      our static <code>LLM</code> label has no such constraint.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — both color + label.</strong> Gradient
+      shifts amber→red, label <code>● LLM</code> becomes
+      <code>● LLM (stalled)</code>. Glanceable + accessible. CC's
+      color-only constraint (busy verb text) doesn't apply to our
+      static label.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">3.</span>
+    <span class="name">Stall hint smoothing — fade-in or hard switch?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Linear ramp over 2&nbsp;s after the 3&nbsp;s threshold.
+      <code>useStalledAnimation.ts:42-44</code>. Gives a "creeping
+      concern" feel rather than a startle.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Hard switch</strong> — at 5&nbsp;s, the
+          gradient palette is replaced atomically with the
+          stalled palette. Simplest; matches v0.9.4's discrete
+          state-driven approach.</li>
+        <li><strong>Fade-in over 1–2&nbsp;s</strong> — interpolate
+          between the amber and red gradients. Mirrors CC's feel; one
+          extra <code>HEARTBEAT_STALLED_FADE_CYCLE</code> table.</li>
+        <li><strong>Pulse</strong> — keep the breathing animation but
+          on a red gradient. Reads "stalled but still alive."</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — pulse (continue breathing on red palette)</strong>.
+      The breathing rhythm reads as "we're still here, just waiting"
+      and matches v0.9.4's Steve-Jobs-mode decision: the dot keeps
+      breathing, only the palette changes. Mechanically: at stall, the
+      tick lookup switches from <code>HEARTBEAT_BRIGHTNESS_CYCLE</code>
+      to a parallel <code>HEARTBEAT_STALLED_CYCLE</code>. No fade, no
+      new state machine. CC's fade is calibrated for streaming where
+      the spinner already moves; for our discrete state-machine
+      heartbeat, the palette swap is the clean analog.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — pulse on red palette.</strong> The
+      breathing rhythm keeps going; only the palette swaps. No
+      fade scaffolding. Matches v0.9.4's Steve-Jobs breathing-dot
+      decision.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">4.</span>
+    <span class="name">Stall detection mechanism — how do we know we're stalled?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      A React effect compares <code>Date.now() - lastTokenAt</code>
+      every render; the spinner already re-renders on a 50&nbsp;ms
+      animation clock, so the check is free.
+      <code>useStalledAnimation.ts:34-44</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Renderer-side math.</strong> Add
+          <code>awaiting_llm_since: float | None</code> to
+          <code>ContextManager</code> (or <code>ChatStore</code>); set
+          on <code>AWAITING_LLM</code> entry, clear on exit.
+          <code>format_heartbeat</code> reads it,
+          computes <code>time.monotonic() - since &gt; 5.0</code>, and
+          chooses palette/label. No new tasks; the heartbeat already
+          ticks at 100&nbsp;ms.</li>
+        <li><strong>Background timer task.</strong>
+          <code>asyncio.create_task(_stall_timer())</code> on state
+          entry; sleeps 5&nbsp;s; sets <code>store.stalled = True</code>;
+          cancelled on state exit.</li>
+        <li><strong>New lifecycle event.</strong>
+          <code>llm_stalled</code> event with a reducer entry.
+          Symmetric with v0.9.0's existing events.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Renderer-side math.</strong> The heartbeat already
+      re-renders every ~100&nbsp;ms; the check is one subtraction. No
+      new background tasks (which means no new cancel surfaces). The
+      timestamp lives on <code>ContextManager</code> next to
+      <code>state</code> — set at the same point the state transitions
+      to <code>AWAITING_LLM</code> — so the source of truth stays
+      colocated. New events earn their keep when multiple consumers
+      need them; here only the heartbeat reads the stall.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — renderer-side math, but with a
+      forward-looking field name.</strong> The mechanism is the
+      renderer-side computation as recommended, but the field is
+      named <code>last_progress_at: float | None</code> (not
+      <code>awaiting_llm_since</code>) so v0.10.1 streaming can
+      bump it on each chunk arrival without renaming. Lives on
+      <code>ContextManager</code> alongside <code>state</code>;
+      heartbeat takes it as a parameter and computes
+      <code>monotonic() - last_progress_at &gt; 5.0</code>. v0.9.5
+      sets it once on AWAITING_LLM entry; v0.10.1 also bumps on
+      stream chunks. Same field, same renderer, same math —
+      semantics evolve. User instruction: <span class="quote">"better
+      align with future stream design \[…\] think like an
+      Architect"</span> (2026-05-27).
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">5.</span>
+    <span class="name">Hard timeout duration — how long before we abort?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      <strong>90&nbsp;s</strong> streaming-idle (opt-in);
+      <strong>120&nbsp;s</strong> non-streaming remote /
+      <strong>300&nbsp;s</strong> non-streaming local;
+      <strong>600&nbsp;s</strong> HTTP-level upper bound.
+      Multiple layers, all env-tunable.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>60&nbsp;s</strong> — skeleton PRD direction.
+          Aggressive vs CC; trades fast retry for occasional
+          false-abort on legitimate slow calls.</li>
+        <li><strong>90&nbsp;s</strong> — match CC streaming-idle.</li>
+        <li><strong>120&nbsp;s</strong> — match CC non-streaming
+          remote. Safer for slow models; longer wait under network
+          failure.</li>
+        <li><strong>Configurable, default 60&nbsp;s</strong> — env var
+          for the user who needs longer.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Configurable, default 60&nbsp;s</strong>. The skeleton
+      PRD's 60&nbsp;s reflects daily-blocking pain from the openai
+      SDK's 600&nbsp;s default; this is the user-perceived "I'd rather
+      see the error and resend than keep waiting" sweet spot. Slow
+      models (large local quants, geographically distant inference)
+      will need tuning, so ship the env var
+      <code>NEUTRIX_LLM_TIMEOUT_S</code> at v0.9.5 rather than
+      retrofitting later. CC's 90/120/300 layering needs to be replayed
+      only if we re-enable streaming (v0.10.1).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>60&nbsp;s default (paired with split #6).</strong>
+      Value is 60&nbsp;s; configurability lives on the per-slot
+      YAML field (split #6), not an env var. CC's 90/120/300
+      layering replays at v0.10.1 if streaming-idle gets its own
+      threshold.
+      <br><br>
+      <strong>Revised at acceptance (2026-05-28):</strong> 60&nbsp;s
+      was too aggressive for slow hosted reasoning models — raised
+      to <strong>300&nbsp;s default</strong> (CC's local-model tier),
+      still aborting inside the SDK's 600&nbsp;s read-timeout.
+      Per-slot <code>llm_timeout_s</code> override unchanged.
+      Code-only tiny tweak per user direction.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">6.</span>
+    <span class="name">Configurability surface — env var, YAML, or both?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Env vars exclusively
+      (<code>API_TIMEOUT_MS</code>,
+      <code>CLAUDE_STREAM_IDLE_TIMEOUT_MS</code>,
+      <code>CLAUDE_ENABLE_STREAM_WATCHDOG</code>); no settings.json
+      keys for these.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Env var only</strong> — match CC. Fast to
+          override per-session.</li>
+        <li><strong>YAML config in our existing slot file</strong> —
+          per-slot timeout (slow local model gets a longer timeout
+          than a hosted-API slot).</li>
+        <li><strong>Both</strong> — YAML for defaults, env var
+          override. Matches the openai SDK's own pattern.</li>
+        <li><strong>Neither — hardcoded</strong> — fewest surfaces,
+          but doesn't survive the slow-model use case.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Env var only for v0.9.5</strong>. YAML per-slot timeout
+      is the right long-term home but pulls in slot-schema migration
+      (existing user configs would need a default fallback) — out of
+      scope for a daily-blocking fix. Add YAML in a follow-up if the
+      slow-model audience grows. Matches CC's discipline of "env vars
+      for operator knobs; settings.json for product behavior."
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — YAML config (per-slot).</strong> Add a
+      <code>llm_timeout_s</code> field to the slot YAML schema;
+      default 60&nbsp;s when absent. Per-slot tuning is the natural
+      home (a slow local model gets a different timeout than a
+      hosted-API slot); env var deferred. Slot-schema migration is
+      additive (existing configs fall back to default), so the
+      "schema migration burden" the original recommendation feared
+      is small. Diverges from CC.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">7.</span>
+    <span class="name">Hard timeout enforcement path — where does the abort fire?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Two parallel mechanisms: (1) SDK client constructed with
+      <code>timeout: 600_000</code>
+      (<code>client.ts:144</code>) — fires inside the SDK,
+      raises <code>APIConnectionTimeoutError</code>; (2) explicit
+      <code>setTimeout</code> watchdog on the stream
+      (<code>claude.ts:1877</code>) aborts a fetch
+      <code>AbortController</code> on idle. Both bubble up to the
+      same error renderer.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>SDK <code>timeout=</code> at create-call.</strong>
+          Pass <code>timeout=60.0</code> to
+          <code>self._client.chat.completions.create(...)</code> at
+          <code>llm.py:204</code>. SDK raises
+          <code>openai.APITimeoutError</code> after 60&nbsp;s; existing
+          <code>except Exception</code> at
+          <code>context_manager.py:361</code> catches and renders via
+          <code>LLM_ERROR_PREFIX</code>. Zero new code paths.</li>
+        <li><strong><code>asyncio.wait_for(task, 60)</code> in
+          <code>stream_response</code>.</strong> Same outcome but the
+          timer lives in our code, not the SDK's. Useful if the SDK
+          timeout isn't honored by some backend; otherwise duplicate
+          plumbing.</li>
+        <li><strong>Background watchdog that calls
+          <code>self.stop()</code>.</strong> A
+          <code>create_task(_timeout(60))</code> on AWAITING_LLM entry
+          fires <code>OpenAIChatLLM.stop()</code> after 60&nbsp;s,
+          which the parked await reads as
+          <code>CancelledError</code>. Hijacks the cancel path; would
+          render as <code>[interrupted]</code> by accident unless we
+          distinguish.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>SDK <code>timeout=</code> at create-call.</strong>
+      Pass the timeout per-request (not at client construction) so an
+      env-var change takes effect on the next call without rebuilding
+      the client. The SDK raises a typed exception which the existing
+      <code>except Exception</code> catch surfaces as
+      <code>LLM_ERROR_PREFIX</code> — clean reuse of v0.9.3's error
+      path. Avoids hijacking the cancel pathway (split #9 stays
+      semantically distinct from cancel).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — background watchdog that calls
+      <code>cm.request_cancel(reason='timeout')</code>.</strong>
+      On AWAITING_LLM entry, spawn
+      <code>asyncio.create_task(_llm_timeout_watchdog())</code>
+      that sleeps <code>slot.llm_timeout_s</code> (default
+      60&nbsp;s) then invokes the same cancel infrastructure that
+      user-Esc uses, carrying a <code>reason='timeout'</code> flag.
+      Watchdog is cancelled on AWAITING_LLM exit (success, error,
+      or user-cancel). Forward-compatible with v0.10.1's
+      streaming-idle: the watchdog gets bumped on each stream
+      chunk arrival, so "no chunk for 90&nbsp;s" reuses the same
+      machinery. Reshapes split #9 — the transcript distinction
+      must now ride the <code>reason</code> flag, since both paths
+      converge on <code>stop()</code>. User instruction: align with
+      future stream design (2026-05-27).
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">8.</span>
+    <span class="name">Error message wording — what does the transcript actually say?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Literal <code>"Request timed out"</code> as the synthetic
+      <code>AssistantMessage</code> body.
+      <code>cc2/src/services/api/errors.ts:169</code>. Terse, no
+      duration, no recovery hint.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Match CC verbatim</strong> —
+          <code>[LLM error: Request timed out]</code> via the existing
+          <code>LLM_ERROR_PREFIX</code>. Symmetric with other LLM
+          errors.</li>
+        <li><strong>Include duration</strong> —
+          <code>[LLM timeout after 60s]</code>. User knows exactly
+          how long they waited and whether the threshold is too
+          aggressive.</li>
+        <li><strong>Include recovery hint</strong> —
+          <code>[LLM timeout after 60s. Resend your message or set
+          NEUTRIX_LLM_TIMEOUT_S.]</code>. More verbose but
+          actionable.</li>
+        <li><strong>Drop the prefix entirely</strong> — render as
+          a plain assistant message. Cleanest but loses the visual
+          marker that "this came from the system, not the LLM".</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — <code>[LLM timeout after Ns]</code>.</strong>
+      Uses the same <code>[LLM…]</code> bracketed-system-message shape
+      as <code>LLM_ERROR_PREFIX</code> so the visual category is
+      preserved, but distinguishes "timed out" from "errored" and
+      states the duration. Skip the recovery hint — users who care
+      about the env var find it in <code>--help</code>; the message
+      should be glanceable, not a tutorial. CC's terse style without
+      the duration would leave users wondering "was that 30 seconds
+      or 10 minutes?"
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — <code>[LLM timeout after 60s]</code>.</strong>
+      Bracketed-system-message shape preserves visual category;
+      duration baked in. No recovery tutorial in the body.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">9.</span>
+    <span class="name">Cancel vs timeout — same transcript path or distinct markers?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Both render as <code>isApiErrorMessage</code> synthetic
+      messages. Different error classification
+      (<code>"aborted"</code> vs <code>"api_timeout"</code>) for
+      analytics, but the user sees only the content text — and the
+      content text differs ("Request was aborted" vs "Request timed
+      out"). Same rendering path, different bodies.
+      <code>errors.ts:967-977</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Distinct markers (Recommended)</strong> — cancel
+          appends <code>[interrupted by user]</code> (v0.9.3,
+          unchanged); timeout appends a fresh assistant message
+          <code>[LLM timeout after Ns]</code>. User can scroll back
+          and immediately see which path fired.</li>
+        <li><strong>Unified <code>[interrupted: reason]</code></strong>
+          — <code>[interrupted by user]</code> stays;
+          <code>[interrupted: timeout]</code> for the abort. More
+          symmetric but loses the duration.</li>
+        <li><strong>Same body</strong> — both write
+          <code>[LLM error: …]</code>. Simplest; user reads the
+          exception text to distinguish.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Distinct markers.</strong> Cancel and timeout are
+      semantically different: cancel is the user's intentional steer
+      (v0.9.3 keeps the partial in-flight tool intent in history for
+      LLM re-read); timeout is "the LLM never spoke." The v0.9.3
+      cancel marker lives on the prior tool call or assistant message;
+      the timeout marker is a fresh assistant message with the
+      duration baked in. Different surfaces, different uses.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Alternative — reason flag on
+      <code>request_cancel()</code>.</strong>
+      <code>cm.request_cancel(reason: Literal['user', 'timeout']
+      = 'user')</code>. CM stores
+      <code>self.cancel_reason</code>; the CancelledError catch
+      in <code>_drive</code> reads it: <code>user</code> →
+      v0.9.3's <code>[interrupted by user]</code> marker;
+      <code>timeout</code> → fresh assistant message
+      <code>[LLM timeout after 60s]</code> (split #8). Single
+      broadcast path through <code>llm.stop()</code>; distinction
+      is on the receiving side. Reshape consequence of split #7.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">10.</span>
+    <span class="name">Auto-retry — do we retry transient failures?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Yes — <code>withRetry</code> wraps the API call: 429 / 5xx /
+      529 → exponential backoff with jitter; <code>Retry-After</code>
+      honored; up to <code>maxRetries</code> attempts.
+      <code>cc2/src/services/api/withRetry.ts:696</code>. The openai
+      Python SDK has analogous <code>max_retries=2</code> default
+      on the client.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>None for v0.9.5</strong> — skeleton PRD non-goal.
+          Hard abort fires on the first failure; user resends.</li>
+        <li><strong>SDK default (2 retries)</strong> — don't
+          override <code>max_retries</code>; let the openai SDK retry
+          429/5xx invisibly. Free, since the SDK already does it.</li>
+        <li><strong>Custom retry policy</strong> — match CC's
+          exponential + jitter + Retry-After.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>SDK default (2 retries).</strong> The openai Python SDK
+      already retries 429 / 5xx with backoff
+      (<code>AsyncOpenAI.max_retries = 2</code> by default). Leaving
+      it on is free; the only adjustment is making sure our 60&nbsp;s
+      timeout is the <em>total</em> envelope (per-attempt 60&nbsp;s
+      × 3 attempts would be 180&nbsp;s end-to-end, defeating the
+      point). Set <code>max_retries=0</code> if our 60&nbsp;s should
+      be the hard ceiling, or leave default if we want the retries
+      inside the envelope. Either way, document the choice. Skeleton
+      PRD's "None" is a defensible alternative; SDK-default is
+      strictly less work.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Follow SDK default — 2 retries.</strong> Because
+      the timeout enforcement (split #7) is our external watchdog,
+      not the SDK's <code>timeout=</code>, the SDK retries happen
+      <em>inside</em> our 60&nbsp;s envelope. A fast 5xx-retry
+      cycle finishes in &lt;15&nbsp;s; only true silent hangs
+      consume the full envelope. Clean composition: SDK handles
+      transient HTTP failures; our watchdog handles silent hangs.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">11.</span>
+    <span class="name">Stall hint during AWAITING_EXECUTOR — show or suppress?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Suppressed —
+      <code>isStalled = timeSinceLastToken &gt; 3000 &amp;&amp; !hasActiveTools</code>.
+      Tools run on a different latency budget; a 30&nbsp;s test run
+      shouldn't paint the heartbeat red.
+      <code>useStalledAnimation.ts:42</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Suppress (mirror CC)</strong> — stall hint and
+          hard timeout apply only in <code>AWAITING_LLM</code>. Tool
+          execution has its own affordance (the executor's stdout
+          line-streaming) and its own concept of "stuck."</li>
+        <li><strong>Apply to AWAITING_EXECUTOR too</strong> — a
+          long-running tool would also trigger the red heartbeat
+          after 5&nbsp;s. Unifies the affordance but creates
+          false positives for legitimate slow tools.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC — suppress in AWAITING_EXECUTOR.</strong> The
+      <code>awaiting_llm_since</code> timestamp is set only on
+      <code>AWAITING_LLM</code> entry; <code>AWAITING_EXECUTOR</code>
+      doesn't get a sibling timestamp. Tool stall is a different
+      problem (covered by the v0.9.2 tool-cancel path + the tool's
+      own progress reporting) and warrants its own design if a user
+      reports the pain.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC.</strong> Stall hint and hard timeout
+      apply only in AWAITING_LLM. <code>last_progress_at</code>
+      and the timeout watchdog are set/spawned only on
+      AWAITING_LLM entry. Tool stall is a future problem with
+      its own design.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">12.</span>
+    <span class="name">Logging — what does the operator see in the log?</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Stalls log nothing; timeouts log at <code>error</code> via
+      the central error reporter (<code>logError</code>).
+      <code>claude.ts:2334</code>, <code>errors.ts:169</code>.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Silent stall, ERROR timeout.</strong> Mirrors
+          CC. Stall is just UI noise; timeout is an operator-relevant
+          event.</li>
+        <li><strong>WARN stall, ERROR timeout.</strong> Easier
+          forensics — "the user complained about a stall at 14:32"
+          becomes greppable.</li>
+        <li><strong>Silent both.</strong> Smallest log footprint;
+          rely on the user's transcript for post-mortems.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>WARN stall, ERROR timeout.</strong> The stall hint
+      is rare enough (5&nbsp;s threshold) that the log spam is
+      bounded; making it greppable is worth the line cost when
+      debugging slow-model setups. Use the project's loguru convention
+      (<code>logger.warning("LLM call stalled at {}s",
+      elapsed)</code> and <code>logger.error("LLM call timed out
+      after {}s", elapsed)</code>).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC — silent stall, ERROR timeout.</strong>
+      Stall is UI noise; timeout is operator-relevant.
+      <code>logger.error("LLM call timed out after {}s",
+      elapsed)</code> on watchdog fire; no log line on stall hint
+      entry/exit.
+    </dd>
+  </dl>
+</div>
+
+<footer>
+  Source under <code>/datafs/users/dingxf/anthropic/cc2/src</code>.
+  This page is the durable record of the split-point survey for
+  v0.9.5; the PRD's <code>## Claude Code reference</code> section
+  embeds the summary once each split is decided.
+</footer>
+
+</body>
+</html>
