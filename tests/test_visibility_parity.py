@@ -20,8 +20,8 @@ from neutrix.config import Config, Slot
 from neutrix.context_manager import ContextManager
 from neutrix.executor import Executor
 from neutrix.llm import LLMEvent, LLMResponse
-from neutrix.store import ChatStore, MessageRecord
-from neutrix.terminal_chat import TerminalChat, ToolRecord
+from neutrix.store import ChatStore, MessageRecord, ToolRecord
+from neutrix.terminal_chat import TerminalChat, tool_record_summary
 
 _LONG_SYSTEM = "You are a meticulous assistant. " * 12  # > 200 B → folds
 
@@ -130,9 +130,9 @@ def test_subagent_label_on_agent_tool_result() -> None:
     """A folded result for the Agent tool reads 'subagent', not 'tool_result'."""
     agent_rec = ToolRecord(index=1, name="Agent", arguments="{}", result="x" * 500)
     plain_rec = ToolRecord(index=2, name="read_file", arguments="{}", result="y" * 500)
-    assert "subagent" in agent_rec.summary
-    assert "tool_result" not in agent_rec.summary
-    assert "tool_result" in plain_rec.summary
+    assert "subagent" in tool_record_summary(agent_rec)
+    assert "tool_result" not in tool_record_summary(agent_rec)
+    assert "tool_result" in tool_record_summary(plain_rec)
 
 
 @pytest.mark.asyncio

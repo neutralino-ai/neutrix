@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.3 splits — TUIView as pure renderer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --fg:#1a1a1a; --muted:#6a6a6a; --dim:#9a9a9a; --bg:#fafaf7;
+    --card:#fff; --border:#e3e3dc; --accent:#b14a00; --decided:#2f7d32; }
+  html { background: var(--bg); }
+  body { font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .tagline { color:var(--muted); margin:0 0 8px; font-size:14px; }
+  .note { color:var(--dim); margin:0 0 24px; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--muted); margin:32px 0 12px; font-weight:600; }
+  .split { background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:16px 18px; margin:0 0 14px; }
+  .split.flag { border-color:var(--accent); border-width:2px; }
+  .split .head { display:grid; grid-template-columns:36px 1fr auto; gap:12px;
+    align-items:baseline; margin-bottom:10px; }
+  .split .num { font-weight:600; color:var(--muted); }
+  .split .name { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    padding:3px 8px; border-radius:3px; font-weight:600; white-space:nowrap; }
+  .badge.decided { color:var(--decided); background:#e8f3e9; }
+  .split dl { display:grid; grid-template-columns:130px 1fr; gap:4px 16px; margin:0; font-size:14px; }
+  .split dt { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.06em; padding-top:5px; }
+  .split dd { margin:0 0 8px; }
+  .split .decision { color:var(--decided); }
+  .split .recommend { color:var(--accent); }
+  code { font:13px/1 ui-monospace,Menlo,monospace; background:#f1f0eb; padding:1px 4px; border-radius:3px; }
+  footer { color:var(--dim); font-size:12px; margin-top:48px; border-top:1px solid var(--border); padding-top:16px; }
+</style>
+</head>
+<body>
+
+<h1>v0.10.3 splits — TUIView as pure renderer + FakeView</h1>
+<p class="tagline">
+  Move the last view-private state (the folded-tool-result tray) into the store
+  so the store is the single state holder, and prove the view is swappable with
+  a ChatStore-only <code>FakeView</code>. De-risks v0.10.4's store-only Advisor.
+</p>
+<p class="note">
+  Durable record. <strong>Decided autonomously under a delegating
+  <code>/goal</code>.</strong> Mostly a <em>pure internal refactor</em> — under
+  <code>prd-compare-with-claude.md</code> that's out of scope for CC comparison
+  (no behavior change). The split points below are the real decisions; CC has
+  no analog (its React/Ink view is coupled by design — this is neutrix store
+  hygiene). <em>Note: implementation preceded this write-up; the records were
+  authored post-hoc, a process miss called out in the PRD.</em>
+</p>
+
+<h2>Split points</h2>
+
+<div class="split flag">
+  <div class="head"><span class="num">1.</span><span class="name">The boundary check — module-level grep is infeasible</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The collision</dt>
+    <dd>The skeleton's acceptance demands "<code>terminal_chat.py</code> imports only from <code>store</code> (no <code>context_manager</code>/<code>llm</code>/<code>tools</code>/<code>executor</code>)." But that module hosts BOTH the pure renderer (<code>TerminalView</code>) AND the orchestrator (<code>TerminalChat</code>), which legitimately drives <code>ContextManager</code> (<code>ctx.handle_event</code>, <code>ctx.rewind_to</code>, …). A module-level import ban is impossible.</dd>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>Split <code>TerminalView</code> into its own module that imports only store (big mechanical move, regression risk).</li>
+      <li>Scope the boundary proof to a dedicated <code>FakeView</code> that imports only store — the real contract is "a view needs nothing but the store," provable without uprooting the orchestrator.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Scope to <code>FakeView</code>. The architectural claim is "the store carries everything a view needs"; a store-only <code>FakeView</code> that renders every scenario proves exactly that, with no risky module surgery.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — FakeView-scoped boundary.</strong> <code>tests/test_fake_view.py</code> AST-parses <code>tests/fake_view.py</code> and asserts it imports <code>neutrix</code> only via <code>neutrix.store</code>. That is the enforceable, meaningful "view-needs-only-the-store" gate. The literal module-level grep on <code>terminal_chat.py</code> is dropped as infeasible (the orchestrator belongs there).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">2.</span><span class="name">ToolRecord — pure data vs data+rendering</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The catch</dt>
+    <dd><code>ToolRecord</code> "moves to <code>store.py</code> as pure data" — but it carried rendering methods (<code>summary</code>, <code>_keyword</code>) that depend on view helpers (<code>compact_inline</code>, <code>approximate_token_count</code>). Moving it whole would make <code>store</code> import <code>terminal_chat</code> (backwards).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Strip to pure data.</strong> <code>store.ToolRecord</code> is just <code>(index, name, arguments, result)</code>. The summary-rendering moves to module-level functions in the view (<code>tool_record_summary</code>, <code>tool_record_summary_parts</code>, incl. the v0.10.2 <code>[subagent]</code> label). Clean dependency direction; store stays render-free.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name">Where the folded tray lives + who appends</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Decision</dt>
+    <dd class="decision"><strong><code>store.folded_tool_results</code> with <code>store.add_folded_tool_result(name, args, result)</code></strong> (the store assigns the 1-based index). The renderer calls the mutator instead of holding a private <code>list[ToolRecord]</code> — the view keeps no tray state. Appending a derived render artifact to the store is acceptable: it's canonical state all actors can see (the point), and the v0.10.4 Advisor touches tasks/messages, not this tray, so no conflict. Wiped by <code>store.reset()</code> (so <code>/clear</code> + <code>/load</code> clear it for free — the open question resolved to "wipe").</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">FakeView assertion style — exact bytes vs structured</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Decision</dt>
+    <dd class="decision"><strong>Structured substring assertions</strong> (the open question). Exact-byte baselines are brittle against cosmetic tweaks; the swap-test's value is "every channel is renderable from the store," which substring checks per scenario (empty / user+assistant / streaming / tool round / folded tray / subagent label / reminder / cancel / tasks / reset) capture without freezing layout.</dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.3 TUIView purify · 4 split points, decided autonomously · boundary check
+  scoped to a store-only FakeView (module-level grep infeasible) · ToolRecord
+  stripped to pure store data · folded tray now canonical store state.
+</footer>
+
+</body>
+</html>

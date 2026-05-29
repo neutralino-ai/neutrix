@@ -47,7 +47,7 @@ from neutrix.context_manager import (
     format_reminder_notice,
     is_task_reminder,
 )
-from neutrix.store import ChatStore, MessageRecord, Task
+from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
 from neutrix.tools import BUILTIN_TOOLS, get_schemas
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
@@ -274,34 +274,37 @@ def format_heartbeat(
 TOOL_KEYWORD_WIDTH = len("tool_result")
 
 
-@dataclass(frozen=True)
-class ToolRecord:
-    index: int
-    name: str
-    arguments: str
-    result: str
+# v0.10.3: ``ToolRecord`` is now pure data in :mod:`neutrix.store`; the
+# summary-rendering logic stays here in the view (it depends on the view's
+# ``compact_inline``/``result_line_count``/``approximate_token_count`` helpers).
 
-    @property
-    def _keyword(self) -> str:
-        # v0.10.2 split #5: a subagent (Agent tool) result reads as
-        # "subagent", reusing the whole tool-result fold/expand path.
-        return "subagent" if self.name == "Agent" else "tool_result"
 
-    def _summary_body(self) -> str:
-        args = compact_inline(self.arguments or "{}")
-        lines = result_line_count(self.result)
-        approx_tokens = approximate_token_count(self.result)
-        return (
-            f" [tool {self.index}] {self.name} {args} | folded | "
-            f"{lines} lines | ~{approx_tokens} tokens"
-        )
+def tool_record_keyword(record: ToolRecord) -> str:
+    # v0.10.2 split #5: a subagent (Agent tool) result reads as "subagent",
+    # reusing the whole tool-result fold/expand path.
+    return "subagent" if record.name == "Agent" else "tool_result"
 
-    @property
-    def summary(self) -> str:
-        return f"<- {self._keyword.ljust(TOOL_KEYWORD_WIDTH)}{self._summary_body()}"
 
-    def summary_parts(self) -> tuple[str, str, str]:
-        return ("<- ", self._keyword.ljust(TOOL_KEYWORD_WIDTH), self._summary_body())
+def tool_record_summary_body(record: ToolRecord) -> str:
+    args = compact_inline(record.arguments or "{}")
+    lines = result_line_count(record.result)
+    approx_tokens = approximate_token_count(record.result)
+    return (
+        f" [tool {record.index}] {record.name} {args} | folded | "
+        f"{lines} lines | ~{approx_tokens} tokens"
+    )
+
+
+def tool_record_summary(record: ToolRecord) -> str:
+    return f"<- {tool_record_keyword(record).ljust(TOOL_KEYWORD_WIDTH)}{tool_record_summary_body(record)}"
+
+
+def tool_record_summary_parts(record: ToolRecord) -> tuple[str, str, str]:
+    return (
+        "<- ",
+        tool_record_keyword(record).ljust(TOOL_KEYWORD_WIDTH),
+        tool_record_summary_body(record),
+    )
 
 
 InputFunc = Callable[[str], str]
@@ -719,7 +722,7 @@ class TerminalView:
         await self._render(lambda: self.print_tool_use_now(name, arguments))
 
     def print_tool_result_now(self, record: ToolRecord) -> None:
-        prefix, keyword, suffix = record.summary_parts()
+        prefix, keyword, suffix = tool_record_summary_parts(record)
         text = Text.assemble(
             (prefix, "yellow"),
             (keyword, "bold bright_green"),
@@ -783,7 +786,8 @@ class TerminalChat:
         self._running = True
         self._busy = False
         self._input_queue: asyncio.Queue[str] | None = None
-        self._tool_records: list[ToolRecord] = []
+        # v0.10.3: the folded-tool-result tray lives in the store
+        # (store.folded_tool_results) — no view-private list.
         # v0.10.2 visibility parity: full text of folded session channels,
         # stashed so /show can re-print them below (expand-by-append).
         self._system_full: str = ""
@@ -1084,13 +1088,9 @@ class TerminalChat:
     async def _store_and_print_tool_result(
         self, name: str, arguments: str, result: str
     ) -> ToolRecord:
-        record = ToolRecord(
-            index=len(self._tool_records) + 1,
-            name=name,
-            arguments=arguments,
-            result=result,
-        )
-        self._tool_records.append(record)
+        # v0.10.3: the folded-result tray is canonical store state, not a
+        # view-private list. The store assigns the index.
+        record = self.store.add_folded_tool_result(name, arguments, result)
         await self.view.print_tool_result(record)
         return record
 
@@ -1229,7 +1229,7 @@ class TerminalChat:
                 tasks=loaded.tasks,
             )
         )
-        self._tool_records.clear()
+        # store.reset() (via ReplaceHistoryEvent) already wiped folded_tool_results.
         self._tool_call_lookup.clear()
         self._rendered_message_count = 0
         await self.view.print_notice(
@@ -1241,7 +1241,7 @@ class TerminalChat:
 
     async def _cmd_clear(self, args: list[str]) -> None:
         await self.ctx.handle_event(ClearEvent())
-        self._tool_records.clear()
+        # store.reset() (via ClearEvent) already wiped folded_tool_results.
         self._tool_call_lookup.clear()
         self._rendered_message_count = 0
         await self.view.print_notice("conversation cleared", style="green")
@@ -1311,12 +1311,13 @@ class TerminalChat:
         await self.view.print_plain("\n".join(lines))
 
     async def _cmd_tool(self, args: list[str]) -> None:
-        if not self._tool_records:
+        records = self.store.folded_tool_results
+        if not records:
             await self.view.print_notice("no folded tool results", style="dim")
             return
 
         if not args:
-            for record in self._tool_records[-20:]:
+            for record in records[-20:]:
                 await self.view.print_tool_result(record)
             return
 
@@ -1326,11 +1327,11 @@ class TerminalChat:
             await self.view.print_notice("usage: /tool N", style="bold red")
             return
 
-        if index < 1 or index > len(self._tool_records):
+        if index < 1 or index > len(records):
             await self.view.print_notice(f"unknown tool result: {index}", style="bold red")
             return
 
-        record = self._tool_records[index - 1]
+        record = records[index - 1]
         await self.view.print_text(
             Text(f"[tool {record.index}] {record.name} full result:", style="bold")
         )

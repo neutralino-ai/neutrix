@@ -85,6 +85,21 @@ class PendingToolCall:
     started_at: datetime = field(default_factory=datetime.now)
 
 
+@dataclass(frozen=True)
+class ToolRecord:
+    """A completed tool result, indexed for `/tool N` expansion (v0.10.3).
+
+    Pure data — no rendering logic (that lives in the view). Moved here from
+    `terminal_chat.py` so the folded-result tray is canonical store state, not
+    a view-private list: the store is the single state holder all actors see.
+    """
+
+    index: int
+    name: str
+    arguments: str
+    result: str
+
+
 class ChatStore:
     """Mutable owner of chat state with an async change-notification API.
 
@@ -103,6 +118,7 @@ class ChatStore:
         self._tasks: list[Task] = []
         self._next_task_id: int = 1
         self._llm_active: bool = False
+        self._folded_tool_results: list[ToolRecord] = []
         self._subscribers: set[asyncio.Event] = set()
 
     # --------------------------------------------------------------- reads
@@ -130,6 +146,10 @@ class ChatStore:
     @property
     def llm_active(self) -> bool:
         return self._llm_active
+
+    @property
+    def folded_tool_results(self) -> tuple[ToolRecord, ...]:
+        return tuple(self._folded_tool_results)
 
     # -------------------------------------------------------------- writes
 
@@ -174,6 +194,24 @@ class ChatStore:
             return None
         record = MessageRecord(role="assistant", content=text)
         self._messages.append(record)
+        self._notify()
+        return record
+
+    def add_folded_tool_result(
+        self, name: str, arguments: str, result: str
+    ) -> ToolRecord:
+        """Append a completed tool result to the folded tray (v0.10.3).
+
+        The store assigns the 1-based ``index`` (used by ``/tool N``), so the
+        view holds no counter of its own. Returns the created record.
+        """
+        record = ToolRecord(
+            index=len(self._folded_tool_results) + 1,
+            name=name,
+            arguments=arguments,
+            result=result,
+        )
+        self._folded_tool_results.append(record)
         self._notify()
         return record
 
@@ -291,6 +329,7 @@ class ChatStore:
         self._tasks.clear()
         self._next_task_id = 1
         self._llm_active = False
+        self._folded_tool_results.clear()
         if system_prompt is not None:
             self._messages.append(
                 MessageRecord(role="system", content=system_prompt)

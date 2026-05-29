@@ -4,6 +4,32 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.3] — 2026-05-29
+
+### Changed
+- **The store is now the single state holder; the view holds none.** The
+  folded-tool-result tray moved off `TerminalChat` (`_tool_records`) into
+  `ChatStore.folded_tool_results` (with `add_folded_tool_result()`, store-assigned
+  index, wiped on `reset()`). `ToolRecord` is now **pure data in
+  `neutrix.store`**; its summary-rendering moved to module functions in the view
+  (`tool_record_summary[_parts]`). This de-risks the v0.10.4 Advisor's
+  store-only-mutator model — no view-private state for a second actor to miss.
+
+### Added
+- **`tests/fake_view.py` — a `FakeView` swap-test.** A renderer that reads the
+  whole user surface from `ChatStore` alone; `tests/test_fake_view.py` drives the
+  scenario set and AST-asserts `fake_view.py` imports `neutrix` **only** via
+  `neutrix.store` — the enforceable "a view needs nothing but the store" proof.
+
+### Notes
+- The skeleton's module-level "`terminal_chat.py` imports only `store`" check was
+  **infeasible** (that module hosts the orchestrator that drives
+  `ContextManager`); the boundary proof is scoped to `FakeView` instead (split #1).
+  Pure refactor — no transcript-behavior change.
+
+See [docs/PRDs/v0.10.3-tuiview-purify.md](docs/PRDs/v0.10.3-tuiview-purify.md)
+and [docs/splits/v0.10.3-tuiview-purify.html](docs/splits/v0.10.3-tuiview-purify.html).
+
 ## [v0.10.2] — 2026-05-29
 
 ### Added

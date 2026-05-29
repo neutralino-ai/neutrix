@@ -21,18 +21,18 @@ from neutrix.llm import (
     LLMEvent,
     LLMResponse,
 )
-from neutrix.store import ChatStore
+from neutrix.store import ChatStore, ToolRecord
 from neutrix.terminal_chat import (
     HEARTBEAT_GLYPH,
     QuitArmingState,
     TerminalChat,
-    ToolRecord,
     apply_enter_or_continuation,
     approximate_token_count,
     delete_buffer_to_line_end,
     format_task_panel,
     move_buffer_to_line_start,
     result_line_count,
+    tool_record_summary,
 )
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- matches the renderer's chosen glyph
@@ -297,9 +297,10 @@ def test_format_task_panel_returns_empty_for_no_tasks():
 
 def test_tool_record_summary_format():
     record = ToolRecord(index=2, name="read_file", arguments='{"path":"x"}', result="hi\n")
-    assert "[tool 2]" in record.summary
-    assert "read_file" in record.summary
-    assert "folded" in record.summary
+    summary = tool_record_summary(record)
+    assert "[tool 2]" in summary
+    assert "read_file" in summary
+    assert "folded" in summary
 
 
 # ---- TerminalChat integration via ContextManager -----------------------

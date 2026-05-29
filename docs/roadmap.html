@@ -358,18 +358,18 @@
   <span class="theme">
     TUIView as pure renderer + FakeView swap-test
     <small>
-      Closes the v0.7-arc onion refactor. View becomes a pure
-      reader of <code>ChatStore</code>; residual writes
-      (<code>_tool_records</code> folded-tray) move onto the store;
-      a <code>FakeView</code> in <code>tests/</code> proves the
-      renderer is swappable. Architectural hygiene that makes the
-      v0.10.4 Advisor's "store is the only mutator" assumption
-      defensible.
+      The folded-tool-result tray moved off the view into
+      <code>ChatStore.folded_tool_results</code>; <code>ToolRecord</code> is now
+      pure data in <code>store</code> (rendering moved to view functions). A
+      store-only <code>FakeView</code> + AST import-boundary test prove a view
+      needs nothing but the store — de-risking v0.10.4's store-only Advisor. The
+      skeleton's module-level import grep was infeasible (orchestrator lives in
+      the module) → scoped to FakeView (split #1). Suite 270.
+      (<a href="splits/v0.10.3-tuiview-purify.html">4 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p1">P1</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 
