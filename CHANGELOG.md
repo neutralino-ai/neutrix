@@ -4,6 +4,26 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.4.9] — 2026-05-29
+
+### Fixed
+- **Turns no longer hang on a dead/slow LLM connection.** The LLM timeout is now
+  **inactivity-based** (matching Claude Code's reset-per-chunk stream-idle
+  watchdog) instead of a hard wall from round start: `last_progress_at` is bumped
+  on every streamed token and `_llm_timeout_watchdog` cancels only after
+  `llm_timeout_s` of **no progress**. A slow-but-live response (e.g. deepseek-v4-pro,
+  minutes) is never killed mid-stream; the stall hint stops false-firing on slow
+  models.
+- **A dead/half-closed connection errors out instead of hanging forever.** The
+  OpenAI client now sets an explicit `httpx.Timeout(llm_timeout_s, connect=10s)`
+  (was: no timeout). httpx's read timeout is a per-chunk inactivity cap, so a
+  proxy that drops its upstream (observed as a CLOSE-WAIT socket) raises a visible
+  `[LLM error]` within `llm_timeout_s`. `max_retries=2` on the initial request.
+
+Root-caused live with `py-spy dump --pid` + `ss`.
+See [docs/PRDs/v1.4.9-turn-resilience.md](docs/PRDs/v1.4.9-turn-resilience.md)
+and [docs/splits/v1.4.9-turn-resilience.html](docs/splits/v1.4.9-turn-resilience.html).
+
 ## [v1.4.8] — 2026-05-29
 
 ### Added

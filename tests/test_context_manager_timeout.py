@@ -207,3 +207,111 @@ async def test_watchdog_does_not_fire_on_normal_success():
         and m["content"].startswith("[LLM timeout after ")
         for m in ctx.messages
     )
+
+
+# ---- v1.4.9 no-progress (inactivity) semantics ---------------------------
+
+
+class SteadyStreamLLM:
+    """Streams ``n`` tokens ``dt`` apart, then finishes. Total wall time
+    (n*dt) deliberately exceeds llm_timeout_s while no single inter-token gap
+    does — so the OLD hard-wall watchdog would kill it mid-stream but the
+    v1.4.9 no-progress watchdog must let it complete."""
+
+    def __init__(self, n: int = 8, dt: float = 0.04) -> None:
+        self.n = n
+        self.dt = dt
+        self.entered = asyncio.Event()
+
+    def switch(self, slot: Slot) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    async def stream_response(self, **_: Any):
+        self.entered.set()
+        parts = []
+        for i in range(self.n):
+            await asyncio.sleep(self.dt)
+            parts.append(f"t{i} ")
+            yield LLMEvent("token", f"t{i} ")
+        yield LLMEvent(
+            "assistant",
+            LLMResponse({"role": "assistant", "content": "".join(parts)}, "stop"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_steady_stream_survives_past_total_timeout():
+    """A slow-but-live stream is NEVER cancelled even though total time
+    exceeds llm_timeout_s — each token resets the no-progress clock."""
+    llm = SteadyStreamLLM(n=8, dt=0.04)  # ~0.32s total
+    ctx = _make_ctx(llm, timeout_s=0.15)  # < total, > any single gap
+
+    await asyncio.wait_for(ctx.handle_event(UserMessageEvent("hi")), timeout=3.0)
+
+    assert ctx.state == State.IDLE
+    assert ctx.messages[-1]["content"] == "t0 t1 t2 t3 t4 t5 t6 t7 "
+    assert not any(
+        m.get("role") == "assistant"
+        and isinstance(m.get("content"), str)
+        and m["content"].startswith("[LLM timeout after ")
+        for m in ctx.messages
+    )
+
+
+class StallMidStreamLLM:
+    """Yields a couple of tokens, then goes silent forever — a hung
+    connection mid-response. The no-progress watchdog must still fire."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.stop_calls = 0
+        self._task: asyncio.Task[Any] | None = None
+
+    def switch(self, slot: Slot) -> None:
+        pass
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def stream_response(self, **_: Any):
+        self.entered.set()
+        await asyncio.sleep(0.03)
+        yield LLMEvent("token", "partial ")
+        self._task = asyncio.ensure_future(asyncio.Event().wait())
+        try:
+            await self._task
+        finally:
+            self._task = None
+        yield LLMEvent(  # pragma: no cover - never reached after cancel
+            "assistant", LLMResponse({"role": "assistant", "content": None}, "stop")
+        )
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_stall_fires_after_inactivity():
+    """Tokens arrive, then the stream goes silent > llm_timeout_s → the
+    watchdog fires, the partial text is kept, and the timeout marker lands."""
+    llm = StallMidStreamLLM()
+    ctx = _make_ctx(llm, timeout_s=0.12)
+
+    task = asyncio.create_task(ctx.handle_event(UserMessageEvent("hi")))
+    await llm.entered.wait()
+    await asyncio.wait_for(task, timeout=3.0)
+
+    assert ctx.state == State.IDLE
+    assert llm.stop_calls >= 1
+    # keep-partial: the streamed bytes survive as an assistant turn...
+    assert any(m.get("content") == "partial " for m in ctx.messages)
+    # ...followed by the timeout marker.
+    assert any(
+        m.get("role") == "assistant"
+        and isinstance(m.get("content"), str)
+        and m["content"].startswith("[LLM timeout after ")
+        for m in ctx.messages
+    )

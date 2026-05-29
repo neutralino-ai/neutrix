@@ -98,6 +98,11 @@ TASK_MANAGEMENT_TOOLS = frozenset({"TaskCreate", "TaskUpdate"})
 
 LLM_ERROR_PREFIX = "[LLM error: "
 
+# v1.4.9: the no-progress watchdog polls at min(llm_timeout_s, this) so a tiny
+# test timeout (0.1s) still fires inside its wait window while a 300s prod
+# timeout only wakes every few seconds.
+_WATCHDOG_POLL_CEILING_S = 2.0
+
 # v0.10.4 Smart Advisor: a judged suggestion is injected as a pseudo-user turn
 # wrapped in these tags, so it renders distinctly and is excluded from Up-arrow
 # recall — the same treatment as the task reminder / compact markers.
@@ -730,29 +735,38 @@ class ContextManager:
             task.uncancel()
 
     async def _llm_timeout_watchdog(self) -> None:
-        """Background task: cancel the LLM call after ``slot.llm_timeout_s``.
+        """No-progress watchdog (v1.4.9): cancel the round only when NO token
+        has arrived for ``slot.llm_timeout_s`` — not after a fixed wall-clock
+        budget from round start.
+
+        ``last_progress_at`` is set at round start and bumped on every streamed
+        token (:py:meth:`_call_llm`), so a steadily-streaming response — even a
+        slow multi-minute one from a model like deepseek-v4-pro — is NEVER
+        cancelled, while a genuinely hung connection (dead proxy, the
+        CLOSE-WAIT case) is still caught after one quiet ``llm_timeout_s``.
 
         Spawned on every :attr:`State.AWAITING_LLM` entry; cancelled by
-        :py:meth:`_cancel_watchdog` on exit (success, error, or
-        user-cancel) so it never fires after the LLM has already
-        finished. Forward-compatible with v0.10.1 streaming: the same
-        ``last_progress_at`` field will be bumped on each stream chunk
-        so this watchdog can be reshaped to "no progress for Ns" without
-        renaming.
-
-        The post-sleep state guard handles the rare LLM-responded-
-        microseconds-before-timeout race: if the state has already
-        moved out of AWAITING_LLM, the watchdog quietly retires.
+        :py:meth:`_cancel_watchdog` on exit. Polls at a sub-interval derived
+        from the timeout so a tiny test timeout still fires inside its window;
+        the per-iteration state guard retires it the instant the round ends.
         """
-        try:
-            await asyncio.sleep(self.slot.llm_timeout_s)
-        except asyncio.CancelledError:
-            return
-        if self.state != State.AWAITING_LLM:
-            return
-        elapsed = self.slot.llm_timeout_s
-        logger.error("LLM call timed out after {}s", elapsed)
-        self.cancel(reason="timeout")
+        timeout_s = self.slot.llm_timeout_s
+        poll = min(timeout_s, _WATCHDOG_POLL_CEILING_S)
+        while True:
+            try:
+                await asyncio.sleep(poll)
+            except asyncio.CancelledError:
+                return
+            if self.state != State.AWAITING_LLM:
+                return
+            last = self.last_progress_at
+            if last is None:  # round is wrapping up; _cancel_watchdog will retire us
+                continue
+            idle = time.monotonic() - last
+            if idle > timeout_s:
+                logger.error("LLM made no progress for {:.0f}s — cancelling", idle)
+                self.cancel(reason="timeout")
+                return
 
     def _cancel_watchdog(self) -> None:
         task = self._llm_timeout_task
@@ -801,6 +815,10 @@ class ContextManager:
             if not isinstance(event, LLMEvent):  # pragma: no cover - defensive
                 continue
             if event.kind == "token":
+                # v1.4.9: every streamed token resets the no-progress clock so
+                # the watchdog measures INACTIVITY, not total round time, and
+                # the UI stall hint stops false-firing on a slow-but-live model.
+                self.last_progress_at = time.monotonic()
                 if isinstance(event.data, str):
                     self.store.extend_assistant_stream(event.data)
             elif event.kind == "assistant":

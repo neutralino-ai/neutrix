@@ -514,6 +514,25 @@
 </div>
 
 <div class="entry">
+  <span class="ver">v1.4.9</span>
+  <span class="theme">
+    Turn resilience — no-progress LLM timeout
+    <small>
+      Inactivity-based LLM timeout (matches Claude Code's reset-per-chunk
+      stream-idle watchdog): bump <code>last_progress_at</code> on every token,
+      and the watchdog cancels only after <code>llm_timeout_s</code> of NO
+      progress — a slow-but-live deepseek-v4-pro stream (minutes) is never killed
+      mid-flight, and the stall hint stops false-firing. Plus an explicit
+      <code>httpx.Timeout</code> on the client so a dead proxy connection
+      (CLOSE-WAIT) errors out instead of hanging forever. Root-caused live with
+      <code>py-spy</code> + <code>ss</code>.
+      (<a href="splits/v1.4.9-turn-resilience.html">5 split-point decisions</a>.) Suite 388.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.4.8</span>
   <span class="theme">
     AskUserQuestion tool (interactive)

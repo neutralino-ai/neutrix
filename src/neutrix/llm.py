@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from loguru import logger
 from openai import AsyncOpenAI
 
@@ -182,7 +183,20 @@ class OpenAIChatLLM:
         self._client = self._build_client(slot)
 
     def _build_client(self, slot: Slot) -> AsyncOpenAI:
-        return AsyncOpenAI(base_url=slot.base_url, api_key=slot.api_key)
+        # v1.4.9: explicit transport timeout so a dead/half-closed connection
+        # (e.g. a local proxy that dropped its upstream — observed as a
+        # CLOSE-WAIT socket) raises ReadTimeout instead of hanging the turn
+        # forever. ``read`` is the max gap between streamed chunks, so it
+        # doubles as a transport-level no-progress cap: no bytes for
+        # ``llm_timeout_s`` → APITimeoutError → a visible [LLM error], never an
+        # infinite hang. ``connect`` stays short so an unreachable proxy fails
+        # fast. This is the belt to the ContextManager watchdog's suspenders.
+        return AsyncOpenAI(
+            base_url=slot.base_url,
+            api_key=slot.api_key,
+            timeout=httpx.Timeout(slot.llm_timeout_s, connect=10.0),
+            max_retries=2,
+        )
 
     async def stream_response(
         self,
