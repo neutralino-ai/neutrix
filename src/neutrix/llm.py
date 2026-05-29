@@ -1,9 +1,11 @@
-"""OpenAI-compatible LLM client (non-streaming for v0.9.3).
+"""OpenAI-compatible streaming LLM client (v0.10.1).
 
-v0.9.3 reverts the v0.9.2 ``stream=True`` switch. ``stream_response`` makes
-one non-streaming Chat Completions call and yields exactly one
-``LLMEvent("assistant", LLMResponse(...))``. Streaming re-enables in a later
-PRD with the CC-aligned "keep partial text" semantic.
+v0.10.1 restores the ``stream=True`` path (removed in v0.9.3) merged with
+v0.9.3's pairing layer. ``stream_response`` yields one ``LLMEvent("token", str)``
+per content delta as it arrives, accumulates ``tool_calls`` index-keyed across
+deltas, and yields one terminal ``LLMEvent("assistant", LLMResponse(...))`` with
+the assembled message. Cancel keeps whatever text arrived — the
+``ContextManager`` stashes it and commits it on cancel (PRD v0.10.1).
 
 Two responsibilities live here:
 
@@ -17,13 +19,13 @@ Two responsibilities live here:
    sees ``"[tool result missing]"``. Pure transform on a copy — does
    NOT mutate ``messages`` (the ContextManager-as-sole-mutator rule).
 
-2. **Cancellation.** :py:meth:`OpenAIChatLLM.stop` cancels the awaiting
-   ``create`` task so the wrapping ``await`` raises ``CancelledError``
-   and the caller unwinds. Idempotent.
+2. **Cancellation.** :py:meth:`OpenAIChatLLM.stop` closes the active
+   ``AsyncStream`` (v0.9.2 eager teardown) so the iterator exits; the
+   ``ContextManager`` drive-task-cancel additionally raises
+   ``CancelledError`` into the iteration. Idempotent, best-effort.
 """
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -173,7 +175,7 @@ class OpenAIChatLLM:
     def __init__(self, slot: Slot) -> None:
         self.slot = slot
         self._client = self._build_client(slot)
-        self._active_task: asyncio.Task[Any] | None = None
+        self._active_stream: Any = None
 
     def switch(self, slot: Slot) -> None:
         self.slot = slot
@@ -194,29 +196,44 @@ class OpenAIChatLLM:
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": outbound_messages,
-            "stream": False,
+            "stream": True,
         }
         if system_text:
             kwargs["extra_body"] = {"system": system_text}
         if tools:
             kwargs["tools"] = tools
 
-        task = asyncio.ensure_future(self._client.chat.completions.create(**kwargs))
-        self._active_task = task
+        stream = await self._client.chat.completions.create(**kwargs)
+        self._active_stream = stream
+
+        content_parts: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
         try:
-            completion = await task
+            async for chunk in stream:
+                choice = self._first_choice(chunk)
+                if choice is None:
+                    continue
+                reason = self._read(choice, "finish_reason")
+                if reason is not None:
+                    finish_reason = reason
+                delta = self._read(choice, "delta", {}) or {}
+                content_delta = self._read(delta, "content")
+                if isinstance(content_delta, str) and content_delta:
+                    content_parts.append(content_delta)
+                    yield LLMEvent("token", content_delta)
+                tc_delta = self._read(delta, "tool_calls")
+                if tc_delta:
+                    self._accumulate_tool_calls(tool_calls_by_index, tc_delta)
         finally:
             # PEP 525 safe — pure assignment, no yield in finally.
-            self._active_task = None
+            self._active_stream = None
 
-        choice = self._first_choice(completion)
-        assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
-        finish_reason: str | None = None
-        if choice is not None:
-            finish_reason = self._read(choice, "finish_reason")
-            raw_message = self._read(choice, "message")
-            if raw_message is not None:
-                assistant_msg = self._coerce_message(raw_message)
+        content = "".join(content_parts) if content_parts else None
+        tool_calls = self._finalize_tool_calls(tool_calls_by_index)
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
 
         yield LLMEvent(
             "assistant",
@@ -224,24 +241,73 @@ class OpenAIChatLLM:
         )
 
     def stop(self) -> None:
-        """Cancel the awaiting ``create`` task, if any.
+        """Close the active ``AsyncStream`` so the iterator exits.
 
-        Calls ``Task.cancel()`` so the parked ``await`` in
-        :py:meth:`stream_response` raises :class:`asyncio.CancelledError`
-        and the caller unwinds. Synchronous so the cancel broadcast can
-        run from any task. Idempotent — a no-op when no request is in
-        flight. Best-effort: exceptions are swallowed so the cancel
-        broadcast never raises.
+        v0.10.1 mechanism: tearing the stream down makes the wrapping
+        ``async for`` in :py:meth:`stream_response` stop, returning control
+        to the caller. Synchronous so the cancel broadcast can run from any
+        task. Idempotent — a no-op when no stream is in flight. Best-effort:
+        exceptions are swallowed so the cancel broadcast never raises. The
+        SDK's ``AsyncStream.close`` may return a coroutine that we can't await
+        here; issuing the call is enough to begin teardown, and the
+        ContextManager's drive-task-cancel unwinds the iteration regardless.
         """
-        task = self._active_task
-        if task is None:
-            return
-        if task.done():
+        stream = self._active_stream
+        if stream is None:
             return
         try:
-            task.cancel()
+            close = getattr(stream, "close", None)
+            if close is None:
+                return
+            result = close()
+            if hasattr(result, "close"):
+                try:
+                    result.close()
+                except Exception:  # pragma: no cover - defensive
+                    pass
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("OpenAIChatLLM.stop swallowed: {}", exc)
+
+    def _accumulate_tool_calls(
+        self,
+        accumulator: dict[int, dict[str, Any]],
+        deltas: Any,
+    ) -> None:
+        """Fold streaming tool_call deltas onto the index-keyed accumulator.
+
+        OpenAI streaming tool_calls arrive keyed by ``index``: the first delta
+        carries ``id`` + ``function.name``; later deltas append to
+        ``function.arguments``. Rebuilt into the final list at end-of-stream.
+        """
+        for raw in deltas:
+            index = self._read(raw, "index", 0) or 0
+            slot = accumulator.setdefault(
+                index,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            call_id = self._read(raw, "id")
+            if call_id:
+                slot["id"] = str(call_id)
+            call_type = self._read(raw, "type")
+            if call_type:
+                slot["type"] = str(call_type)
+            function = self._read(raw, "function")
+            if function is None:
+                continue
+            name = self._read(function, "name")
+            if name:
+                slot["function"]["name"] = str(name)
+            arguments = self._read(function, "arguments")
+            if arguments:
+                slot["function"]["arguments"] += str(arguments)
+
+    def _finalize_tool_calls(
+        self,
+        accumulator: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not accumulator:
+            return []
+        return [accumulator[index] for index in sorted(accumulator)]
 
     def _first_choice(self, completion: Any) -> Any | None:
         choices = self._read(completion, "choices", []) or []

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.1 splits — re-enable streaming with cancel-as-steer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a; --muted: #6a6a6a; --dim: #9a9a9a; --bg: #fafaf7;
+    --card: #ffffff; --border: #e3e3dc; --accent: #b14a00;
+    --open: #b14a00; --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body { font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg); max-width: 920px; margin: 0 auto; padding: 32px 24px 80px; }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 8px; font-size: 14px; }
+  .note { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 32px 0 12px; font-weight: 600; }
+  .split { background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 16px 18px; margin: 0 0 14px; }
+  .split.flag { border-color: var(--accent); border-width: 2px; }
+  .split .head { display: grid; grid-template-columns: 36px 1fr auto; gap: 12px;
+    align-items: baseline; margin-bottom: 10px; }
+  .split .num { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .split .name { font-weight: 600; color: var(--fg); }
+  .badge { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 3px 8px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl { display: grid; grid-template-columns: 130px 1fr; gap: 4px 16px; margin: 0; font-size: 14px; }
+  .split dt { color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.06em; padding-top: 5px; }
+  .split dd { margin: 0 0 8px; color: var(--fg); }
+  .split dd ul { margin: 4px 0; padding-left: 20px; }
+  .split .decision { color: var(--decided); }
+  .split .recommend { color: var(--accent); }
+  code { font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb; padding: 1px 4px; border-radius: 3px; }
+  footer { color: var(--dim); font-size: 12px; margin-top: 48px;
+    border-top: 1px solid var(--border); padding-top: 16px; }
+</style>
+</head>
+<body>
+
+<h1>v0.10.1 splits — re-enable streaming with cancel-as-steer</h1>
+<p class="tagline">
+  Restore the v0.9.2 <code>stream=True</code> path (removed in v0.9.3) with
+  CC's "keep partial text" semantic, so an Esc mid-response preserves whatever
+  bytes arrived — closing the cancel-as-steer arc.
+</p>
+<p class="note">
+  Durable record of the split discussion (per <code>prd-compare-with-claude.md</code>).
+  <strong>Authored and decided autonomously under a <code>/goal</code> that
+  delegated all human options.</strong> CC source under
+  <code>/datafs/users/dingxf/anthropic/cc2/src</code>; the prior neutrix
+  implementation recovered from git tag <code>v0.9.2</code>.
+</p>
+
+<h2>Reference — what CC + v0.9.2 do</h2>
+<div class="split">
+  <div class="head"><span class="num">★</span><span class="name">Streaming + cancel, summarized</span><span class="badge decided">survey</span></div>
+  <dl>
+    <dt>CC</dt>
+    <dd>
+      Streams via the SDK (<code>services/api/claude.ts</code>); accumulates
+      content/tool_use deltas index-keyed; yields partial assistant messages as
+      blocks complete. On abort: partial messages already yielded are
+      <strong>kept</strong>; the stream is torn down eagerly
+      (<code>body?.cancel()</code>).
+    </dd>
+    <dt>neutrix v0.9.2</dt>
+    <dd>
+      <code>stream=True</code>; <code>stream_response</code> yields
+      <code>LLMEvent("token", str)</code> per content delta, accumulates
+      tool_calls in an index-keyed dict, and yields ONE final
+      <code>LLMEvent("assistant", LLMResponse)</code> carrying the full message.
+      <code>stop()</code> closes the <code>AsyncStream</code> (eager teardown).
+      No separate per-tool_call event.
+    </dd>
+    <dt>What v0.9.3 added (must keep)</dt>
+    <dd>
+      <code>_ensure_tool_result_pairing</code> (orphan tool_use repair) and
+      <code>_outbound_prompt</code> (anthropic-gateway system split). These are
+      NOT in v0.9.2 — the restore is a <em>merge</em>, not a revert.
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head"><span class="num">1.</span><span class="name">Cancel mechanism — stream-close vs task-cancel</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>v0.9.2: <code>stop()</code> closes the <code>AsyncStream</code>; the iterator exits.</li>
+      <li>v0.9.3: <code>_do_cancel</code> cancels the drive task; the await raises <code>CancelledError</code>.</li>
+      <li>Both.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Both — keep the tested v0.9.3 drive-task-cancel (it drives the unwind into <code>_drive</code>'s <code>except CancelledError</code>), add <code>stop()</code>-closes-stream for eager network teardown.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Both.</strong> <code>_do_cancel</code> runs synchronously, so <code>task.cancel()</code> leaves a pending cancellation that raises <code>CancelledError</code> at the generator's next await — ahead of any <code>StopAsyncIteration</code> from the closed stream — landing in <code>_drive</code>'s existing <code>except CancelledError</code> (caught before the generic <code>except Exception</code>). <code>stop()</code> closing the stream is just eager teardown so the HTTP body doesn't drain.</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">2.</span><span class="name">Where "keep partial text" lives — happy-path restructure vs cancel-time commit</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Options</dt>
+    <dd><ul>
+      <li><strong>Lane B:</strong> append a mutable assistant message to <code>messages</code> at first token, grow it per delta. Requires restructuring <code>_drive</code>'s tested happy-path append (regression risk on the core loop) and only pays off if tokens render live.</li>
+      <li><strong>Lane A:</strong> <code>_call_llm</code> stashes the partial text on <code>self</code> as tokens arrive; <code>_do_cancel</code> commits it (to <code>messages</code> + store) <em>before</em> the <code>[interrupted by user]</code> marker. Happy path untouched.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Lane A — near-zero regression on the shipped drive loop; the incremental-into-messages cost of Lane B only earns its keep if tokens render live (split #3), which we're not doing.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Lane A.</strong> <code>_call_llm</code> resets <code>self._streaming_partial = ""</code> each round and appends each <code>"token"</code> delta to it; the happy path still returns the final assistant message and <code>_drive</code> appends it once, unchanged. <code>_do_cancel</code>, before its marker, commits <code>{"role":"assistant","content": self._streaming_partial}</code> (if non-empty) via <code>_append_assistant_message</code> so it lands in both <code>messages</code> and the store — keep-partial needs no happy-path edit.</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">3.</span><span class="name">Live token rendering — does the user see tokens arrive?</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Renders streamed blocks incrementally in a live region, commits on finish.</dd>
+    <dt>The constraint</dt>
+    <dd>
+      neutrix's transcript is <strong>append-only scrollback</strong>
+      (<code>console.print</code>, v0.6.8 standing non-goal to rework) — it
+      can't grow a line in place. The <code>_above_input</code> live region
+      could show a <em>bounded</em> preview, but it can't hold a long growing
+      response.
+    </dd>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>Bounded live preview (last N lines / a char counter) in <code>_above_input</code>; commit to scrollback on finish.</li>
+      <li>No live preview — the heartbeat is the liveness signal; the message commits to scrollback at finish (and on cancel, the partial commits).</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">No live preview in v0.10.1. The v0.9.4/v0.9.8 blink heartbeat is the liveness answer the user already converged on (the whole heartbeat saga); streaming's unique job here is the cancel arc (split #2). A bounded preview is a clean v1.x add once it earns its keep.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — defer live token rendering to v1.x (NOT "infeasible").</strong> A bounded preview in the <code>_above_input</code> region is feasible but the bottom region can't hold a long growing response, so full inline live rendering needs append-only rework (out of scope). The heartbeat remains the during-LLM liveness signal. <code>terminal_chat.py</code> is therefore <strong>unchanged</strong> this release; the user-visible win is that an Esc mid-response now keeps the partial assistant text in the transcript (cancel-as-steer with prior intent), where before it kept nothing.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Event granularity — restore the speculative per-tool_call event?</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>Restore v0.9.2 exactly: <code>"token"</code> per content delta; accumulate tool_calls internally; one final <code>"assistant"</code> event carrying them.</li>
+      <li>Add the skeleton's proposed <code>LLMEvent("tool_call", ToolCall)</code> per completed call.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Restore v0.9.2 exactly — it's the proven shape, and the only consumer (<code>_call_llm</code>) just needs the final assembled message. A per-tool_call event has no consumer (YAGNI).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow v0.9.2.</strong> Two event kinds: <code>"token"</code> (content delta, drives the partial stash) and <code>"assistant"</code> (terminal, full message + finish_reason). The skeleton's <code>"tool_call"</code> event and <code>ToolCall</code> dataclass are dropped — no consumer.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name">Partial text on a hard LLM error / dropped connection</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>Keep the partial (whatever arrived) + append <code>[LLM error: …]</code> → two assistant messages for one round.</li>
+      <li>Discard the partial; the <code>[LLM error]</code> message is the outcome → one assistant message.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Discard on hard error (one message); keep on user-cancel + timeout (the user/clock interrupted a healthy stream — the bytes are meaningful). Errors are rare and the notice is the signal.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Discard-on-error, keep-on-cancel/timeout.</strong> <code>_drive</code>'s <code>except Exception</code> clears <code>self._streaming_partial</code> before appending <code>[LLM error]</code> (one assistant message — landmine #2 resolved). User-cancel and timeout both route through <code>_do_cancel</code>, which commits the partial first — so a timed-out round yields <code>[partial text][LLM timeout after Ns]</code> (two messages, both informative). A provider drop mid-stream surfaces as the error path.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Open Q#1 — hide the heartbeat once streaming returns?</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Decision</dt>
+    <dd class="decision"><strong>No change — keep the heartbeat.</strong> Since v0.10.1 renders no live tokens (split #3), the heartbeat is still the only during-LLM liveness signal; there is nothing redundant to hide. Revisit if/when a live preview lands.</dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.1 streaming + cancel-as-steer · 6 split points, all decided autonomously
+  under a delegating <code>/goal</code> · restores the v0.9.2 stream path merged
+  with v0.9.3's pairing layer · live token rendering consciously deferred to v1.x.
+</footer>
+
+</body>
+</html>

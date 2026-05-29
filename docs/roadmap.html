@@ -317,17 +317,18 @@
   <span class="theme">
     Re-enable streaming with cancel-as-steer
     <small>
-      Switch <code>OpenAIChatLLM.stream_response</code> back to
-      <code>stream=True</code> (rolled back in v0.9.3). On Esc:
-      close the stream eagerly, <em>keep</em> the partial assistant
-      text in history, append <code>[interrupted by user]</code>, let
-      the LLM-side pairing layer repair any orphan
-      <code>tool_use</code>. Closes the cancel arc.
+      <code>stream_response</code> back to <code>stream=True</code>
+      (restored from v0.9.2, merged with v0.9.3's pairing layer): token
+      deltas + index-keyed tool_calls + eager <code>stop()</code> stream
+      close. On Esc the partial assistant text is <em>kept</em> — stashed
+      during the round and committed before <code>[interrupted by user]</code>
+      so a steer carries prior intent. Live token rendering deferred to v1.x
+      (append-only scrollback; the heartbeat stays the liveness signal —
+      split #3). Suite 253. (<a href="splits/v0.10.1-streaming-steer.html">6 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p1">P1</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 

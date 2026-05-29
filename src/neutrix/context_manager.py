@@ -201,6 +201,11 @@ class ContextManager:
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     cancel_reason: CancelReason = field(default="user", init=False)
+    # v0.10.1 streaming: text accumulated from "token" events during the
+    # current LLM round, stashed so _do_cancel can commit it as a partial
+    # assistant turn (keep-partial-on-cancel) without restructuring the
+    # tested happy-path append. Reset each round; cleared once committed.
+    _streaming_partial: str = field(default="", init=False, repr=False)
     _drive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _llm_timeout_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
@@ -403,6 +408,15 @@ class ContextManager:
         # parked I/O wakes up.
         self.executor.cancel()
         self.llm.stop()
+        # v0.10.1 keep-partial-on-cancel (split #2): commit whatever streamed
+        # text arrived this round as a partial assistant turn BEFORE the
+        # marker (ordering landmine #3), so cancel-as-steer carries the prior
+        # assistant intent. Runs for both user and timeout reasons. Orphan
+        # tool_use (if any) is repaired by the pairing layer at next send.
+        partial = self._streaming_partial
+        if partial:
+            self._append_assistant_message({"role": "assistant", "content": partial})
+            self._streaming_partial = ""
         # User-initiated cancel: append the steer marker. Timeout
         # cancels skip the user marker — the drive loop's
         # ``_finalize_cancel`` will append the
@@ -487,6 +501,10 @@ class ContextManager:
                     except Exception as exc:
                         err = _compact_error(exc)
                         logger.warning("LLM call failed: {}", err)
+                        # Discard any partial stream text on a hard error
+                        # (v0.10.1 split #5): the [LLM error] message is the
+                        # outcome — one assistant message, not partial+error.
+                        self._streaming_partial = ""
                         self._append_assistant_message(
                             {
                                 "role": "assistant",
@@ -502,6 +520,9 @@ class ContextManager:
                     return
 
                 self._append_assistant_message(assistant_msg)
+                # The full message is committed; drop the partial stash so a
+                # later cancel (e.g. during tool dispatch) can't re-commit it.
+                self._streaming_partial = ""
                 rounds += 1
 
                 tool_calls = _extract_tool_calls(assistant_msg)
@@ -601,9 +622,16 @@ class ContextManager:
         self.cancel_reason = "user"
 
     async def _call_llm(self) -> dict[str, Any]:
-        """Make one LLM round; return the assistant message dict."""
+        """Make one LLM round; return the assistant message dict.
+
+        Streaming (v0.10.1): ``"token"`` events accumulate into
+        ``self._streaming_partial`` so a cancel mid-round can keep the bytes
+        that arrived; the terminal ``"assistant"`` event carries the assembled
+        message that the happy path appends (unchanged).
+        """
         tools = get_schemas(self.tool_names) if self.effective_tools_enabled() else None
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
+        self._streaming_partial = ""
         async for event in self.llm.stream_response(
             model=self.slot.model,
             messages=self.messages,
@@ -611,7 +639,10 @@ class ContextManager:
         ):
             if not isinstance(event, LLMEvent):  # pragma: no cover - defensive
                 continue
-            if event.kind == "assistant":
+            if event.kind == "token":
+                if isinstance(event.data, str):
+                    self._streaming_partial += event.data
+            elif event.kind == "assistant":
                 payload = event.data
                 if isinstance(payload, LLMResponse):
                     assistant_msg = payload.message

@@ -1,4 +1,4 @@
-"""Tests for the non-streaming OpenAI-compatible adapter + pairing layer."""
+"""Tests for the streaming OpenAI-compatible adapter (v0.10.1) + pairing layer."""
 from __future__ import annotations
 
 import asyncio
@@ -38,58 +38,101 @@ def _ihep_claude_slot() -> Slot:
     )
 
 
-def _completion(
-    *,
-    content: str | None = "ok",
-    tool_calls: list[dict[str, Any]] | None = None,
-    finish_reason: str = "stop",
-) -> SimpleNamespace:
-    """Build a non-streaming Chat Completions response object."""
-    message_kwargs: dict[str, Any] = {"role": "assistant", "content": content}
-    if tool_calls is not None:
-        message_kwargs["tool_calls"] = [
-            SimpleNamespace(
-                id=tc["id"],
-                type=tc.get("type", "function"),
-                function=SimpleNamespace(**tc["function"]),
-            )
-            for tc in tool_calls
-        ]
+def _content_chunk(text: str | None, finish_reason: str | None = None) -> SimpleNamespace:
+    """One streaming chunk carrying a content delta."""
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
-                message=SimpleNamespace(**message_kwargs),
+                delta=SimpleNamespace(content=text),
                 finish_reason=finish_reason,
             )
         ]
     )
 
 
-class FakeCompletions:
-    """Pretends to be ``client.chat.completions`` with non-streaming create."""
+def _tool_chunk(
+    *,
+    index: int = 0,
+    call_id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+    finish_reason: str | None = None,
+) -> SimpleNamespace:
+    """One streaming chunk carrying a tool_call delta (index-keyed)."""
+    fn = SimpleNamespace(name=name, arguments=arguments)
+    tc = SimpleNamespace(index=index, id=call_id, type="function", function=fn)
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=None, tool_calls=[tc]),
+                finish_reason=finish_reason,
+            )
+        ]
+    )
 
-    def __init__(self, completion: Any) -> None:
-        self.completion = completion
+
+class FakeStream:
+    """Async-iterable stand-in for openai's ``AsyncStream``; supports close()."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __aiter__(self) -> FakeStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        if self.closed or not self._chunks:
+            raise StopAsyncIteration
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeCompletions:
+    """Pretends to be ``client.chat.completions`` with streaming create."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self.chunks = chunks
         self.kwargs: dict[str, Any] | None = None
+        self.stream: FakeStream | None = None
 
     async def create(self, **kwargs: Any) -> Any:
         self.kwargs = kwargs
-        return self.completion
+        self.stream = FakeStream(self.chunks)
+        return self.stream
+
+
+class HangingStream:
+    """Async stream that parks on __anext__ until close() is called."""
+
+    def __init__(self) -> None:
+        self.closed = asyncio.Event()
+
+    def __aiter__(self) -> HangingStream:
+        return self
+
+    async def __anext__(self) -> Any:
+        await self.closed.wait()
+        raise StopAsyncIteration
+
+    def close(self) -> None:
+        self.closed.set()
 
 
 class HangingCompletions:
-    """Awaits forever — the test cancels it from outside."""
+    """create() returns a stream that hangs until closed (tests stop())."""
 
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] | None = None
         self.entered = asyncio.Event()
+        self.stream = HangingStream()
 
     async def create(self, **kwargs: Any) -> Any:
         self.kwargs = kwargs
         self.entered.set()
-        await asyncio.Event().wait()
-        # never returns
-        return None  # pragma: no cover
+        return self.stream
 
 
 # ---- pairing function (pure) -----------------------------------------------
@@ -261,12 +304,18 @@ def test_pairing_scans_only_latest_assistant_with_tool_calls():
     assert any(m["tool_call_id"] == "c2" and m["content"] == MISSING_TOOL_RESULT for m in tool_msgs)
 
 
-# ---- streaming (now non-streaming) ----------------------------------------
+# ---- streaming (v0.10.1) --------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_yields_one_assistant_event():
-    completions = FakeCompletions(_completion(content="hello", finish_reason="stop"))
+async def test_streaming_yields_token_deltas_then_assistant():
+    completions = FakeCompletions(
+        [
+            _content_chunk("hel"),
+            _content_chunk("lo"),
+            _content_chunk(None, finish_reason="stop"),
+        ]
+    )
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
@@ -278,29 +327,26 @@ async def test_non_streaming_yields_one_assistant_event():
         )
     ]
 
-    assert [event.kind for event in events] == ["assistant"]
+    assert [event.kind for event in events] == ["token", "token", "assistant"]
+    assert [e.data for e in events if e.kind == "token"] == ["hel", "lo"]
     response = events[-1].data
     assert isinstance(response, LLMResponse)
     assert response.finish_reason == "stop"
     assert response.message == {"role": "assistant", "content": "hello"}
     assert completions.kwargs is not None
-    assert completions.kwargs["stream"] is False
+    assert completions.kwargs["stream"] is True
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_returns_tool_calls():
+async def test_streaming_rebuilds_tool_calls_index_keyed():
+    """tool_call fragments across deltas reassemble into one call."""
     completions = FakeCompletions(
-        _completion(
-            content=None,
-            tool_calls=[
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "echo", "arguments": '{"x": 1}'},
-                }
-            ],
-            finish_reason="tool_calls",
-        )
+        [
+            _tool_chunk(index=0, call_id="call_1", name="echo", arguments=""),
+            _tool_chunk(index=0, arguments='{"x":'),
+            _tool_chunk(index=0, arguments=" 1}"),
+            _content_chunk(None, finish_reason="tool_calls"),
+        ]
     )
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -314,7 +360,7 @@ async def test_non_streaming_returns_tool_calls():
         )
     ]
 
-    assert [event.kind for event in events] == ["assistant"]
+    assert [e.kind for e in events] == ["assistant"]  # no content tokens
     response = events[-1].data
     assert response.finish_reason == "tool_calls"
     assert response.message["content"] is None
@@ -328,17 +374,13 @@ async def test_non_streaming_returns_tool_calls():
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_handles_dict_message_payload():
-    """Some gateways return dict payloads instead of SDK objects."""
+async def test_streaming_handles_dict_chunks():
+    """Some gateways stream dict chunks instead of SDK objects."""
     completions = FakeCompletions(
-        {
-            "choices": [
-                {
-                    "message": {"role": "assistant", "content": "dict reply"},
-                    "finish_reason": "stop",
-                }
-            ]
-        }
+        [
+            {"choices": [{"delta": {"content": "dict "}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "reply"}, "finish_reason": "stop"}]},
+        ]
     )
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -350,33 +392,23 @@ async def test_non_streaming_handles_dict_message_payload():
             messages=[{"role": "user", "content": "hi"}],
         )
     ]
-    assert [event.kind for event in events] == ["assistant"]
-    response = events[-1].data
-    assert response.message["content"] == "dict reply"
+    assert [e.kind for e in events] == ["token", "token", "assistant"]
+    assert events[-1].data.message["content"] == "dict reply"
 
 
 @pytest.mark.asyncio
 async def test_pairing_runs_before_outbound_request():
-    """The outgoing payload is repaired before the SDK sees it. An
-    orphan tool_use in the input messages gets a synthetic tool_result
-    in the outgoing request body."""
-    completions = FakeCompletions(_completion(content="ok"))
+    """The outgoing payload is repaired before the SDK sees it."""
+    completions = FakeCompletions([_content_chunk("ok", finish_reason="stop")])
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
     messages = [
         {"role": "user", "content": "hi"},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [_tool_call("c1")],
-        },
+        {"role": "assistant", "content": None, "tool_calls": [_tool_call("c1")]},
         {"role": "user", "content": INTERRUPTED_BY_USER_MARKER},
     ]
-    _ = [
-        e
-        async for e in llm.stream_response(model="m", messages=messages)
-    ]
+    _ = [e async for e in llm.stream_response(model="m", messages=messages)]
     assert completions.kwargs is not None
     outbound = completions.kwargs["messages"]
     tool_msgs = [m for m in outbound if m.get("role") == "tool"]
@@ -387,7 +419,7 @@ async def test_pairing_runs_before_outbound_request():
 
 @pytest.mark.asyncio
 async def test_ihep_anthropic_request_sends_system_prompt_via_extra_body():
-    completions = FakeCompletions(_completion(content="ok"))
+    completions = FakeCompletions([_content_chunk("ok", finish_reason="stop")])
     llm = OpenAIChatLLM(_ihep_claude_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
@@ -403,7 +435,7 @@ async def test_ihep_anthropic_request_sends_system_prompt_via_extra_body():
     ]
 
     assert completions.kwargs is not None
-    assert completions.kwargs["stream"] is False
+    assert completions.kwargs["stream"] is True
     assert completions.kwargs["messages"] == [{"role": "user", "content": "Say ok."}]
     assert completions.kwargs["extra_body"] == {"system": "Be brief."}
 
@@ -414,13 +446,12 @@ async def test_ihep_anthropic_request_sends_system_prompt_via_extra_body():
 def test_stop_on_idle_llm_is_noop():
     llm = OpenAIChatLLM(_slot())
     llm.stop()
-    assert llm._active_task is None
+    assert llm._active_stream is None
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_awaiting_create_task():
-    """stop() cancels the parked create() task so the awaiting
-    stream_response raises CancelledError."""
+async def test_stop_closes_active_stream():
+    """stop() closes the active stream so the iterator exits cleanly."""
     completions = HangingCompletions()
     llm = OpenAIChatLLM(_slot())
     llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -434,14 +465,10 @@ async def test_stop_cancels_awaiting_create_task():
 
     task = asyncio.create_task(drive())
     await completions.entered.wait()
-    # The LLM should have an active task by now.
-    for _ in range(50):
-        await asyncio.sleep(0.01)
-        if llm._active_task is not None:
-            break
-    assert llm._active_task is not None
+    assert llm._active_stream is not None
 
     llm.stop()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=0.5)
-    assert llm._active_task is None
+    # Closing the stream makes the hung __anext__ raise StopAsyncIteration,
+    # so the generator finishes normally (no CancelledError needed here).
+    await asyncio.wait_for(task, timeout=0.5)
+    assert llm._active_stream is None

@@ -4,6 +4,30 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.1] — 2026-05-29
+
+### Changed
+- **Streaming is back (`stream=True`), closing the cancel-as-steer arc.** The
+  LLM adapter once again streams token deltas (restored from v0.9.2 and merged
+  with v0.9.3's tool-result pairing layer): `stream_response` yields
+  `LLMEvent("token", str)` per content delta, rebuilds `tool_calls` index-keyed
+  across deltas, and emits one terminal `assistant` event. `stop()` closes the
+  active `AsyncStream` (eager teardown). The key win — **Esc mid-response now
+  keeps the partial assistant text**: `_call_llm` stashes the streamed bytes and
+  `_do_cancel` commits them as a partial assistant turn *before* the
+  `[interrupted by user]` marker, so a steer carries the prior assistant intent
+  (where before it kept nothing). Hard LLM errors discard the partial (one
+  `[LLM error]` message); user-cancel and timeout keep it.
+
+### Non-goal (recorded)
+- **Live token-by-token transcript rendering is deferred to v1.x.** The
+  append-only scrollback (v0.6.8) can't grow a line in place; the v0.9.4/v0.9.8
+  blink heartbeat remains the during-LLM liveness signal. A bounded preview in
+  the above-input region is a clean v1.x add. `terminal_chat.py` is unchanged.
+
+See [docs/PRDs/v0.10.1-streaming-steer.md](docs/PRDs/v0.10.1-streaming-steer.md)
+and [docs/splits/v0.10.1-streaming-steer.html](docs/splits/v0.10.1-streaming-steer.html).
+
 ## [v0.10.0] — 2026-05-29
 
 ### Added

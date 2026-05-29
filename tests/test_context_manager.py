@@ -8,6 +8,7 @@ import pytest
 
 from neutrix.config import Slot
 from neutrix.context_manager import (
+    LLM_ERROR_PREFIX,
     ClearEvent,
     ContextManager,
     ReplaceHistoryEvent,
@@ -566,3 +567,138 @@ async def test_tool_names_none_advertises_all():
     await ctx.handle_event(UserMessageEvent("hello"))
     tools = llm.calls[0]["tools"]
     assert {t["function"]["name"] for t in tools} == set(BUILTIN_TOOLS)
+
+
+# ---- v0.10.1 streaming + keep-partial-on-cancel ---------------------------
+
+
+def _token(text: str) -> LLMEvent:
+    return LLMEvent("token", text)
+
+
+class _StreamingSuspendLLM:
+    """Yields token deltas, then parks until stop() cancels it (cancel-mid-stream)."""
+
+    def __init__(self, tokens: list[str]) -> None:
+        self.tokens = tokens
+        self.yielded = asyncio.Event()
+        self.stop_calls = 0
+        self._task: asyncio.Task[Any] | None = None
+
+    def switch(self, slot: Slot) -> None:
+        pass
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def stream_response(self, *, model, messages, tools=None):
+        for tok in self.tokens:
+            yield _token(tok)
+        self.yielded.set()
+        self._task = asyncio.ensure_future(asyncio.Event().wait())
+        try:
+            await self._task
+        finally:
+            self._task = None
+        # Only reached if never cancelled.
+        yield LLMEvent(  # pragma: no cover
+            "assistant",
+            LLMResponse({"role": "assistant", "content": "".join(self.tokens)}, "stop"),
+        )
+
+
+class _StreamThenRaiseLLM:
+    """Yields some tokens, then raises mid-stream (hard error after partial)."""
+
+    def switch(self, slot: Slot) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    async def stream_response(self, **_: Any):
+        yield _token("partial ")
+        yield _token("text")
+        raise RuntimeError("boom mid-stream")
+
+
+@pytest.mark.asyncio
+async def test_streaming_tokens_accumulate_into_one_assistant_message():
+    llm = FakeLLM([[_token("hel"), _token("lo"), _assistant_text("hello")]])
+    ctx = _make_ctx(llm, use_tools=False)
+    await ctx.handle_event(UserMessageEvent("hi"))
+    assert ctx.state == State.IDLE
+    assistants = [m for m in ctx.messages if m["role"] == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cancel_mid_stream_keeps_partial_text():
+    """Esc mid-stream commits the partial assistant turn BEFORE the marker."""
+    llm = _StreamingSuspendLLM(["par", "tial"])
+    ctx = _make_ctx(llm, use_tools=False)
+    task = asyncio.create_task(ctx.handle_event(UserMessageEvent("hi")))
+    await llm.yielded.wait()
+    fired = ctx.cancel()
+    assert fired is True
+    await asyncio.wait_for(task, timeout=0.5)
+
+    assert ctx.state == State.IDLE
+    # partial assistant turn, then the interrupt marker (ordering matters).
+    assert ctx.messages[-2] == {"role": "assistant", "content": "partial"}
+    assert ctx.messages[-1]["content"] == INTERRUPTED_BY_USER_MARKER
+    # Store mirrors the partial assistant turn.
+    assert any(
+        r.role == "assistant" and r.content == "partial" for r in ctx.store.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_any_token_appends_no_partial():
+    """Cancel with no tokens yet → no partial assistant message (preserved)."""
+    llm = _StreamingSuspendLLM([])  # parks before any token
+    ctx = _make_ctx(llm, use_tools=False)
+    task = asyncio.create_task(ctx.handle_event(UserMessageEvent("hi")))
+    await llm.yielded.wait()
+    ctx.cancel()
+    await asyncio.wait_for(task, timeout=0.5)
+    # Only the marker — no empty assistant turn.
+    assert ctx.messages[-1]["content"] == INTERRUPTED_BY_USER_MARKER
+    assert not any(
+        m["role"] == "assistant" and not m.get("content") for m in ctx.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_call_round_store_record_carries_tool_calls(monkeypatch):
+    """Landmine #1: the committed store record keeps tool_calls (renders → tool_use)."""
+    monkeypatch.setattr(
+        "neutrix.executor.dispatch",
+        lambda name, arguments, **_: f"ran {name}",
+    )
+    llm = FakeLLM([[_assistant_tool("echo", "{}")], [_assistant_text("done")]])
+    ctx = _make_ctx(llm, use_tools=True)
+    await ctx.handle_event(UserMessageEvent("go"))
+    tc_records = [
+        r for r in ctx.store.messages if r.role == "assistant" and (r.extra or {}).get("tool_calls")
+    ]
+    assert len(tc_records) == 1
+    assert tc_records[0].extra["tool_calls"][0]["function"]["name"] == "echo"
+
+
+@pytest.mark.asyncio
+async def test_llm_error_after_partial_tokens_yields_one_message():
+    """Landmine #2: hard error after partial tokens → one [LLM error] message."""
+    llm = _StreamThenRaiseLLM()
+    ctx = _make_ctx(llm, use_tools=False)
+    await ctx.handle_event(UserMessageEvent("hi"))
+    assert ctx.state == State.IDLE
+    assistants = [m for m in ctx.messages if m["role"] == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["content"].startswith(LLM_ERROR_PREFIX)
+    # The partial text was discarded, not committed.
+    assert not any(m.get("content") == "partial text" for m in ctx.messages)
