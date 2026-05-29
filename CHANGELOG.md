@@ -4,6 +4,28 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.5.1] — 2026-05-29
+
+### Fixed
+- **An unanswered interactive prompt no longer hangs the turn** (a v1.4.8
+  regression). v1.4.8 made permission-`ask` an interactive prompt that parked the
+  turn awaiting an answer with no timeout — so a routine `rm -rf build` /
+  `git push --force` (which `auto` mode flags) would hang forever if the prompt
+  went unnoticed (no network in flight, no watchdog, since it isn't in
+  `AWAITING_LLM`). Now `_ask_user` bounds the wait at `PROMPT_TIMEOUT_S` (300s)
+  and, on timeout, returns `None` → the existing safe fallback (permission-`ask`
+  → block-with-notice and the turn **continues**; AskUserQuestion → not-available).
+  The agent handles it; the user never has to press Esc to un-hang.
+
+### Changed
+- The pending-prompt indicator is now prominent — `▶ answer needed: <header> —
+  type a number, or Esc to skip` (bold) instead of a dim "answering:" that was
+  easy to miss. A required answer is a real interaction, not an idle hint.
+
+Diagnosed live with `py-spy` + `ss` (no `ESTAB` ⇒ not an LLM stall), advisor-confirmed.
+See [docs/PRDs/v1.5.1-prompt-no-hang.md](docs/PRDs/v1.5.1-prompt-no-hang.md)
+and [docs/splits/v1.5.1-prompt-no-hang.html](docs/splits/v1.5.1-prompt-no-hang.html).
+
 ## [v1.5.0] — 2026-05-29
 
 ### Added

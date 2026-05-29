@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.5.1 splits — interactive prompt can't hang the turn</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.5.1 splits — interactive prompt can't hang the turn</h1>
+<p class="tagline">Fix a v1.4.8 regression: an unanswered permission/AskUserQuestion prompt parked the turn forever. The agent must never hang on a prompt.</p>
+<p class="note"><strong>Regression (diagnosed live, advisor-confirmed):</strong> v1.4.8 turned permission-<code>ask</code> from block-with-notice (turn continues) into an interactive prompt that parks the turn awaiting <code>_pending_answer</code> with NO timeout/escape. The user's routine <code>rm -rf build</code> / <code>git push --force</code> trip <code>auto</code>-mode's danger heuristic → prompt → if unanswered (subtle indicator), the turn hangs forever (no network, no watchdog — it isn't in <code>AWAITING_LLM</code>). User: "the agent should handle it, not the user."</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Prompt timeout → safe fallback (never park forever)</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Bound the wait.</strong> <code>_ask_user</code> awaits <code>asyncio.wait_for(self._pending_answer, PROMPT_TIMEOUT_S)</code>. On <code>TimeoutError</code> it returns a <strong>None</strong> answer (clears pending in <code>finally</code>). The Executor's existing <code>answer is None</code> branch already means "no interactive consumer" → <strong>permission-<code>ask</code> falls back to block-with-notice</strong> (deny, the turn CONTINUES — pre-v1.4.8 behavior), and <strong>AskUserQuestion returns the not-available result</strong>. So an unanswered prompt degrades to the safe non-hanging path — the agent handles it. <code>PROMPT_TIMEOUT_S</code> generous (default 300s; you have time to answer, but a walked-away session can't zombie).</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">Unmissable indicator + Esc (a required answer isn't an "idle hint")</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision">The pending-prompt line in <code>_above_input</code> becomes prominent (bright/colored, with the call to action): <code>▶ answer needed: &lt;header&gt; — type a number, or Esc to skip</code> — not the dim "answering:" that was missed. This is a required interaction, not an idle affordance, so it's exempt from the "no ugly hints" preference. Esc already cancels (cancel → drive-task cancel → <code>CancelledError</code> at the await); make sure it surfaces as a clean turn-continue, and document it in the line.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Cross-task safety of the timeout</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision">On <code>wait_for</code> timeout the Future is cancelled (done) — the input loop's <code>if pending is not None and not pending.done()</code> guard already skips a done Future, and <code>_ask_user</code>'s <code>finally</code> nulls <code>_pending_question</code>/<code>_pending_answer</code>, so a late keystroke is treated as a normal message. The multi-question loop re-arms a fresh Future per question; a timeout aborts the whole spec (returns None). No new state; reuses the v1.4.8 channel.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Should <code>auto</code> mode prompt at all for these?</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Keep prompting (user wanted the v1.4.8 interactive upgrade), but it's now SAFE</strong> because of split #1 (can't hang). The danger heuristic still flags <code>rm -rf</code>/<code>--force</code> → a prompt; answered → proceed/deny; unanswered → safe block-with-notice. NOT reverting to silent block (the user asked for the interactive prompt). The fix is making the prompt non-fatal, not removing it.</dd></dl></div>
+
+<footer>v1.5.1 prompt-no-hang · 4 split points · <code>wait_for</code> timeout → None → existing safe fallback (block-with-notice / not-available) · prominent answer-needed indicator + Esc · reuses the v1.4.8 channel, no new state. Fixes the v1.4.8 turn-park regression. Auto-retry (wrong diagnosis) discarded; session-resume → v1.5.2.</footer>
+</body></html>

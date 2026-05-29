@@ -166,6 +166,11 @@ def format_duration_short(seconds: float) -> str:
 # steadily-streaming response doesn't flicker a 0-1s age on every tick.
 PROGRESS_AGE_FLOOR_S = 3.0
 
+# v1.5.1: an interactive prompt (AskUserQuestion / permission-ask) waits at most
+# this long for an answer, then falls back to the safe non-interactive path so an
+# unanswered prompt can never park the turn forever (the v1.4.8 regression).
+PROMPT_TIMEOUT_S = 300.0
+
 
 STREAM_PREVIEW_LINES = 8
 
@@ -1053,7 +1058,10 @@ class TerminalChat:
         # v1.4.8: while a question is pending, a one-line "answering" indicator
         # (state, not an idle affordance) — clears the moment it is answered.
         pending_q = self._pending_question
-        answering = f"answering: {pending_q.header}" if pending_q is not None else None
+        answering = (
+            f"▶ answer needed: {pending_q.header} — type a number, or Esc to skip"
+            if pending_q is not None else None
+        )
         if (
             not heartbeat and not tasks and not queued
             and quit_hint is None and not preview and answering is None
@@ -1085,7 +1093,7 @@ class TerminalChat:
         if preview:
             fragments.append(("fg:ansibrightblack italic", f"{preview}\n"))
         if answering is not None:
-            fragments.append(("fg:ansiyellow", f"{answering}\n"))
+            fragments.append(("fg:ansiyellow bold reverse", f"{answering}\n"))
         fragments.extend(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
@@ -1317,15 +1325,22 @@ class TerminalChat:
         """
         return self.ctx.cancel()
 
-    async def _ask_user(self, spec: QuestionSpec) -> Answer:
-        """Interactive ``ask_user`` port (wired into ``executor.ask_user``).
+    async def _ask_user(self, spec: QuestionSpec) -> Answer | None:
+        """Interactive ``ask_user`` port (wired into ``ctx.ask_user``).
 
         Runs inside the worker task (the turn). For each question: print the
         numbered block to scrollback, set ``_pending_question`` + a fresh Future
         BEFORE the print's await (so a keystroke during the await routes to the
         Future, not the message queue), then await the Future the input loop
-        resolves. Cancel (Esc) raises ``CancelledError`` at the await; the
-        ``finally`` clears the pending state so the input loop stops routing.
+        resolves.
+
+        v1.5.1: the wait is BOUNDED by ``PROMPT_TIMEOUT_S`` and returns ``None``
+        on timeout — an unanswered prompt must never park the turn forever (the
+        v1.4.8 regression). ``None`` routes to the Executor's "no interactive
+        consumer" branch: permission-``ask`` falls back to block-with-notice
+        (turn continues), AskUserQuestion returns the not-available result. Esc
+        still raises ``CancelledError`` (a real cancel), unwinding the turn; the
+        ``finally`` clears the pending state on every exit.
         """
         from neutrix.prompts import QuestionAnswer
 
@@ -1339,7 +1354,17 @@ class TerminalChat:
                     self._pending_answer = loop.create_future()
                     await self.view.print_system(render_question(question, idx, total))
                     self._invalidate_app()
-                    line = await self._pending_answer
+                    try:
+                        line = await asyncio.wait_for(
+                            self._pending_answer, PROMPT_TIMEOUT_S
+                        )
+                    except TimeoutError:
+                        await self.view.print_notice(
+                            f"no answer in {int(PROMPT_TIMEOUT_S)}s — continuing "
+                            "without it (the call was not approved)",
+                            style="yellow",
+                        )
+                        return None  # → safe fallback; finally clears state
                     qa = parse_answer_line(line, question)
                     if qa is None:  # empty — re-prompt (defensive; input loop skips empties)
                         continue

@@ -514,6 +514,24 @@
 </div>
 
 <div class="entry">
+  <span class="ver">v1.5.1</span>
+  <span class="theme">
+    Interactive prompt can't hang the turn
+    <small>
+      Fixes a v1.4.8 regression (diagnosed live + advisor-confirmed): permission-<code>ask</code>
+      became an interactive prompt that parked the turn awaiting an answer with no
+      timeout — a routine <code>rm -rf build</code>/<code>git push --force</code> (flagged by
+      <code>auto</code> mode) hung forever if unnoticed (no network, no watchdog).
+      Now <code>_ask_user</code> bounds the wait (<code>PROMPT_TIMEOUT_S</code>) → on timeout
+      returns <code>None</code> → safe fallback (block-with-notice; turn continues). Prominent
+      <code>▶ answer needed</code> indicator + Esc. The agent handles it, not the user.
+      (<a href="splits/v1.5.1-prompt-no-hang.html">4 split-point decisions</a>.) Suite 404.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.5.0</span>
   <span class="theme">
     Status bar — LLM / Exec / Advisor liveness
@@ -591,16 +609,18 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.5.1</span>
+  <span class="ver">v1.5.2</span>
   <span class="theme">
-    <code>/goal</code> + conversation resume
+    Conversation resume (<code>--continue</code> / <code>/resume</code>)
     <small>
-      A neutrix-native goal loop (set a goal, keep driving until a condition
-      holds, <code>/goal clear</code>) — user #6 — plus <code>--continue</code> /
-      <code>/resume</code> to reload the last session (gap-fill beyond /save·/load).
+      Auto-persist every turn to a Claude-Code-compatible
+      <code>~/.claude/projects/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> (per-entry timestamps);
+      <code>--continue</code> reloads the most recent session, <code>/resume</code> picks one
+      (so a killed session survives). <code>session_store.py</code> already built + tested.
+      The neutrix-native <code>/goal</code> loop is split off to its own later release.
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">next</span></span>
 </div>
 
 <div class="entry">

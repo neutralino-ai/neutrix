@@ -987,3 +987,21 @@ async def test_input_loop_routes_pending_answer_ignoring_empty(tmp_path):
     assert chat._pending_answer.done()
     assert chat._pending_answer.result() == "2"
     assert chat._input_queue.empty()  # answer never enqueued as a user message
+
+
+@pytest.mark.asyncio
+async def test_ask_user_times_out_to_none(tmp_path, monkeypatch):
+    """v1.5.1: an unanswered prompt must NOT park the turn forever — it times out
+    to None (→ Executor's safe fallback), clearing pending state."""
+    import neutrix.terminal_chat as tc
+    monkeypatch.setattr(tc, "PROMPT_TIMEOUT_S", 0.05)
+    from neutrix.prompts import Option, Question, QuestionSpec
+
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    spec = QuestionSpec(questions=(
+        Question("Allow rm -rf?", "Permission", (Option("Yes"), Option("No")), False),
+    ))
+    result = await chat._ask_user(spec)  # nobody ever answers
+    assert result is None
+    assert chat._pending_question is None and chat._pending_answer is None
