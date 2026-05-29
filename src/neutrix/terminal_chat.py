@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -43,6 +44,7 @@ from neutrix.compaction import (
     is_summary_marker,
 )
 from neutrix.config import SLOT_NAMES, Config, ConfigError, Slot, load_config
+from neutrix.context_files import expand_at_mentions
 from neutrix.context_manager import (
     ADVISOR_TAG_CLOSE,
     ADVISOR_TAG_OPEN,
@@ -883,6 +885,9 @@ class TerminalChat:
         while True:
             text = await self._input_queue.get()
             self.store.dequeue_user()
+            # v1.2.0: inline @path file-mentions into the turn (raw text stayed
+            # in the queue panel; the expanded text becomes the user message).
+            text = expand_at_mentions(text, os.getcwd())
             self._busy = True
             self._invalidate_app()
             try:
@@ -1261,6 +1266,7 @@ class TerminalChat:
                 [
                     "Commands:",
                     "  /help               show this",
+                    "  /init               survey the repo and write a CLAUDE.md",
                     "  /status             show slot, model, tool state, message count",
                     "  /tasks              list tracked tasks (read-only)",
                     "  /fast               switch to the fast slot",
@@ -1289,6 +1295,26 @@ class TerminalChat:
         """On-demand Advisor run (v0.10.4) — bypasses the periodic trigger."""
         await self.view.print_notice("↳ advisor: reviewing…", style="dim")
         await self._maybe_run_advisor(forced=True)
+
+    async def _cmd_init(self, args: list[str]) -> None:
+        """v1.2.0: drive the agent to survey the repo and write a CLAUDE.md."""
+        if self._busy:
+            await self.view.print_notice(
+                "/init waits for the assistant to finish", style="yellow"
+            )
+            return
+        prompt = (
+            "Survey this repository and write a concise CLAUDE.md at the project "
+            "root for future coding agents. Use Glob/Grep/Read/Bash to detect the "
+            "build, test, and lint commands, the language/stack, key conventions, "
+            "and any non-obvious gotchas. Keep it short — only what an agent would "
+            "otherwise get wrong; no generic advice, no file-by-file tour. Then "
+            "Write it to CLAUDE.md."
+        )
+        await self.view.print_notice("↳ /init: surveying the repo…", style="dim")
+        self.store.enqueue_user(prompt)
+        assert self._input_queue is not None
+        await self._input_queue.put(prompt)
 
     async def _cmd_show(self, args: list[str]) -> None:
         """Expand-by-append a folded LLM-input channel (v0.10.2 parity)."""

@@ -4,6 +4,28 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.2.0] — 2026-05-29
+
+### Added
+- **Project context — `CLAUDE.md`/`AGENTS.md` auto-load, `@`-mentions, `/init`.**
+  The agent now has project memory (the biggest Claude Code gap). New
+  `src/neutrix/context_files.py`:
+  - **Memory auto-load** — discovers `~/.claude/CLAUDE.md` (user), project
+    `CLAUDE.md`/`.claude/CLAUDE.md`/`AGENTS.md` walking cwd→root (cwd-most wins),
+    and `CLAUDE.local.md`; expands `@path` imports inside them (recursive,
+    depth ≤ 5, code-block-safe, cycle-safe); wraps with the CC "these
+    instructions OVERRIDE" header and prepends to the system prompt (renders
+    folded via v0.10.2 — `/show system`). `.claude/`-compatible: drops into a
+    Claude Code project and inherits its `CLAUDE.md`.
+  - **`@`-mentions** — `@path` in a typed message inlines the file into that
+    turn (`<file path="…">…</file>`), with `@path#L10-20` line ranges and `@dir`
+    listings; non-existent `@tokens` are left untouched (no prose false-noise).
+  - **`/init`** — drives the agent (Read/Grep/Glob/Bash + Write) to survey the
+    repo and write a concise `CLAUDE.md` (reuses the v0.10.0 Agent surface).
+
+See [docs/PRDs/v1.2.0-project-context.md](docs/PRDs/v1.2.0-project-context.md)
+and [docs/splits/v1.2.0-project-context.html](docs/splits/v1.2.0-project-context.html).
+
 ## [v1.1.0] — 2026-05-29
 
 ### Changed

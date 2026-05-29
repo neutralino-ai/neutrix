@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from neutrix.config import (
     load_config,
     resolve_initial_slot,
 )
+from neutrix.context_files import compose_system_prompt
 from neutrix.context_manager import DEFAULT_SYSTEM_PROMPT, ContextManager
 from neutrix.executor import Executor
 from neutrix.llm import OpenAIChatLLM
@@ -95,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     store = ChatStore()
     executor = Executor(store=store)
 
-    seed_messages: list[dict] = [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
+    # v1.2.0: compose CLAUDE.md/AGENTS.md (+ user ~/.claude/CLAUDE.md) into the
+    # system prompt so the agent has project memory (.claude/-compatible).
+    effective_system_prompt = compose_system_prompt(DEFAULT_SYSTEM_PROMPT, os.getcwd())
+    seed_messages: list[dict] = [{"role": "system", "content": effective_system_prompt}]
     loaded_tasks: list = []
     if args.load:
         try:
@@ -116,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         llm=llm,
         executor=executor,
         store=store,
-        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        system_prompt=effective_system_prompt,
         use_tools=not args.no_tools,
         messages=seed_messages,
     )

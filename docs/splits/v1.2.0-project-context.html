@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>v1.2.0 splits — project context</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+
+<h1>v1.2.0 splits — project context (CLAUDE.md + @-mentions + /init)</h1>
+<p class="tagline">CC's killer coding feature, currently absent from neutrix: auto-load project/user
+memory into the system prompt, <code>@path</code> file-mentions, and <code>/init</code>. <code>.claude/</code>-compatible.</p>
+<p class="note">Decided autonomously under the <code>build-to-v2.0.0</code> /goal. CC survey: memory loading
+(<code>utils/claudemd.ts</code>, <code>context.ts</code>), @-mentions (<code>utils/attachments.ts</code>),
+<code>/init</code> (<code>commands/init.ts</code>).</p>
+
+<h2>Split points</h2>
+
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">Which files + discovery scope</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>managed → user <code>~/.claude/CLAUDE.md</code> → project (upward walk: <code>CLAUDE.md</code>, <code>.claude/CLAUDE.md</code>) → <code>CLAUDE.local.md</code>; closer-to-cwd overrides; loaded last = highest priority.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC (pragmatic subset).</strong> Discover, in inject order: user <code>~/.claude/CLAUDE.md</code>; then project files walking <strong>cwd → filesystem root</strong> — <code>CLAUDE.md</code>, <code>.claude/CLAUDE.md</code>, <code>AGENTS.md</code> — root-most first so cwd-most lands last (highest); then <code>CLAUDE.local.md</code> (cwd). De-dup by resolved path. <code>.claude/rules/*.md</code> conditional (path-frontmatter) deferred — needs the hooks/edit-event surface (v1.6.0).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Injection point</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>composed block wrapped with a "these instructions OVERRIDE default behavior" header, injected as user context.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Prepend to the system prompt</strong> (neutrix's CM owns <code>system_prompt</code> = <code>messages[0]</code>): <code>compose_system_prompt(base, cwd)</code> = base + the wrapped memory block. Composed once at CM construction in <code>cli.py</code>. Renders folded via v0.10.2 visibility-parity (<code>/show system</code>). Simpler than a separate channel and reuses the existing system-prompt render/fold.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">@import inside CLAUDE.md</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> Resolve <code>@path</code> imports in memory files (relative to the file's dir, <code>~</code> expanded), recursively, <strong>max depth 5</strong>, skipping fenced code blocks, with a seen-set against cycles; missing imports silently skipped.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">4.</span><span class="name">@-mentions in user input — inline vs attach</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>attaches file content as separate attachment blocks alongside the user message.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Alternative — inline expansion.</strong> neutrix is OpenAI-compat text + append-only, so <code>@path</code> in a typed message is expanded into the SAME user turn: the raw text followed by <code>&lt;file path="…"&gt;…&lt;/file&gt;</code> blocks (line ranges via <code>@path#L10-20</code>; a dir → a file listing; missing → a note). Done in <code>_worker_loop</code> after dequeue (so the queue panel shows the raw typed text). The expanded turn is what the LLM sees and the transcript shows (visibility parity). Recall surfaces the expanded text — acceptable for v1.2.0.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">5.</span><span class="name">/init — full wizard vs minimal</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>a 7-phase interactive interview (AskUserQuestion) + subagent repo scan → writes CLAUDE.md / skills / hooks.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Minimal, reusing v0.10.0.</strong> <code>/init</code> enqueues a fixed init prompt that drives the main agent to survey the repo (with <code>Read</code>/<code>Grep</code>/<code>Glob</code>/<code>Bash</code>) and <code>Write</code> a concise <code>CLAUDE.md</code> (build/test/lint commands, conventions, gotchas). No bespoke wizard — the agent + tools already do it. The full interview (skills/hooks generation) is a v1.3.0+ follow-up once skills land.</dd></dl></div>
+
+<footer>v1.2.0 project context · 5 split points, decided autonomously · CLAUDE.md/AGENTS.md auto-load
+(walk-up + @import + wrapped into the system prompt) · inline @-mentions · minimal /init reusing the agent.</footer>
+</body></html>

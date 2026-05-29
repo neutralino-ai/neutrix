@@ -839,3 +839,15 @@ def test_terminal_chat_save_and_load_round_trip_via_commands(tmp_path: Path) -> 
     chat2.run()
     assert "hi" in output2.getvalue()
     assert "hello" in output2.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_cmd_init_enqueues_survey_prompt(tmp_path):
+    """v1.2.0: /init drives the agent — it enqueues a non-empty survey prompt."""
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    chat._input_queue = asyncio.Queue()
+    await chat._cmd_init([])
+    queued = [q.text for q in chat.store.queued_user_messages]
+    assert queued and "CLAUDE.md" in queued[0]
+    assert chat._input_queue.qsize() == 1
