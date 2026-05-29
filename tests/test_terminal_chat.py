@@ -851,3 +851,32 @@ async def test_cmd_init_enqueues_survey_prompt(tmp_path):
     queued = [q.text for q in chat.store.queued_user_messages]
     assert queued and "CLAUDE.md" in queued[0]
     assert chat._input_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_markdown_skill_dispatches_rendered_body(tmp_path):
+    """v1.3.0: typing /name for a markdown skill enqueues its rendered body."""
+    from neutrix.skills import SkillDef
+
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    chat._input_queue = asyncio.Queue()
+    chat._skills = {
+        "fixbug": SkillDef(
+            name="fixbug", description="d", body="Investigate $ARGUMENTS thoroughly.", source="x"
+        )
+    }
+    await chat._run_command("/fixbug the parser")
+    queued = [q.text for q in chat.store.queued_user_messages]
+    assert queued == ["Investigate the parser thoroughly."]
+    assert chat._input_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_still_errors(tmp_path):
+    ctx = _make_ctx(FakeLLM())
+    chat, output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    chat._input_queue = asyncio.Queue()
+    chat._skills = {}
+    await chat._run_command("/definitelynotacommand")
+    assert "unknown command" in output.getvalue()

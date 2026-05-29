@@ -538,7 +538,7 @@ The sub-agent runs with its own conversation and tools, works the task to comple
 - A single quick tool call you can make yourself.
 - Work that needs your full conversation context to make sense.
 
-Notes: the sub-agent cannot ask you questions (it runs unattended) and cannot itself dispatch sub-agents (single level). Only `general-purpose` is available.
+Notes: the sub-agent cannot ask you questions (it runs unattended) and cannot itself dispatch sub-agents (single level). `subagent_type` is `general-purpose` or the name of a custom agent defined in `.claude/agents/`.
 """
 
 
@@ -561,18 +561,26 @@ def _agent(
             "ERROR: Agent cannot be called from inside a sub-agent "
             "(sub-agents are single-level — complete the task with your own tools)"
         )
-    if subagent_type != "general-purpose":
-        return (
-            f"ERROR: unknown subagent_type {subagent_type!r}; "
-            "only 'general-purpose' is supported"
-        )
     if not prompt:
         return "ERROR: prompt is required"
     if slot is None:
         return "ERROR: Agent is unavailable (no slot wired to the executor)"
 
+    # v1.3.0: subagent_type may name a custom agent from .claude/agents/*.md;
+    # general-purpose uses the default worker prompt.
+    custom_system_prompt: str | None = None
+    if subagent_type != "general-purpose":
+        from neutrix.skills import discover_agents
+
+        agents = discover_agents(os.getcwd())
+        agent_def = agents.get(subagent_type.lower())
+        if agent_def is None:
+            avail = ", ".join(["general-purpose", *sorted(agents)])
+            return f"ERROR: unknown subagent_type {subagent_type!r}; available: {avail}"
+        custom_system_prompt = agent_def.system_prompt
+
     from neutrix.llm import CANCELLED_TOOL_RESULT, OpenAIChatLLM
-    from neutrix.subagent import run_subagent
+    from neutrix.subagent import SUBAGENT_SYSTEM_PROMPT, run_subagent
 
     llm = OpenAIChatLLM(slot)
     cancel_event = threading.Event()
@@ -587,6 +595,7 @@ def _agent(
                 llm=llm,
                 tool_names=subagent_tool_names(),
                 cancel_event=cancel_event,
+                system_prompt=custom_system_prompt or SUBAGENT_SYSTEM_PROMPT,
             )
         )
     finally:
@@ -829,7 +838,8 @@ BUILTIN_TOOLS: dict[str, Tool] = {
                 "subagent_type": {
                     "type": "string",
                     "description": (
-                        "The type of sub-agent (only 'general-purpose' is supported)"
+                        "'general-purpose', or the name of a custom agent in "
+                        ".claude/agents/"
                     ),
                     "default": "general-purpose",
                 },

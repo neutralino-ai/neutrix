@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.3.0 splits — skills framework</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.3.0 splits — skills + commands + hot-reload + custom agents</h1>
+<p class="tagline">Markdown skills/commands from <code>.claude/</code>, <code>/name</code> dispatch, hot-reload, and custom subagent types. User #4.</p>
+<p class="note">Decided autonomously under the <code>build-to-v2.0.0</code> /goal. CC survey (v2 kickoff): skills loader
+(<code>skills/loadSkillsDir.ts</code>), command framework (<code>commands.ts</code>), hot-reload watcher
+(<code>skillChangeDetector.ts</code>), agents (<code>loadAgentsDir.ts</code>).</p>
+
+<h2>Split points</h2>
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">Skill content model — tool vs slash command</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>skills are <code>PromptCommand</code>s invoked via a <code>Skill</code> tool (model-invocable) or <code>/name</code>; body is a prompt expanded inline.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>User-invocable slash commands</strong> for v1.3.0: <code>/&lt;name&gt;</code> enqueues the markdown body (with <code>$ARGUMENTS</code>/<code>$1..</code> substituted) as a user turn. A model-invocable <code>Skill</code> tool is deferred — the slash form is the high-value core and reuses the existing command dispatch.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Discovery dirs + override order</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> <code>.claude/skills/&lt;name&gt;/SKILL.md</code> + flat <code>.claude/commands/*.md</code>, scanned user (<code>~/.claude</code>) then project (project overrides on name collision). Frontmatter (<code>name</code>/<code>description</code>/<code>argument-hint</code>) parsed; name defaults to dir/file stem.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">3.</span><span class="name">Hot-reload mechanism — file watcher vs poll</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>chokidar FSWatch, 300 ms debounce, clears caches.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Alternative — mtime-signature poll (no new dependency).</strong> A 2 s background task compares a cheap signature (dir + <code>*.md</code> mtimes) and re-discovers only on change. Keeps neutrix lean (the same ethos as keeping the openai SDK over LiteLLM); a real watcher (<code>watchdog</code>) is a later option if 2 s feels slow.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Custom subagent types</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> <code>.claude/agents/*.md</code> → <code>AgentDef</code> (body = system prompt). The <code>Agent</code> tool reads them at dispatch time: <code>subagent_type</code> = <code>general-purpose</code> or a custom name; unknown → an error listing the available types. Extends v0.10.0 (general-purpose only) by passing the agent's system prompt to <code>run_subagent</code>.</dd></dl></div>
+
+<footer>v1.3.0 skills framework · 4 split points, decided autonomously · slash-command skills from <code>.claude/</code> +
+mtime-poll hot-reload + custom agents · <code>.claude/</code>-compatible.</footer>
+</body></html>

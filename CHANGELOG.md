@@ -4,6 +4,26 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.3.0] — 2026-05-29
+
+### Added
+- **Skills + slash-command framework + hot-reload + custom agents** (`.claude/`-compatible).
+  New `src/neutrix/skills.py`:
+  - **Markdown skills/commands** — discovered from `.claude/skills/<name>/SKILL.md`
+    and `.claude/commands/*.md` (user `~/.claude` then project; project overrides),
+    with YAML-ish frontmatter (`name`/`description`/`argument-hint`). Typing
+    `/<name>` enqueues the body as a user turn, substituting `$ARGUMENTS` and
+    `$1`…`$9`.
+  - **Hot-reload** — a 2 s background poll on a cheap dir signature re-discovers
+    skills on add/edit/remove (no file-watcher dependency — keeps neutrix lean);
+    prints `↻ skills reloaded`.
+  - **Custom subagent types** — `.claude/agents/*.md` become `subagent_type`
+    values the `Agent` tool can spawn (the body is the agent's system prompt),
+    extending v0.10.0's general-purpose-only set.
+
+See [docs/PRDs/v1.3.0-skills.md](docs/PRDs/v1.3.0-skills.md)
+and [docs/splits/v1.3.0-skills.html](docs/splits/v1.3.0-skills.html).
+
 ## [v1.2.0] — 2026-05-29
 
 ### Added

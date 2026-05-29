@@ -58,6 +58,7 @@ from neutrix.context_manager import (
     is_advisor_message,
     is_task_reminder,
 )
+from neutrix.skills import discover_skills, render_skill, skills_signature
 from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 
@@ -826,6 +827,10 @@ class TerminalChat:
         # lazily so a session that never triggers it makes no client.
         self.advisor = Advisor()
         self._advisor_llm: Any = None
+        # v1.3.0: markdown skills/commands (.claude/skills + .claude/commands),
+        # hot-reloaded by a background poll on the dir signature.
+        self._skills = discover_skills(os.getcwd())
+        self._skills_sig = skills_signature(os.getcwd())
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
@@ -838,6 +843,7 @@ class TerminalChat:
         worker = asyncio.create_task(self._worker_loop())
         renderer = asyncio.create_task(self._render_watcher())
         heartbeat = asyncio.create_task(self._heartbeat_ticker())
+        skills_poller = asyncio.create_task(self._skills_poller())
         try:
             with self.view.output_patch():
                 await self._input_loop()
@@ -847,7 +853,8 @@ class TerminalChat:
             worker.cancel()
             renderer.cancel()
             heartbeat.cancel()
-            for task in (worker, renderer, heartbeat):
+            skills_poller.cancel()
+            for task in (worker, renderer, heartbeat, skills_poller):
                 try:
                     await task
                 except asyncio.CancelledError:
@@ -1002,6 +1009,25 @@ class TerminalChat:
             on_tick=on_tick,
             on_enter_busy=on_enter_busy,
         )
+
+    async def _skills_poller(self) -> None:
+        """Hot-reload skills/commands when the .claude dirs change (v1.3.0).
+
+        Polls the cheap dir signature every 2s (no file-watcher dependency —
+        keeps neutrix lean) and re-discovers only on a real change.
+        """
+        while True:
+            await asyncio.sleep(2.0)
+            try:
+                sig = skills_signature(os.getcwd())
+            except OSError:  # pragma: no cover - defensive
+                continue
+            if sig != self._skills_sig:
+                self._skills_sig = sig
+                self._skills = discover_skills(os.getcwd())
+                await self.view.print_notice(
+                    f"↻ skills reloaded ({len(self._skills)} available)", style="dim"
+                )
 
     async def _render_watcher(self) -> None:
         """Subscribe to store mutations; render new messages + redraw input.
@@ -1242,6 +1268,20 @@ class TerminalChat:
         parts = line[1:].strip().split()
         cmd, args = (parts[0].lower() if parts else ""), parts[1:]
         handler = getattr(self, f"_cmd_{cmd}", None)
+        if handler is None and cmd in self._skills:
+            # v1.3.0: a markdown skill/command — enqueue its body (with
+            # $ARGUMENTS/$1.. substituted) as a user turn.
+            if self._busy:
+                await self.view.print_notice(
+                    f"/{cmd} waits for the assistant to finish", style="yellow"
+                )
+                return
+            prompt = render_skill(self._skills[cmd], args)
+            await self.view.print_notice(f"↳ /{cmd}", style="dim")
+            self.store.enqueue_user(prompt)
+            assert self._input_queue is not None
+            await self._input_queue.put(prompt)
+            return
         if handler is None:
             await self.view.print_notice(f"unknown command: /{cmd}. Try /help.", style="bold red")
             return
