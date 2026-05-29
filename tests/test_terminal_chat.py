@@ -880,3 +880,15 @@ async def test_unknown_command_still_errors(tmp_path):
     chat._skills = {}
     await chat._run_command("/definitelynotacommand")
     assert "unknown command" in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_cmd_allow_toggles_permission_mode(tmp_path):
+    """v1.4.0: /allow toggles auto ↔ allow-all on the executor."""
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    assert ctx.executor.permission_mode == "auto"  # default
+    await chat._cmd_allow([])
+    assert ctx.executor.permission_mode == "allow-all"
+    await chat._cmd_allow([])
+    assert ctx.executor.permission_mode == "auto"

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.4.0 splits — permissions</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.4.0 splits — tool permissions</h1>
+<p class="tagline">allow/deny/ask rules from <code>.claude/settings.json</code>, gated in the Executor before each tool. <code>.claude/</code>-compatible. <strong>No plan mode</strong> (user-directed).</p>
+<p class="note">Decided autonomously under the <code>build-to-v2.0.0</code> /goal, with mid-flight user redirects:
+"no, no plan mode" and "allow all or auto, by default auto". CC survey (v2 kickoff): permission rules + modes + the
+canUseTool decision point (<code>permissions/permissions.ts</code>, <code>useCanUseTool.tsx</code>).</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Default mode — user-directed: auto</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>default mode is interactive <em>ask</em> (a prompt per risky call); an <code>auto</code> mode uses an AI classifier.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Two modes, default <code>auto</code></strong> (user: "allow all or auto, by default auto"). neutrix has no approve-dialog yet, so <code>auto</code> = allow normal ops but <strong>block clearly-destructive Bash</strong> via a deterministic heuristic (<code>rm -rf</code>, <code>git push --force</code>, <code>dd</code>, <code>mkfs</code>, fork-bombs, <code>curl|sh</code>, <code>git reset --hard</code>, …) with a block-with-notice telling the user/model to add an allow rule or switch to <code>allow-all</code>. <code>allow-all</code> (<code>/allow</code>) disables all checks. The CC LLM-classifier <code>auto</code> is a later refinement.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">Plan mode — removed</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>User-directed: removed.</strong> "no, no plan mode" / "remove plan mode". The read-only-gating plan mode is not built (and dropped from the band + lock). If wanted later the user will ask.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Rule source + shape</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> <code>permissions.{allow,deny,ask}</code> rule lists merged from <code>~/.claude/settings.json</code> + project <code>.claude/settings.json</code> + <code>.claude/settings.local.json</code>. Rules are <code>ToolName</code> or <code>ToolName(glob)</code> matched against the tool's primary arg (command for Bash, path for Read/Edit/Write/Glob, pattern for Grep). Precedence: deny &gt; explicit-allow (overrides auto danger) &gt; auto-danger &gt; ask &gt; allow.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Decision point + ask handling</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision">The gate lives in <code>Executor.dispatch_all</code> before the <code>to_thread</code> dispatch (it holds <code>policy</code> + <code>permission_mode</code>; defaults allow-all-safe so existing tests are unaffected). A non-allow verdict yields a <code>tool_finished</code> with <code>ok=False</code> + a block reason — the model sees it and adapts. <strong><code>ask</code> → block-with-notice</strong> (the interactive approve-dialog is deferred to the <code>AskUserQuestion</code> release, which builds the cross-thread input channel that would also upgrade this to a real prompt).</dd></dl></div>
+
+<footer>v1.4.0 permissions · 4 split points, decided autonomously (2 mid-flight user redirects) · auto-default
+danger heuristic + allow-all · no plan mode · ask deferred to interactive (next release: AskUserQuestion).</footer>
+</body></html>

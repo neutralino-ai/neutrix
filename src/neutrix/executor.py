@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from neutrix.permissions import PermissionPolicy, block_reason, decide
 from neutrix.store import ChatStore
 from neutrix.tools import dispatch
 
@@ -64,6 +65,12 @@ class Executor:
     # Edit/Write check membership; per-session (a subagent gets a fresh
     # Executor → fresh read-state, correctly isolated).
     read_paths: set[str] = field(default_factory=set, repr=False)
+    # v1.4.0 permissions. Default mode "auto" allows normal ops but blocks
+    # clearly-destructive Bash (user-directed default); "allow-all" disables
+    # all checks. An empty policy + auto = "runs everything except dangerous
+    # shell commands".
+    policy: PermissionPolicy = field(default_factory=PermissionPolicy)
+    permission_mode: str = "auto"
     _pool: list[subprocess.Popen] = field(default_factory=list, repr=False)
     _cancel_events: list[threading.Event] = field(default_factory=list, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
@@ -144,6 +151,19 @@ class Executor:
                 "tool_started",
                 {"tool_call_id": tcid, "tool_name": name, "args": args},
             )
+            # v1.4.0: permission gate (auto/allow-all) before any side effect.
+            verdict = decide(name, args, mode=self.permission_mode, policy=self.policy)
+            if verdict != "allow":
+                yield ToolEvent(
+                    "tool_finished",
+                    {
+                        "tool_call_id": tcid,
+                        "tool_name": name,
+                        "content": block_reason(name, verdict, self.permission_mode),
+                        "ok": False,
+                    },
+                )
+                continue
             try:
                 result = await asyncio.to_thread(
                     dispatch, name, args, store=self.store, executor=self, slot=self.slot

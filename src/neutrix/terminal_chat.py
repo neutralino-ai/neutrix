@@ -926,6 +926,8 @@ class TerminalChat:
             f"tools:{self._tool_status()}",
             f"msgs:{len(self.ctx.messages)}",
         ]
+        if self.ctx.executor.permission_mode == "allow-all":
+            parts.append("allow-all")
         if self._busy:
             parts.append("working")
         return " | ".join(parts)
@@ -1307,6 +1309,7 @@ class TerminalChat:
                     "Commands:",
                     "  /help               show this",
                     "  /init               survey the repo and write a CLAUDE.md",
+                    "  /allow              toggle auto ↔ allow-all permissions",
                     "  /status             show slot, model, tool state, message count",
                     "  /tasks              list tracked tasks (read-only)",
                     "  /fast               switch to the fast slot",
@@ -1335,6 +1338,20 @@ class TerminalChat:
         """On-demand Advisor run (v0.10.4) — bypasses the periodic trigger."""
         await self.view.print_notice("↳ advisor: reviewing…", style="dim")
         await self._maybe_run_advisor(forced=True)
+
+    async def _cmd_allow(self, args: list[str]) -> None:
+        """Toggle permission mode: `auto` (default) ↔ `allow-all` (v1.4.0)."""
+        ex = self.ctx.executor
+        if ex.permission_mode == "allow-all":
+            ex.permission_mode = "auto"
+            await self.view.print_notice(
+                "permissions: auto — destructive shell commands are blocked", style="green"
+            )
+        else:
+            ex.permission_mode = "allow-all"
+            await self.view.print_notice(
+                "permissions: allow-all — every tool runs, no safety checks", style="yellow"
+            )
 
     async def _cmd_init(self, args: list[str]) -> None:
         """v1.2.0: drive the agent to survey the repo and write a CLAUDE.md."""

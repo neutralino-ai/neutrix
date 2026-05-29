@@ -4,6 +4,29 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.4.0] — 2026-05-29
+
+### Added
+- **Tool permissions** (`.claude/`-compatible). New `src/neutrix/permissions.py`:
+  allow/deny/ask rules merged from `~/.claude/settings.json` + project
+  `.claude/settings.json` + `.claude/settings.local.json` (CC's
+  `permissions.{allow,deny,ask}` shape; rules like `Bash(git *)`, `Write`,
+  `Read(~/.ssh/*)`), gated in `Executor.dispatch_all` before each tool call.
+- **Two modes, default `auto`** (user-directed): `auto` allows normal operations
+  but **blocks clearly-destructive Bash** — `rm -rf`, `git push --force`, `dd`,
+  `mkfs`, fork-bombs, `curl|sh`, `git reset --hard`, … — with a block-with-notice
+  telling the model/user how to proceed (add an allow rule, or `/allow`).
+  `allow-all` (the `/allow` command) disables all checks. Precedence: deny >
+  explicit-allow (overrides the danger heuristic) > auto-danger > ask > allow.
+
+### Notes
+- **No plan mode** (user-directed: "no, no plan mode"). The interactive approval
+  dialog is deferred to the AskUserQuestion release; for now an `ask` verdict is
+  a block-with-notice. Defaults keep prior behavior for non-dangerous tools.
+
+See [docs/PRDs/v1.4.0-permissions.md](docs/PRDs/v1.4.0-permissions.md)
+and [docs/splits/v1.4.0-permissions.html](docs/splits/v1.4.0-permissions.html).
+
 ## [v1.3.0] — 2026-05-29
 
 ### Added

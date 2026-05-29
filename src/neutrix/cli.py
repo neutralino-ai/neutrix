@@ -20,6 +20,7 @@ from neutrix.context_files import compose_system_prompt
 from neutrix.context_manager import DEFAULT_SYSTEM_PROMPT, ContextManager
 from neutrix.executor import Executor
 from neutrix.llm import OpenAIChatLLM
+from neutrix.permissions import load_policy
 from neutrix.store import ChatStore
 
 
@@ -96,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     llm = OpenAIChatLLM(slot)
     store = ChatStore()
     executor = Executor(store=store)
+    # v1.4.0: load permission rules from .claude/settings(.local).json (CC-compat).
+    executor.policy = load_policy(os.getcwd())
 
     # v1.2.0: compose CLAUDE.md/AGENTS.md (+ user ~/.claude/CLAUDE.md) into the
     # system prompt so the agent has project memory (.claude/-compatible).
