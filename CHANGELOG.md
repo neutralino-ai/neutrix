@@ -4,6 +4,29 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.7] — 2026-05-28
+
+### Added
+- **Rewind / branch from a prior turn.** `ContextManager.rewind_to(index)`
+  destructively trims `messages` to an earlier point (Follow CC), rebuilds
+  the typed store, and preserves tasks — mirroring `compact()`. Snaps the cut
+  to a tool-round boundary so a rewind never leaves a dangling
+  `tool_use`/`tool_result`.
+- **`/rewind [N]`** — drops the last N user turns (default 1), IDLE-only, and
+  prints a forward notice `↶ rewound N turns (back to turn K)`. The dropped
+  turns stay in scrollback as history (the append-only renderer can't un-print
+  them — v0.9.7 split #7, a scope change from the skeleton's retroactive
+  `[rewound]` strikethrough).
+- **Up/Down recall.** On an empty draft, `Up` walks prior user turns into the
+  buffer (`Down` walks forward; `Esc` clears recall when active, else cancels).
+  Decoupled from rewind (split #2): recall only edits the draft — submitting
+  appends a new turn, it does not truncate. `RecallState` is the pure, tested
+  cursor.
+
+(10 split-point decisions, autonomous under a `/goal`, recorded in
+[docs/splits/v0.9.7-rewind.html](docs/splits/v0.9.7-rewind.html); 4 flagged for
+user review. See [docs/PRDs/v0.9.7-rewind.md](docs/PRDs/v0.9.7-rewind.md).)
+
 ## [v0.9.6] — 2026-05-28
 
 ### Added

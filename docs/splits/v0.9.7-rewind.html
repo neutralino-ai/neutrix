@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.9.7 splits — rewind / branch from prior turn</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a; --muted: #6a6a6a; --dim: #9a9a9a; --bg: #fafaf7;
+    --card: #ffffff; --border: #e3e3dc; --accent: #b14a00;
+    --open: #b14a00; --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg); max-width: 920px; margin: 0 auto; padding: 32px 24px 80px;
+  }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 8px; font-size: 14px; }
+  .note { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 32px 0 12px; font-weight: 600;
+  }
+  .split {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 16px 18px; margin: 0 0 14px;
+  }
+  .split.flag { border-color: var(--accent); border-width: 2px; }
+  .split .head {
+    display: grid; grid-template-columns: 36px 1fr auto; gap: 12px;
+    align-items: baseline; margin-bottom: 10px;
+  }
+  .split .num { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .split .name { font-weight: 600; color: var(--fg); }
+  .badge {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 3px 8px; border-radius: 3px; font-weight: 600; white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl { display: grid; grid-template-columns: 130px 1fr; gap: 4px 16px; margin: 0; font-size: 14px; }
+  .split dt {
+    color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.06em; padding-top: 5px;
+  }
+  .split dd { margin: 0 0 8px; color: var(--fg); }
+  .split dd ul { margin: 4px 0; padding-left: 20px; }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); }
+  .split .recommend { color: var(--accent); }
+  .quote { color: var(--muted); font-style: italic; }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb; padding: 1px 4px; border-radius: 3px;
+  }
+  footer {
+    color: var(--dim); font-size: 12px; margin-top: 48px;
+    border-top: 1px solid var(--border); padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.9.7 splits — rewind / branch from prior turn</h1>
+<p class="tagline">
+  Up-arrow recall of prior user turns, rewind of
+  <code>ContextManager.messages</code> to an earlier point, and a
+  <code>/rewind N</code> command. Builds on the v0.9.3 state machine and the
+  existing <code>compact()</code> / <code>_handle_replace_history</code>
+  trim-and-rebuild precedent.
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this is the
+  durable record of the split discussion that precedes the PRD. CC source
+  under <code>/datafs/users/dingxf/anthropic/cc2/src</code>.
+  <strong>Authored autonomously under a <code>/goal implement v0.9.7</code></strong>;
+  the four <span class="badge open">needs user</span> splits (and the
+  scope change) are surfaced in chat for a decision before Phase 2.
+  Labels: Follow CC / Alternative / User-directed / No CC analog.
+</p>
+
+<h2>CC survey — what Claude Code does (one block)</h2>
+<div class="split">
+  <div class="head"><span class="num">★</span><span class="name">CC rewind, summarized</span><span class="badge decided">survey</span></div>
+  <dl>
+    <dt>Up recall</dt>
+    <dd>
+      Up-arrow recalls prior <em>user</em> prompts from a project history
+      <em>file</em>, only on an empty buffer (or once nav is active); the
+      pre-recall draft is saved and restored on Down; Esc resets the nav
+      index and clears the hint. <strong>Recall never mutates conversation
+      state</strong> — it only fills the input buffer until submit.
+      <code>hooks/useArrowKeyHistory.tsx:124-207</code>.
+    </dd>
+    <dt>Rewind</dt>
+    <dd>
+      <strong>Destructive truncation</strong>:
+      <code>setMessages(prev.slice(0, messageIndex))</code> drops the
+      suffix — no checkpoint, no retained-hidden list — then mints a fresh
+      <code>conversationId</code>. <code>screens/REPL.tsx:3661-3707</code>.
+    </dd>
+    <dt>/rewind</dt>
+    <dd>
+      Opens an interactive message <em>selector</em>; unit is one user
+      message; tool rounds drop atomically (adjacent array entries).
+      <code>commands/rewind/rewind.ts</code>.
+    </dd>
+    <dt>Esc</dt>
+    <dd>
+      Esc is <strong>cancel-while-busy</strong>, not a rewind key; there is
+      no double-Esc rewind menu. Rewind-on-interrupt is automatic, not a
+      binding. <code>hooks/useCancelRequest.ts:87-167</code>.
+    </dd>
+    <dt>Render</dt>
+    <dd>
+      Rewound turns are <strong>removed from view</strong> — React
+      re-renders a shorter virtual list (<code>VirtualMessageList</code>).
+      <strong>Impossible in neutrix's append-only renderer</strong>, which
+      cannot un-print or restyle past scrollback (every
+      <code>print_*</code> is a one-way <code>console.print</code>).
+      <code>screens/REPL.tsx:4381</code>, <code>Messages.tsx</code>.
+    </dd>
+  </dl>
+</div>
+
+<h2>Scope change forced by the renderer</h2>
+<div class="split flag">
+  <div class="head"><span class="num">!</span><span class="name">The skeleton's <code>[rewound]</code> strikethrough is infeasible</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>Skeleton said</dt>
+    <dd>
+      Goal #4: rewound turns stay in the transcript with a dim
+      <code>[rewound]</code> strikethrough; "reuse the folding pattern."
+    </dd>
+    <dt>Reality</dt>
+    <dd>
+      neutrix prints to scrollback append-only; it cannot reach back and
+      restyle or remove already-printed turns. CC only achieves this by
+      re-rendering a virtual list, which neutrix has no analog for. So the
+      retroactive marker cannot be drawn on the existing lines.
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      Replace it with a <strong>forward notice</strong> printed at the
+      cursor on rewind — e.g. <code>↶ rewound 2 turns (back to turn 3)</code>
+      — exactly the pattern v0.9.6 <code>/compact</code> already uses
+      ("compacted N turns"). The dropped turns remain visible above in
+      scrollback as historical record; the notice demarcates the new
+      branch point. This is a <strong>scope change</strong> from Goal #4
+      (workflow step 10) — needs an explicit OK.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (surfaced in chat) —</dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split flag">
+  <div class="head"><span class="num">1.</span><span class="name">History shape — destructive trim vs non-destructive checkpoint</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Destructive trim (<code>messages.slice(0, i)</code>), fresh conversationId. <code>REPL.tsx:3671</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Destructive trim — drop the suffix from <code>cm.messages</code> (Follow CC).</li>
+        <li>Non-destructive checkpoint — keep dropped turns in a retained list + a pointer, restorable later.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC — destructive trim.</strong> CC's <em>rewind</em>
+      is destructive (distinct from CC's <em>cancellation</em>, which used
+      an append-marker — the v0.9.2/v0.9.3 incident this rule cites). Multi-branch
+      retention is an explicit non-goal, and neutrix's
+      <code>compact()</code> / <code>_handle_replace_history</code> already
+      trim-and-rebuild. <strong>Flagged because history-shape is the exact
+      class the rule says not to pre-decide alone</strong> — confirm.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend Follow CC) —</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">2.</span><span class="name">Recall ↔ rewind coupling — does submitting a recalled turn rewind?</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      <strong>Decoupled.</strong> Recall fills the buffer from input
+      history; submitting just appends a new turn. Rewind is a
+      <em>separate</em> action (the <code>/rewind</code> selector). Recalling
+      + submitting does NOT truncate.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Coupled (skeleton Goal #2):</strong> submit a recalled/edited prior turn → rewind <code>cm.messages</code> to that turn, then append. One gesture to "redo from here."</li>
+        <li><strong>Decoupled (CC):</strong> Up-arrow recall only fills the buffer; submit always appends a new turn; rewind only via explicit <code>/rewind N</code>.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      Lean <strong>decoupled (Follow CC)</strong> for v0.9.7: coupling makes
+      a normal-looking submit silently destroy turns 3+ (surprising, and
+      destructive-on-Enter). Keeping recall = "convenience paste" and
+      rewind = explicit <code>/rewind N</code> is safer and simpler. But the
+      skeleton explicitly wanted the coupling, so this is a
+      <strong>genuine product fork — your call.</strong>
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend decoupled) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name"><code>rewind_to</code> mechanism</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>React <code>setMessages(slice)</code> — no portable API analog.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>New <code>ContextManager.rewind_to(index) -> int</code> mirroring <code>compact()</code> (trim <code>messages</code>, rebuild the typed store, preserve tasks).</li>
+        <li>Reuse <code>ReplaceHistoryEvent</code> with the trimmed list.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>New <code>rewind_to(index)</code></strong> mirroring
+      <code>compact()</code> — closest precedent, keeps the store the single
+      truth, returns the count dropped. (No CC analog for the API shape.)
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Autonomous — new <code>rewind_to</code> mirroring <code>compact()</code>.</strong> Revisit if the user prefers reusing ReplaceHistoryEvent.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Up-arrow recall source</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Walks prior user prompts from a persistent project history file.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Walk <code>role:user</code> messages in <code>cm.messages</code> (skeleton).</li>
+        <li>Separate submitted-input history list (neutrix's <code>PromptSession</code> already has an <code>InMemoryHistory</code>).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Walk <code>role:user</code> messages in <code>cm.messages</code></strong>
+      — ties each recalled entry to a real turn index (needed if split #2
+      ends up coupled; harmless if decoupled). Diverges from CC's
+      file-history (neutrix has no persistent input-history file).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Autonomous — walk <code>cm.messages</code> user turns.</strong></dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name"><code>/rewind N</code> — count vs interactive selector</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Interactive message selector (arrow-key list).</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><code>/rewind N</code> — drop the last N user-turn rounds (skeleton).</li>
+        <li>Interactive selector (CC).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Alternative — <code>/rewind N</code> count.</strong> Fits
+      neutrix's slash-command style; no new interactive-list UI surface to
+      build. Tool-round-boundary aware (split #6).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Autonomous — <code>/rewind N</code> count.</strong></dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Tool-round boundary</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Whole tool round drops atomically (array adjacency).</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC.</strong> <code>rewind_to</code> snaps so a rewind
+      never leaves a dangling <code>tool_result</code> — reuse
+      <code>/compact</code>'s forward-snap-past-tool logic.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC — reuse compact's boundary logic.</strong></dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">7.</span><span class="name">Transcript after rewind</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Removes rewound turns by re-rendering a shorter virtual list (no neutrix analog).</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>Forward notice</strong> — print <code>↶ rewound N turns</code> at the cursor; leave old turns in scrollback (append-only friendly; v0.9.6 <code>/compact</code> pattern).</li>
+        <li>Clear + redraw the post-rewind transcript from the store (drastic; loses scrollback; flicker).</li>
+        <li><span class="quote">[infeasible]</span> retro-strike the dropped turns in place.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend"><strong>Forward notice.</strong> See the scope-change block above.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend forward notice) —</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">8.</span><span class="name">Esc during recall vs cancel</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Esc = cancel-while-busy; during nav it resets the history index. No rewind on Esc.</dd>
+    <dt>neutrix today</dt>
+    <dd>Esc (<code>escape</code>, eager) is the cancel hook + part of quit-arming. When IDLE it is effectively a no-op (nothing to cancel).</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Esc clears recall + buffer when IDLE with recalled text; stays cancel when busy (state-overloaded).</li>
+        <li>Leave Esc as pure cancel; use a distinct key (e.g. <code>c-g</code>) to exit recall.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Esc clears recall when IDLE</strong> (matches CC + the
+      skeleton), falling through to cancel when busy. Needs careful filter
+      ordering against the existing eager Esc binding — flagged so the
+      overloading is a conscious choice.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend Esc-clears-when-idle) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">9.</span><span class="name">State gate — when is rewind allowed</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>IDLE only</strong> — <code>/rewind</code> and recall-submit
+      refuse while the assistant is working, mirroring <code>/compact</code>'s
+      "refuses while working." (No CC analog needed; neutrix precedent.)
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Autonomous — IDLE-only, mirror /compact.</strong></dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">10.</span><span class="name">Up/Down vs prompt_toolkit built-in history</span><span class="badge decided">autonomous</span></div>
+  <dl>
+    <dt>Context</dt>
+    <dd>The <code>PromptSession</code> already carries an <code>InMemoryHistory</code>; default Up/Down may do input-history recall.</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Bind Up/Down explicitly</strong> for turn-recall (split #4),
+      overriding the built-in, so recall maps to conversation turns. Empty-
+      buffer / at-edge gating like CC.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Autonomous — explicit Up/Down bindings.</strong></dd>
+  </dl>
+</div>
+
+<footer>
+  Authored under <code>/goal implement v0.9.7</code>. Phase 2 is held until
+  the four <span class="badge open">needs user</span> splits + the scope
+  change are resolved and the held v0.9.8 working-tree diff is sequenced.
+  On resolution, decisions get embedded in
+  <code>docs/PRDs/v0.9.7-rewind.md</code> § Claude Code reference.
+</footer>
+
+</body>
+</html>

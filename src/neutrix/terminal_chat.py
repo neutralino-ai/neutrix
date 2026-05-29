@@ -26,7 +26,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import ClassVar, TextIO
+from typing import Any, ClassVar, TextIO
 
 from loguru import logger
 from rich.console import Console
@@ -34,6 +34,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from neutrix import transcript
+from neutrix.compaction import is_compact_marker
 from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
 from neutrix.context_manager import (
     ClearEvent,
@@ -348,20 +349,25 @@ class DraftReader:
         *,
         message_supplier: Callable[[], object] = lambda: "",
         cancel_hook: Callable[[], bool] | None = None,
+        recall_provider: Callable[[], list[str]] | None = None,
     ) -> None:
         self._message_supplier = message_supplier
         self.quit_state = QuitArmingState()
         self.cancel_hook = cancel_hook
+        self.recall_provider = recall_provider
+        self.recall_state = RecallState()
         self._session = self._build_session()
 
     def read(self) -> str:
         if self._session is None:
             return input("")
+        self.recall_state.reset()
         return self._session.prompt(handle_sigint=False)
 
     async def read_async(self) -> str:
         if self._session is None:
             return await asyncio.to_thread(input, "")
+        self.recall_state.reset()
         return await self._session.prompt_async(handle_sigint=False)
 
     @property
@@ -391,6 +397,8 @@ class DraftReader:
             key_bindings=build_draft_key_bindings(
                 self.quit_state,
                 cancel_hook=self.cancel_hook,
+                recall_provider=self.recall_provider,
+                recall_state=self.recall_state,
             ),
         )
 
@@ -436,16 +444,90 @@ def apply_enter_or_continuation(buffer) -> bool:
     return True
 
 
+@dataclass
+class RecallState:
+    """Cursor for Up/Down recall of prior user turns (v0.9.7).
+
+    Decoupled from rewind (split #2): recall only fills the input buffer;
+    rewinding history is the explicit ``/rewind`` command. ``cursor`` is 0
+    for a fresh draft, ``k`` for the k-th most-recent prior turn. Pure /
+    UI-free so it can be unit-tested without a prompt_toolkit app.
+    """
+
+    cursor: int = 0
+
+    @property
+    def active(self) -> bool:
+        return self.cursor > 0
+
+    def reset(self) -> None:
+        self.cursor = 0
+
+    def up(self, turns: list[str]) -> str | None:
+        """Walk one turn further back; return the text to show, or ``None``
+        when there is no history."""
+        if not turns:
+            return None
+        self.cursor = min(self.cursor + 1, len(turns))
+        return turns[len(turns) - self.cursor]
+
+    def down(self, turns: list[str]) -> str | None:
+        """Walk one turn forward; at the front, return to the fresh draft
+        (``""``). Returns the text to show, or ``None`` when no history."""
+        if not turns:
+            return None
+        if self.cursor <= 1:
+            self.cursor = 0
+            return ""
+        self.cursor -= 1
+        return turns[len(turns) - self.cursor]
+
+
+def _is_real_user_prompt(content: object) -> bool:
+    """A ``role:user`` message the user actually typed — excludes injected
+    markers (task reminders, ``/compact`` placeholders) that share the role.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return False
+    if is_task_reminder(content) or is_compact_marker(content):
+        return False
+    return True
+
+
+def user_turn_indices(messages: list[dict[str, Any]]) -> list[int]:
+    """Message indices of real user turns, oldest first."""
+    return [
+        i
+        for i, m in enumerate(messages)
+        if isinstance(m, dict)
+        and m.get("role") == "user"
+        and _is_real_user_prompt(m.get("content"))
+    ]
+
+
+def recallable_user_turns(messages: list[dict[str, Any]]) -> list[str]:
+    """Real user-turn texts, oldest first — the Up/Down recall source."""
+    return [str(messages[i]["content"]) for i in user_turn_indices(messages)]
+
+
 def build_draft_key_bindings(
     quit_state: QuitArmingState | None = None,
     *,
     cancel_hook: Callable[[], bool] | None = None,
+    recall_provider: Callable[[], list[str]] | None = None,
+    recall_state: RecallState | None = None,
 ):
     """Build explicit editor bindings for terminal draft input.
 
-    ``cancel_hook`` is invoked on Esc and on the first Ctrl+C while
-    something is in flight. It returns ``True`` iff the cancel actually
-    fired. The hook is :py:meth:`ContextManager.cancel` (sync).
+    ``cancel_hook`` is invoked on the first Ctrl+C / Esc while something is
+    in flight. It returns ``True`` iff the cancel actually fired. The hook
+    is :py:meth:`ContextManager.cancel` (sync).
+
+    When ``recall_provider`` + ``recall_state`` are given (v0.9.7),
+    ``Up``/``Down`` walk prior user turns into the buffer (decoupled from
+    rewind — recall only edits the draft). ``Up`` starts recall only on an
+    empty buffer (so multi-line cursor-up still works mid-draft); ``Esc``
+    exits recall when active, else falls through to cancel.
     """
     try:
         from prompt_toolkit.application.current import get_app
@@ -493,6 +575,12 @@ def build_draft_key_bindings(
 
     @bindings.add("escape", eager=True)
     def _(event) -> None:
+        if recall_state is not None and recall_state.active:
+            recall_state.reset()
+            buf = event.current_buffer
+            buf.text = ""
+            buf.cursor_position = 0
+            return
         _try_cancel()
 
     @Condition
@@ -512,6 +600,8 @@ def build_draft_key_bindings(
         buf = event.current_buffer
         if apply_enter_or_continuation(buf):
             return
+        if recall_state is not None:
+            recall_state.reset()
         event.app.exit(result=buf.text)
 
     @bindings.add("c-j")
@@ -525,6 +615,28 @@ def build_draft_key_bindings(
     @bindings.add("c-k")
     def _(event) -> None:
         delete_buffer_to_line_end(event.current_buffer)
+
+    if recall_provider is not None and recall_state is not None:
+
+        def _set_recalled(event, text: str | None) -> None:
+            if text is None:
+                return
+            buf = event.current_buffer
+            buf.text = text
+            buf.cursor_position = len(text)
+
+        # Up starts recall only on an empty buffer (so multi-line cursor-up
+        # still works while editing); once recalling, Up/Down walk turns.
+        @bindings.add(
+            "up",
+            filter=Condition(lambda: recall_state.active or not get_app().current_buffer.text),
+        )
+        def _(event) -> None:
+            _set_recalled(event, recall_state.up(recall_provider()))
+
+        @bindings.add("down", filter=Condition(lambda: recall_state.active))
+        def _(event) -> None:
+            _set_recalled(event, recall_state.down(recall_provider()))
 
     return bindings
 
@@ -552,6 +664,7 @@ class TerminalView:
         input_func: InputFunc | None = None,
         console: Console | None = None,
         cancel_hook: Callable[[], bool] | None = None,
+        recall_provider: Callable[[], list[str]] | None = None,
     ) -> None:
         self.render_markdown = render_markdown
         self.input_func = input_func
@@ -563,6 +676,7 @@ class TerminalView:
             else DraftReader(
                 message_supplier=message_supplier,
                 cancel_hook=cancel_hook,
+                recall_provider=recall_provider,
             )
         )
 
@@ -698,6 +812,7 @@ class TerminalChat:
             input_func=input_func,
             console=console,
             cancel_hook=self.try_cancel_current_stream,
+            recall_provider=lambda: recallable_user_turns(self.ctx.messages),
         )
         self._running = True
         self._busy = False
@@ -977,11 +1092,9 @@ class TerminalChat:
         cmd, args = (parts[0].lower() if parts else ""), parts[1:]
         handler = getattr(self, f"_cmd_{cmd}", None)
         if handler is None:
-            await self.view.print_notice(
-                f"unknown command: /{cmd}. Try /help.", style="bold red"
-            )
+            await self.view.print_notice(f"unknown command: /{cmd}. Try /help.", style="bold red")
             return
-        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard", "compact"}:
+        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard", "compact", "rewind"}:
             await self.view.print_notice(
                 f"/{cmd} waits for the assistant to finish", style="yellow"
             )
@@ -1010,6 +1123,7 @@ class TerminalChat:
                     "  /load PATH          load session",
                     "  /clear              start a fresh conversation",
                     "  /compact            drop the oldest ~50% of history (no summary)",
+                    "  /rewind [N]         drop the last N user turns (default 1); Up/Down recalls",
                     "  /tools              list tools",
                     "  /tools on|off       enable/disable tool calling",
                     "  /tool [N]           list folded tool results or expand one",
@@ -1115,6 +1229,39 @@ class TerminalChat:
         await self.view.print_notice(
             f"compacted {outcome.turns_dropped} turns "
             f"(~{format_token_count(outcome.approx_tokens_dropped)} tokens dropped)",
+            style="dim",
+        )
+
+    async def _cmd_rewind(self, args: list[str]) -> None:
+        n = 1
+        if args:
+            try:
+                n = int(args[0])
+            except ValueError:
+                await self.view.print_notice(
+                    "usage: /rewind [N]  (drop the last N user turns, default 1)",
+                    style="bold red",
+                )
+                return
+        if n < 1:
+            await self.view.print_notice("usage: /rewind [N]  (N >= 1)", style="bold red")
+            return
+        turns = user_turn_indices(self.ctx.messages)
+        if not turns:
+            await self.view.print_notice("nothing to rewind", style="dim")
+            return
+        n = min(n, len(turns))
+        dropped = await self.ctx.rewind_to(turns[-n])
+        if dropped <= 0:
+            await self.view.print_notice("nothing to rewind", style="dim")
+            return
+        # Notice-only (v0.9.7 split #7): the dropped turns stay in scrollback
+        # above — an append-only renderer can't un-print them — so re-align
+        # the render index to the rewound store and print a forward marker.
+        self._rendered_message_count = len(self.store.messages)
+        remaining = len(user_turn_indices(self.ctx.messages))
+        await self.view.print_notice(
+            f"↶ rewound {n} turn{'s' if n != 1 else ''} (back to turn {remaining})",
             style="dim",
         )
 

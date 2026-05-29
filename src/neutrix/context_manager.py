@@ -314,6 +314,55 @@ class ContextManager:
             self.store.replace_tasks(tasks)
         return outcome
 
+    # ----------------------------------------------------------------- rewind
+
+    async def rewind_to(self, message_index: int) -> int:
+        """Drop ``self.messages[message_index:]`` and rebuild the store.
+
+        Direct method (mirrors :py:meth:`compact`): trims BOTH ``messages``
+        (the LLM payload) and ``store`` (render/save source), PRESERVES
+        tasks, and returns the number of messages dropped. ``message_index``
+        is snapped to a tool-round boundary so a rewind that would bisect a
+        round drops the whole round — the kept head never ends on an
+        ``assistant`` with unanswered ``tool_calls`` or a dangling
+        ``role:tool`` result. Returns ``0`` (history untouched) when the
+        snapped index drops nothing.
+
+        Destructive (v0.9.7 split #1, Follow CC): the dropped suffix is
+        gone, not retained — multi-branch history is a non-goal.
+        """
+        await self._cancel_and_wait()
+        index = self._safe_rewind_index(message_index)
+        dropped = len(self.messages) - index
+        if dropped <= 0:
+            return 0
+        tasks = self.store.tasks
+        self.messages = self.messages[:index]
+        self.store.reset()
+        for msg in self.messages:
+            self.store.append_message(_record_from_openai(msg))
+        if tasks:
+            self.store.replace_tasks(tasks)
+        return dropped
+
+    def _safe_rewind_index(self, message_index: int) -> int:
+        """Clamp ``message_index`` to ``[system-prefix, len]`` then snap it
+        backward so the kept head ``messages[:index]`` ends on a complete
+        turn — never on an ``assistant`` with pending ``tool_calls`` or a
+        ``role:tool`` result whose round was cut. The round-safety mirror of
+        :func:`neutrix.compaction.compact_messages`, applied at the head end.
+        """
+        prefix = 0
+        for msg in self.messages:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                prefix += 1
+            else:
+                break
+        index = max(prefix, min(message_index, len(self.messages)))
+        while index > prefix and _is_unfinished_tail(self.messages[index - 1]):
+            index -= 1
+        return index
+
     # -------------------------------------------------- internal handlers
 
     async def _handle_user_message(self, text: str) -> None:
@@ -777,6 +826,24 @@ def _extract_tool_calls(assistant_msg: dict[str, Any]) -> list[dict[str, str]]:
             }
         )
     return tool_calls
+
+
+def _is_unfinished_tail(msg: Any) -> bool:
+    """Whether keeping a head that ENDS on ``msg`` would leave a tool round
+    open — an ``assistant`` whose ``tool_calls`` results were dropped, or a
+    ``role:tool`` result still awaiting the assistant's follow-up. Used by
+    :py:meth:`ContextManager._safe_rewind_index` to snap a rewind cut back
+    to a clean turn boundary.
+    """
+    if not isinstance(msg, dict):
+        return False
+    role = msg.get("role")
+    if role == "tool":
+        return True
+    if role == "assistant":
+        tool_calls = msg.get("tool_calls")
+        return isinstance(tool_calls, list) and len(tool_calls) > 0
+    return False
 
 
 def _record_from_openai(msg: dict[str, Any]) -> MessageRecord:

@@ -246,17 +246,20 @@
   <span class="theme">
     Rewind / branch from prior turn
     <small>
-      User-reported urgent. <code>Up-arrow</code> on empty buffer
-      recalls prior user turns for editing; submit a recalled turn
-      rolls <code>ContextManager.messages</code> back to that
-      point. <code>/rewind N</code> drops the last N turns without
-      recalling text. Tool-round-boundary aware. Rewound turns
-      render with a dim <code>[rewound]</code> marker.
+      User-reported urgent. <code>/rewind N</code> destructively drops the
+      last N user turns (Follow CC) — tool-round-boundary safe — and prints a
+      forward <code>↶ rewound</code> notice (the append-only renderer can't
+      restyle past turns, so the skeleton's retroactive <code>[rewound]</code>
+      marker became a forward notice — split #7 scope change).
+      <code>Up</code>/<code>Down</code> recall prior user turns into the draft,
+      decoupled from rewind (recall only edits the buffer — split #2).
+      Implemented + tested (suite 224); 4 split forks flagged for review.
+      (<a href="splits/v0.9.7-rewind.html">10 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
     <span class="badge p0">P0</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge inflight">awaiting accept</span>
   </span>
 </div>
 
