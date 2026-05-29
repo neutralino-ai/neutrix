@@ -142,7 +142,7 @@ async def test_show_tools_lists_schemas(tmp_path: Path) -> None:
     await _render_session(chat)
     await chat._cmd_show(["tools"])
     text = output.getvalue()
-    assert "read_file" in text  # a builtin schema name appears on expand
+    assert "Read" in text  # a builtin schema name appears on expand
 
 
 # ---- the invariant --------------------------------------------------------

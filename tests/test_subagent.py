@@ -66,7 +66,7 @@ class _LoopingLLM:
 
     async def stream_response(self, *, model, messages, tools=None):
         self.calls += 1
-        yield _tool("list_dir", "{}", call_id=f"c{self.calls}")
+        yield _tool("Glob", "{}", call_id=f"c{self.calls}")
 
 
 def _text(text: str) -> LLMEvent:
@@ -99,7 +99,7 @@ async def test_subagent_runs_to_completion() -> None:
         user_prompt="do it",
         slot=_slot(),
         llm=llm,
-        tool_names=frozenset({"read_file"}),
+        tool_names=frozenset({"Read"}),
     )
     assert isinstance(result, SubagentResult)
     assert result.final_text == "the answer"
@@ -115,18 +115,18 @@ async def test_subagent_dispatches_tools(monkeypatch) -> None:
         "neutrix.executor.dispatch",
         lambda name, arguments, **_: f"ran {name}",
     )
-    llm = _ScriptedLLM([[_tool("list_dir", "{}")], [_text("summarized")]])
+    llm = _ScriptedLLM([[_tool("Glob", "{}")], [_text("summarized")]])
     result = await run_subagent(
         user_prompt="explore",
         slot=_slot(),
         llm=llm,
-        tool_names=frozenset({"list_dir"}),
+        tool_names=frozenset({"Glob"}),
     )
     assert result.final_text == "summarized"
     assert result.turn_count == 2
     # The subagent saw only its scoped tool set.
     names = {t["function"]["name"] for t in llm.calls[0]["tools"]}
-    assert names == {"list_dir"}
+    assert names == {"Glob"}
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_subagent_hits_turn_cap(monkeypatch) -> None:
         user_prompt="loop forever",
         slot=_slot(),
         llm=llm,
-        tool_names=frozenset({"list_dir"}),
+        tool_names=frozenset({"Glob"}),
         max_turns=3,
     )
     assert llm.calls == 3  # capped at 3 LLM rounds
@@ -174,7 +174,7 @@ async def test_subagent_cancel_sets_flag() -> None:
         user_prompt="hang",
         slot=_slot(),
         llm=llm,
-        tool_names=frozenset({"read_file"}),
+        tool_names=frozenset({"Read"}),
         cancel_event=event,
     )
     await fire
@@ -242,7 +242,7 @@ def test_subagent_tool_names_excludes_agent() -> None:
     names = subagent_tool_names()
     assert "Agent" not in names
     assert "Agent" in BUILTIN_TOOLS  # it IS a builtin, just not for subagents
-    assert "read_file" in names
+    assert "Read" in names
 
 
 def test_agent_tool_full_path_with_stub_llm(monkeypatch) -> None:
@@ -261,4 +261,4 @@ def test_agent_tool_full_path_with_stub_llm(monkeypatch) -> None:
     # The subagent's LLM was advertised a tool set without Agent.
     advertised = {t["function"]["name"] for t in scripted.calls[0]["tools"]}
     assert "Agent" not in advertised
-    assert "read_file" in advertised
+    assert "Read" in advertised

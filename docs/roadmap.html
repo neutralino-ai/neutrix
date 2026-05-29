@@ -433,6 +433,272 @@
   </span>
 </div>
 
+<h2>v2 — toward complete Claude Code parity</h2>
+<p class="note" style="color:var(--dim);font-size:13px;margin:0 0 14px;">
+  A band of minor releases (numbers settle per release) building to a
+  <strong>v2.0.0 CC-parity lock</strong>, mirroring how v0.10.x built to v1.0.0.
+  Goal: a product that can completely replace Claude Code for coding. Lead with
+  real coding tools; replace the crude tool set with CC-shaped ones; full parity
+  incl. MCP (user-directed).
+  <br><strong>Core principle: <code>.claude/</code>-compatible.</strong> "If it
+  replaces Claude Code it must be compatible with it." neutrix auto-discovers CC's
+  config — <code>CLAUDE.md</code>, <code>.claude/skills</code>·<code>commands</code>·<code>agents</code>,
+  <code>.claude/settings.json</code> (hooks + permissions) — and auto-writes
+  CC-shaped files — per-session usage JSONL to <code>~/.claude/projects/…</code>
+  (so ccusage runs on neutrix), permission updates to
+  <code>.claude/settings.local.json</code>. Drop neutrix into a CC project and it
+  inherits the config. Caveat: co-exist safely — additive writes, never clobber
+  CC's files.
+</p>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.1.0-coding-tools.md">v1.1.0</a></span>
+  <span class="theme">
+    Coding tools (CC-shaped)
+    <small>
+      Replace <code>read_file/write_file/list_dir/run_shell</code> with
+      <code>Read</code>/<code>Edit</code>/<code>Write</code>/<code>Grep</code>/<code>Glob</code>/<code>Bash</code>:
+      line-range Read, surgical str-replace Edit (read-before-edit enforced via
+      the Executor), ripgrep-or-Python Grep, Glob, Bash (timeout + tree-kill).
+      (<a href="splits/v1.1.0-coding-tools.html">7 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.2.0</span>
+  <span class="theme">
+    Project context — <code>CLAUDE.md</code> / <code>AGENTS.md</code> + <code>@</code>-mentions + <code>/init</code>
+    <small>
+      CC's killer coding feature, currently absent: auto-load project + user
+      memory files into the system prompt, <code>@path</code> file-mentions pull
+      files into context, <code>/init</code> generates a <code>CLAUDE.md</code>
+      by surveying the repo. (Gap-fill: the agent has no project memory today.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.3.0</span>
+  <span class="theme">
+    Skills + slash-command framework + hot-reload
+    <small>
+      Markdown skills/commands from <code>.claude/skills</code> + <code>.claude/commands</code>
+      (frontmatter, a <code>Skill</code> invocation), <code>watchdog</code>
+      hot-reload, and custom subagent types from <code>.claude/agents</code>
+      (extends the v0.10.0 general-purpose-only set). User #4.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.4.0</span>
+  <span class="theme">
+    Permissions + plan mode
+    <small>
+      allow/ask/deny per tool (settings) + read-only plan mode — the safety layer
+      that makes a real <code>Edit</code>/<code>Bash</code> safe and lets Bash
+      hard-block the dedicated-tool commands (v1.1.0 deferred the block here).
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.5.0</span>
+  <span class="theme">
+    <code>/goal</code> + conversation resume
+    <small>
+      A neutrix-native goal loop (set a goal, keep driving until a condition
+      holds, <code>/goal clear</code>) — user #6 — plus <code>--continue</code> /
+      <code>/resume</code> to reload the last session (gap-fill beyond /save·/load).
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.6.0</span>
+  <span class="theme">
+    Hooks
+    <small>
+      A <code>settings.json</code> hook system (PreToolUse / PostToolUse / Stop /
+      SessionStart) — block a tool, inject context, gate stop. <code>/goal</code>
+      can be reframed on the Stop hook.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.7.0</span>
+  <span class="theme">
+    MCP
+    <small>
+      Load external <code>mcp__server__tool</code> tools from configured MCP
+      servers, namespaced and permission-gated.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.8.0</span>
+  <span class="theme">
+    Usage, cost &amp; timing
+    <small>
+      Capture the API <code>usage</code> (cache read / miss / output; cache-write
+      where the gateway exposes it); per-message tokens + running cumulative;
+      wall time, active time (wall − idle), and cost via LiteLLM's pricing JSON
+      (which also auto-populates <code>max_context_tokens</code>); <code>/cost</code>
+      + a live status-line readout; optional ccusage-compatible JSONL emission.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.9.0</span>
+  <span class="theme">
+    Parallel tools + synchronized heartbeat
+    <small>
+      Run a round's multiple <code>tool_use</code> blocks concurrently
+      (<code>asyncio.gather</code>, ordered results) instead of sequentially; the
+      heartbeat beats the in-flight parallel set in unison. Plus background
+      <code>Bash</code> (<code>run_in_background</code>) + a Monitor-style poll.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.10.0</span>
+  <span class="theme">
+    Web fetch + search tools
+    <small>
+      <code>WebFetch</code> (URL → markdown → query) and <code>WebSearch</code>
+      so the agent can look up docs/APIs mid-task. (Promoted from stretch — needed
+      for a complete replacement.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.11.0</span>
+  <span class="theme">
+    Multimodal input
+    <small>
+      Paste/attach images, and <code>Read</code> images / PDFs / notebooks into
+      context via the provider's multimodal API. (Deferred in v1.1.0; promoted.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.12.0</span>
+  <span class="theme">
+    LSP — code intelligence
+    <small>
+      Go-to-definition, find-references, hover, symbols via a language server —
+      refactoring confidence beyond text search.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.13.0</span>
+  <span class="theme">
+    Anthropic-native backend + thinking display
+    <small>
+      A second <code>ChatLLM</code> backend talking Anthropic's API directly
+      (alongside the OpenAI-compat one, selectable per slot): native prompt-cache
+      control, server tools (web/computer-use), the thinking-budget API + an
+      extended-thinking/reasoning display. Closes the closeable part of
+      "model parity" (raw model quality stays whatever model you point at).
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.14.0</span>
+  <span class="theme">
+    Sandbox — filesystem / network restrictions
+    <small>
+      Allow/deny lists for paths + network hosts on <code>Bash</code> (CC's
+      sandbox model), with an explicit override. Pairs with v1.4.0 permissions.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.15.0</span>
+  <span class="theme">
+    Cross-session memory
+    <small>
+      Consolidate durable memory across sessions (CC's auto-memory / dream): the
+      Advisor (v0.10.4) extended from in-session judgment to persistent
+      <code>.claude/</code>-stored memory.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.16.0</span>
+  <span class="theme">
+    Background &amp; scheduled agents (long-tail)
+    <small>
+      Background <code>Bash</code> + Monitor (folded from v1.9.0), plus scheduled
+      / remote / multi-agent surfaces (cron, remote triggers, teammates) for full
+      coverage of CC's agent-trigger tools. Niche; last before the lock.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v2.0.0</span>
+  <span class="theme">
+    Claude Code parity lock
+    <small>
+      Seal the v2 surface: a TUI coding agent at functional parity with Claude
+      Code across the whole closeable surface — tools, project context, skills,
+      permissions/plan, goal, hooks, MCP, web, multimodal, LSP, Anthropic-native
+      backend + thinking, sandbox, cost, parallel, cross-session memory — all
+      <code>.claude/</code>-compatible. SemVer re-locked for the 2.x line.
+      <strong>Out of scope by nature (not a release):</strong> the model's raw
+      quality (= whatever model the slot points at) and non-TUI surfaces (IDE
+      extensions / desktop / web — a separate product track if ever wanted).
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">target</span></span>
+</div>
+
+<h2>v3 — vision</h2>
+<div class="entry">
+  <span class="ver">v3.x</span>
+  <span class="theme">
+    RL-framework compatibility (tunable system prompt)
+    <small>
+      Make neutrix's agent loop usable as an <strong>RL environment</strong> so
+      the system prompt (and policy) can be tuned by an agent-RL framework: a
+      headless, seedable run interface (reset / step / reward hook) decoupled from
+      the TUI — the v0.10.3 store-purity + FakeView swap-test are the groundwork
+      — with the system prompt a first-class, externally-injected parameter.
+      Captured now so v2 architecture choices keep the loop cleanly headless.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">vision</span></span>
+</div>
+
 <h2>Shipped</h2>
 
 <div class="entry">

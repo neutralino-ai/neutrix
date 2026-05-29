@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v1.1.0 splits — coding tools (CC-shaped)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --fg:#1a1a1a; --muted:#6a6a6a; --dim:#9a9a9a; --bg:#fafaf7;
+    --card:#fff; --border:#e3e3dc; --accent:#b14a00; --open:#b14a00; --decided:#2f7d32; }
+  html { background: var(--bg); }
+  body { font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .tagline { color:var(--muted); margin:0 0 8px; font-size:14px; }
+  .note { color:var(--dim); margin:0 0 24px; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--muted); margin:32px 0 12px; font-weight:600; }
+  .split { background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:16px 18px; margin:0 0 14px; }
+  .split.flag { border-color:var(--accent); border-width:2px; }
+  .split .head { display:grid; grid-template-columns:36px 1fr auto; gap:12px;
+    align-items:baseline; margin-bottom:10px; }
+  .split .num { font-weight:600; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .split .name { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    padding:3px 8px; border-radius:3px; font-weight:600; white-space:nowrap; }
+  .badge.open    { color: var(--open);    background:#fbeada; }
+  .badge.decided { color: var(--decided); background:#e8f3e9; }
+  .split dl { display:grid; grid-template-columns:130px 1fr; gap:4px 16px; margin:0; font-size:14px; }
+  .split dt { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.06em; padding-top:5px; }
+  .split dd { margin:0 0 8px; }
+  .split dd ul { margin:4px 0; padding-left:20px; }
+  .split .decision { color:var(--decided); }
+  .split .recommend { color:var(--accent); }
+  code { font:13px/1 ui-monospace,Menlo,monospace; background:#f1f0eb; padding:1px 4px; border-radius:3px; }
+  footer { color:var(--dim); font-size:12px; margin-top:48px; border-top:1px solid var(--border); padding-top:16px; }
+</style>
+</head>
+<body>
+
+<h1>v1.1.0 splits — coding tools (CC-shaped)</h1>
+<p class="tagline">
+  Replace the crude <code>read_file</code>/<code>write_file</code>/<code>list_dir</code>/<code>run_shell</code>
+  with Claude-Code-shaped <code>Read</code>/<code>Edit</code>/<code>Write</code>/<code>Grep</code>/<code>Glob</code>/<code>Bash</code>
+  — "all necessary coding functions available." Release #1 of the v2 band → v2.0.0 CC-parity lock.
+</p>
+<p class="note">
+  Durable record of the split discussion (per <code>prd-compare-with-claude.md</code>).
+  CC source under <code>/datafs/users/dingxf/anthropic/cc2/src</code> (surveyed:
+  Read offset/limit, Edit old/new/replace_all + read-before-edit, Grep ripgrep
+  flags, Glob, Bash). <strong>Interactive — the user decides each split below.</strong>
+  Decisions: Follow CC / Alternative / User-directed / No CC analog.
+</p>
+
+<h2>Settled by the v2 scoping answers</h2>
+<div class="split">
+  <div class="head"><span class="num">★</span><span class="name">Direction already chosen by the user</span><span class="badge decided">given</span></div>
+  <dl>
+    <dt>Replace, not add</dt><dd>The crude four are retired; the LLM sees only the CC-shaped set (user: "Replace (CC-shaped)").</dd>
+    <dt>Naming</dt><dd>TitleCase CC names — <code>Read</code>, <code>Edit</code>, <code>Write</code>, <code>Grep</code>, <code>Glob</code>, <code>Bash</code> — consistent with the existing <code>Agent</code>/<code>Task*</code> tools.</dd>
+    <dt>Band</dt><dd>Full CC parity (+ MCP) is the destination; this release is just the tool surface.</dd>
+  </dl>
+</div>
+
+<h2>Split points — your call</h2>
+
+<div class="split flag">
+  <div class="head"><span class="num">1.</span><span class="name">read-before-edit enforcement + where read-state lives</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Edit (and Write on an existing file) <strong>require a prior Read</strong> of that path in the session; CC tracks <code>readFileState</code>. <code>tools/FileEditTool/prompt.ts:4-6</code>.</dd>
+    <dt>The neutrix wrinkle</dt>
+    <dd><code>tools.dispatch()</code> is a pure function with no session state. Read-state needs a home. The clean one: the <code>Executor</code> (already per-session, already forwarded to tools that declare it) gains a <code>read_paths: set[str]</code>; <code>Read</code> adds to it, <code>Edit</code>/<code>Write</code> check it.</dd>
+    <dt>Alternatives</dt>
+    <dd><ul>
+      <li><strong>Enforce</strong> (Follow CC): Edit/Write on an unread file returns an <code>ERROR: read the file first</code>. Prevents blind edits.</li>
+      <li><strong>Soft</strong>: warn but allow.</li>
+      <li><strong>None</strong>: stateless, no check (simplest, riskiest).</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Enforce, read-state on the <code>Executor</code>. Matches CC; cheap; the executor is the right session-scoped home (and subagents get their own executor → own read-state, correctly isolated).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend Enforce via Executor) —</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">2.</span><span class="name">Grep backing — ripgrep binary vs pure Python</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Grep shells out to <code>rg</code> (ripgrep): regex, <code>glob</code>/<code>type</code> filters, <code>output_mode</code> (content/files_with_matches/count), <code>-A/-B/-C</code>, <code>-n/-i</code>, <code>multiline</code>. <code>tools/GrepTool/GrepTool.ts:33-89</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd><ul>
+      <li><strong>Require <code>rg</code></strong>: shell out; fast, full feature set; hard dependency on the binary.</li>
+      <li><strong>rg-if-present, Python fallback</strong>: use <code>rg</code> when on PATH, else a Python <code>os.walk</code>+<code>re</code> implementation (subset of flags).</li>
+      <li><strong>Pure Python</strong>: no dependency, slower on big trees, reimplements flags.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">rg-if-present with a Python fallback. Best of both: full speed/flags where <code>rg</code> exists (it's near-ubiquitous on dev boxes), still works without it. The fallback supports the common subset (pattern, glob, -i, -n, content/files modes).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend rg-if-present + Python fallback) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name">Bash — banned commands (push to dedicated tools)?</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Bash <strong>discourages/blocks</strong> <code>sed</code>, <code>awk</code>, <code>cat</code>, <code>head</code>, <code>tail</code>, <code>grep</code>, <code>find</code>, <code>echo</code> — the model must use Read/Grep/Glob/Edit instead. <code>tools/BashTool/prompt.ts</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd><ul>
+      <li><strong>Description-only</strong>: tell the model to prefer the dedicated tools; don't hard-block (it can still run them if needed).</li>
+      <li><strong>Hard-block</strong>: refuse those commands with an error pointing at the tool.</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Description-only for v1.1.0. The guidance shapes behavior; a hard block is a permission concern that belongs in v1.4.0 (permissions/plan-mode), not the tool layer. Keep the existing tree-kill cancellation + timeout.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend description-only; hard-block → v1.4.0) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Read — format + what's in scope for v1.1.0</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd><code>cat -n</code> line-numbered output; <code>offset</code>/<code>limit</code> (default cap ~2000 lines); images/PDF/notebooks via multimodal. <code>tools/FileReadTool/FileReadTool.ts:206-300</code>.</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Follow CC for text: line-numbered output + <code>offset</code>/<code>limit</code> + a default line cap (keeps huge files from blowing the round — feeds nicely into v0.10.5 compaction). <strong>Defer</strong> images/PDF/notebooks to a v2.x stretch (multimodal is a separate surface).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend text + ranges; multimodal deferred) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name">Edit — uniqueness + diff display</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd><code>old_string</code> must match exactly + be unique (else <code>replace_all</code>); <code>new_string</code> must differ; returns a structured patch and renders a diff. <code>tools/FileEditTool/types.ts:6-19</code>.</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Follow CC semantics (exact unique match, <code>replace_all</code>, must-differ). For the append-only transcript: render a compact one-line edit notice (<code>± file.py: −N/+M lines</code>) rather than a full inline diff; a full diff is reachable later via the same expand-by-append idiom (v0.10.2). No live in-place diff (append-only).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend Follow CC + one-line edit notice) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Glob backing + dispatch-architecture knock-on</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Glob: <code>pattern</code> + optional <code>path</code>, returns up to ~100 files sorted by mtime. <code>tools/GlobTool/GlobTool.ts:26-50</code>.</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Pure Python (<code>pathlib</code>/<code>glob</code> + mtime sort + 100-cap) — no dependency. Knock-on: tools stay sync string-returning funcs in the existing registry; the only new plumbing is the Executor read-state (split #1). No change to the async dispatch path.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend pure-Python Glob) —</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">7.</span><span class="name">Migration — what breaks when the four are retired</span><span class="badge open">needs user</span></div>
+  <dl>
+    <dt>Impact</dt>
+    <dd>The LLM-facing tool names change (<code>read_file</code>→<code>Read</code>, etc.). Saved transcripts with old <code>tool_calls</code> still <em>render</em> (the renderer is name-agnostic) but the model won't see the old tools. The subagent allowlist (<code>subagent_tool_names()</code>) and any tests referencing the old names update.</dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Clean replace (no aliases). neutrix has no external API consumers; the tool surface is internal-to-the-LLM, so renaming isn't a public break. Update the subagent allowlist + tests. Treat as a minor (v1.1.0), not a major — the v1.0 "stable surface" was user-facing behavior, not the LLM tool names.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">— open (recommend clean replace, v1.1.0 minor) —</dd>
+  </dl>
+</div>
+
+<footer>
+  v1.1.0 coding tools · 7 split points, awaiting user decisions · release #1 of
+  the v2 band (full CC parity + MCP) → v2.0.0 lock · replaces the crude four
+  with CC-shaped Read/Edit/Write/Grep/Glob/Bash.
+</footer>
+
+</body>
+</html>

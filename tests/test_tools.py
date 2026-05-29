@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+from neutrix.executor import Executor
 from neutrix.store import ChatStore
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 
@@ -170,13 +171,149 @@ def test_task_tools_without_store_return_explicit_error():
 
 
 def test_dispatch_does_not_pass_store_to_non_task_tools(tmp_path):
-    """File-tools must keep their existing signature; passing store=... must
-    not regress them."""
+    """File-tools must keep their signature; passing store=... must not regress."""
     target = tmp_path / "out.txt"
     out = dispatch(
-        "write_file",
+        "Write",
         json.dumps({"path": str(target), "content": "hi"}),
         store=ChatStore(),
     )
     assert "OK" in out
     assert target.read_text() == "hi"
+
+
+# ===== v1.1.0 coding tools (Read/Edit/Write/Grep/Glob/Bash) ==============
+
+
+def _w(path, content):
+    """Helper: create a file directly (bypass the Write tool's read-guard)."""
+    path.write_text(content, encoding="utf-8")
+
+
+def test_read_windows_and_marks_path(tmp_path):
+    f = tmp_path / "f.txt"
+    _w(f, "\n".join(f"line{i}" for i in range(1, 11)))  # 10 lines
+    ex = Executor()
+    out = dispatch("Read", json.dumps({"path": str(f), "offset": 2, "limit": 3}), executor=ex)
+    assert "line3" in out and "line5" in out
+    assert "line2" not in out and "line6" not in out
+    assert "3\t" in out  # cat -n numbering reflects offset (1-based line 3)
+    assert "more lines" in out  # truncation hint
+    assert str(f.resolve()) in ex.read_paths
+
+
+def test_edit_requires_prior_read(tmp_path):
+    f = tmp_path / "f.py"
+    _w(f, "x = 1\n")
+    ex = Executor()
+    # Edit before Read → refused.
+    out = dispatch(
+        "Edit",
+        json.dumps({"path": str(f), "old_string": "x = 1", "new_string": "x = 2"}),
+        executor=ex,
+    )
+    assert out.startswith("ERROR") and "read-before-edit" in out.lower()
+    assert f.read_text() == "x = 1\n"  # untouched
+    # After Read → allowed.
+    dispatch("Read", json.dumps({"path": str(f)}), executor=ex)
+    out = dispatch(
+        "Edit",
+        json.dumps({"path": str(f), "old_string": "x = 1", "new_string": "x = 2"}),
+        executor=ex,
+    )
+    assert out.startswith("OK")
+    assert f.read_text() == "x = 2\n"
+
+
+def test_edit_uniqueness_and_replace_all(tmp_path):
+    f = tmp_path / "f.txt"
+    _w(f, "a\na\na\n")
+    ex = Executor()
+    dispatch("Read", json.dumps({"path": str(f)}), executor=ex)
+    # Non-unique without replace_all → refused.
+    out = dispatch(
+        "Edit",
+        json.dumps({"path": str(f), "old_string": "a", "new_string": "b"}),
+        executor=ex,
+    )
+    assert out.startswith("ERROR") and "unique" in out
+    # replace_all → all replaced.
+    out = dispatch(
+        "Edit",
+        json.dumps({"path": str(f), "old_string": "a", "new_string": "b", "replace_all": True}),
+        executor=ex,
+    )
+    assert out.startswith("OK")
+    assert f.read_text() == "b\nb\nb\n"
+
+
+def test_edit_must_differ(tmp_path):
+    f = tmp_path / "f.txt"
+    _w(f, "same\n")
+    ex = Executor()
+    dispatch("Read", json.dumps({"path": str(f)}), executor=ex)
+    out = dispatch(
+        "Edit",
+        json.dumps({"path": str(f), "old_string": "same", "new_string": "same"}),
+        executor=ex,
+    )
+    assert out.startswith("ERROR") and "identical" in out
+
+
+def test_write_overwrite_requires_read(tmp_path):
+    f = tmp_path / "f.txt"
+    ex = Executor()
+    # New file → no Read needed.
+    out = dispatch("Write", json.dumps({"path": str(f), "content": "v1"}), executor=ex)
+    assert out.startswith("OK")
+    # Overwrite an existing file the agent hasn't Read this session → refused.
+    ex2 = Executor()
+    out = dispatch("Write", json.dumps({"path": str(f), "content": "v2"}), executor=ex2)
+    assert out.startswith("ERROR") and "Read it before overwriting" in out
+    assert f.read_text() == "v1"
+    # After Read → allowed.
+    dispatch("Read", json.dumps({"path": str(f)}), executor=ex2)
+    out = dispatch("Write", json.dumps({"path": str(f), "content": "v2"}), executor=ex2)
+    assert out.startswith("OK")
+    assert f.read_text() == "v2"
+
+
+def test_glob_finds_files_recursively(tmp_path):
+    (tmp_path / "a.py").write_text("x")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("y")
+    (tmp_path / "c.txt").write_text("z")
+    out = dispatch("Glob", json.dumps({"pattern": "**/*.py", "path": str(tmp_path)}))
+    assert "a.py" in out and "b.py" in out
+    assert "c.txt" not in out
+
+
+def test_grep_python_fallback(tmp_path, monkeypatch):
+    # Force the pure-Python path (no rg).
+    monkeypatch.setattr("neutrix.tools.shutil.which", lambda _name: None)
+    (tmp_path / "a.py").write_text("import os\nTODO: fix\n")
+    (tmp_path / "b.py").write_text("clean\n")
+    files = dispatch(
+        "Grep",
+        json.dumps({"pattern": "TODO", "path": str(tmp_path), "output_mode": "files_with_matches"}),
+    )
+    assert "a.py" in files and "b.py" not in files
+    content = dispatch(
+        "Grep",
+        json.dumps({"pattern": "TODO", "path": str(tmp_path), "output_mode": "content"}),
+    )
+    assert "a.py:2:TODO: fix" in content
+
+
+def test_grep_no_matches_python_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr("neutrix.tools.shutil.which", lambda _name: None)
+    (tmp_path / "a.py").write_text("nothing here\n")
+    out = dispatch("Grep", json.dumps({"pattern": "ZZZ", "path": str(tmp_path)}))
+    assert out == "(no matches)"
+
+
+def test_new_tools_in_registry_old_ones_gone():
+    for name in ("Read", "Edit", "Write", "Grep", "Glob", "Bash"):
+        assert name in BUILTIN_TOOLS
+    for old in ("read_file", "write_file", "list_dir", "run_shell"):
+        assert old not in BUILTIN_TOOLS

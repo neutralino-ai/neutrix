@@ -548,12 +548,12 @@ async def test_tool_names_scopes_schemas():
     """tool_names narrows the schema list _call_llm advertises to the LLM."""
     llm = FakeLLM([[_assistant_text("hi")]])
     ctx = _make_ctx(llm, use_tools=True)
-    ctx.tool_names = frozenset({"read_file"})
+    ctx.tool_names = frozenset({"Read"})
     await ctx.handle_event(UserMessageEvent("hello"))
     tools = llm.calls[0]["tools"]
     assert tools is not None
     names = {t["function"]["name"] for t in tools}
-    assert names == {"read_file"}
+    assert names == {"Read"}
 
 
 @pytest.mark.asyncio

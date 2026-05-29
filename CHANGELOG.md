@@ -4,6 +4,35 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.1.0] — 2026-05-29
+
+### Changed
+- **CC-shaped coding tools — `read_file`/`write_file`/`list_dir`/`run_shell` are
+  replaced by `Read`/`Edit`/`Write`/`Grep`/`Glob`/`Bash`.** First release of the
+  v2 band (→ Claude Code parity). The LLM-facing tool surface is now what a real
+  coding agent uses:
+  - **`Read`** — `cat -n` line-numbered output with `offset`/`limit` (2000-line
+    default cap); records the path as read.
+  - **`Edit`** — exact, unique string replace (or `replace_all`), `new_string`
+    must differ, and **requires a prior `Read`** (read-before-edit, enforced via
+    a per-session `Executor.read_paths`; subagents get isolated read-state).
+  - **`Write`** — overwrite; overwriting an existing file requires a prior `Read`.
+  - **`Grep`** — ripgrep when `rg` is on PATH, else a pure-Python fallback
+    (`pattern`/`path`/`glob`/`output_mode`/`case_insensitive`).
+  - **`Glob`** — `pathlib` glob (supports `**`), newest-first, 100-file cap.
+  - **`Bash`** — the existing tree-kill + `timeout` shell engine, renamed; its
+    description nudges the model toward the dedicated tools.
+
+### Notes
+- Clean replace, no aliases — the tool names are LLM-internal (not a public API),
+  so this is a minor, not a breaking v1.0 "stable surface" change. Hard-blocking
+  `sed`/`grep`/etc. in `Bash` is deferred to the permissions release (v1.4.0);
+  multimodal `Read` to a later release. `subagent_tool_names()` auto-tracks the
+  new set.
+
+See [docs/PRDs/v1.1.0-coding-tools.md](docs/PRDs/v1.1.0-coding-tools.md)
+and [docs/splits/v1.1.0-coding-tools.html](docs/splits/v1.1.0-coding-tools.html).
+
 ## [v1.0.0] — 2026-05-29
 
 ### The v1.0 lock

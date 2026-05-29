@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import fnmatch
 import inspect
 import json
 import os
+import re
+import shutil
 import subprocess
 import threading
 from collections.abc import Callable, Collection
@@ -189,37 +192,213 @@ class Tool:
 # ----- implementations --------------------------------------------------------
 
 
-def _read_file(path: str, max_bytes: int = 200_000) -> str:
+_READ_DEFAULT_LIMIT = 2000
+
+
+def _resolved(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
+def _read(
+    path: str,
+    offset: int = 0,
+    limit: int = _READ_DEFAULT_LIMIT,
+    *,
+    executor: Executor | None = None,
+) -> str:
+    """Read a UTF-8 text file as ``cat -n`` lines; window via offset/limit.
+
+    Records the path as read on the executor (v1.1.0 read-before-edit). The
+    ``limit`` cap keeps a huge file from blowing the round (feeds compaction).
+    """
     p = Path(path).expanduser()
     if not p.exists():
         return f"ERROR: {path} does not exist"
     if not p.is_file():
         return f"ERROR: {path} is not a regular file"
-    data = p.read_bytes()[:max_bytes]
     try:
-        return data.decode("utf-8")
+        text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return f"ERROR: {path} is not utf-8 text"
+        return f"ERROR: {path} is not utf-8 text (binary/multimodal Read is a v2.x stretch)"
+    if executor is not None:
+        executor.mark_read(_resolved(path))
+    lines = text.splitlines()
+    start = max(0, int(offset))
+    end = start + max(1, int(limit))
+    window = lines[start:end]
+    if not window:
+        return f"(no lines at offset {start}; file has {len(lines)} lines)"
+    body = "\n".join(f"{start + i + 1:6d}\t{ln}" for i, ln in enumerate(window))
+    if end < len(lines):
+        body += f"\n… [{len(lines) - end} more lines; pass offset={end} to continue]"
+    return body
 
 
-def _write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    return f"OK: wrote {len(content)} chars to {p}"
-
-
-def _list_dir(path: str = ".") -> str:
+def _edit(
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+    *,
+    executor: Executor | None = None,
+) -> str:
+    """Exact, unique str-replace (or replace_all). Requires a prior Read."""
     p = Path(path).expanduser()
     if not p.exists():
         return f"ERROR: {path} does not exist"
-    if not p.is_dir():
-        return f"ERROR: {path} is not a directory"
-    items = []
-    for entry in sorted(p.iterdir()):
-        kind = "d" if entry.is_dir() else "f"
-        items.append(f"{kind} {entry.name}")
-    return "\n".join(items) if items else "(empty)"
+    if executor is not None and _resolved(path) not in executor.read_paths:
+        return f"ERROR: Read {path} before editing it (read-before-edit)"
+    if old_string == new_string:
+        return "ERROR: old_string and new_string are identical"
+    try:
+        content = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return f"ERROR: {path} is not utf-8 text"
+    count = content.count(old_string)
+    if count == 0:
+        return f"ERROR: old_string not found in {path}"
+    if count > 1 and not replace_all:
+        return (
+            f"ERROR: old_string appears {count} times in {path}; add surrounding "
+            "context to make it unique, or pass replace_all=true"
+        )
+    new_content = (
+        content.replace(old_string, new_string)
+        if replace_all
+        else content.replace(old_string, new_string, 1)
+    )
+    p.write_text(new_content, encoding="utf-8")
+    n = count if replace_all else 1
+    before, after = content.count("\n") + 1, new_content.count("\n") + 1
+    return f"OK: edited {p} · {n} replacement{'s' if n != 1 else ''} · {before}→{after} lines"
+
+
+def _write(
+    path: str,
+    content: str,
+    *,
+    executor: Executor | None = None,
+) -> str:
+    """Write/overwrite a file. Overwriting an existing file requires a Read."""
+    p = Path(path).expanduser()
+    if (
+        p.exists()
+        and executor is not None
+        and _resolved(path) not in executor.read_paths
+    ):
+        return f"ERROR: {path} exists — Read it before overwriting"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    if executor is not None:
+        executor.mark_read(_resolved(path))  # now known
+    return f"OK: wrote {len(content)} chars to {p}"
+
+
+def _glob(pattern: str, path: str = ".") -> str:
+    """Glob files under ``path`` (supports ``**``), newest first, capped at 100."""
+    base = Path(path).expanduser()
+    if not base.exists():
+        return f"ERROR: {path} does not exist"
+    try:
+        matches = [m for m in base.glob(pattern) if m.is_file()]
+    except (ValueError, OSError) as exc:
+        return f"ERROR: bad glob pattern: {exc}"
+    matches.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    files = [str(m) for m in matches[:100]]
+    if not files:
+        return "(no matches)"
+    out = "\n".join(files)
+    if len(matches) > 100:
+        out += f"\n… [{len(matches) - 100} more; refine the pattern]"
+    return out
+
+
+_GREP_OUTPUT_MODES = ("content", "files_with_matches", "count")
+
+
+def _grep(
+    pattern: str,
+    path: str = ".",
+    glob: str | None = None,
+    output_mode: str = "files_with_matches",
+    case_insensitive: bool = False,
+) -> str:
+    """Search file contents by regex. Uses ripgrep when on PATH, else Python.
+
+    ``output_mode``: files_with_matches (default) | content | count.
+    """
+    if output_mode not in _GREP_OUTPUT_MODES:
+        return f"ERROR: output_mode must be one of {', '.join(_GREP_OUTPUT_MODES)}"
+    rg = shutil.which("rg")
+    if rg:
+        return _grep_rg(rg, pattern, path, glob, output_mode, case_insensitive)
+    return _grep_python(pattern, path, glob, output_mode, case_insensitive)
+
+
+def _grep_rg(
+    rg: str, pattern: str, path: str, glob: str | None, output_mode: str, ci: bool
+) -> str:
+    args = [rg, "--no-heading", "--color", "never"]
+    if ci:
+        args.append("-i")
+    if glob:
+        args += ["--glob", glob]
+    if output_mode == "files_with_matches":
+        args.append("-l")
+    elif output_mode == "count":
+        args.append("-c")
+    else:
+        args.append("-n")
+    args += ["-e", pattern, path]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"ERROR: rg failed: {exc}"
+    if proc.returncode not in (0, 1):  # 1 = no matches (not an error)
+        return f"ERROR: rg: {proc.stderr.strip()}"
+    out = proc.stdout.strip()
+    return out or "(no matches)"
+
+
+def _grep_python(
+    pattern: str, path: str, glob: str | None, output_mode: str, ci: bool
+) -> str:
+    try:
+        rx = re.compile(pattern, re.IGNORECASE if ci else 0)
+    except re.error as exc:
+        return f"ERROR: bad regex: {exc}"
+    base = Path(path).expanduser()
+    files: list[Path] = (
+        [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
+    )
+    skip_dirs = {".git", ".svn", ".hg", "__pycache__", ".venv", "node_modules"}
+    matched_files: list[str] = []
+    content_lines: list[str] = []
+    counts: list[str] = []
+    for f in files:
+        if any(part in skip_dirs for part in f.parts):
+            continue
+        if glob and not fnmatch.fnmatch(f.name, glob):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        hits = [(i + 1, ln) for i, ln in enumerate(text.splitlines()) if rx.search(ln)]
+        if not hits:
+            continue
+        matched_files.append(str(f))
+        counts.append(f"{f}:{len(hits)}")
+        for lineno, ln in hits:
+            content_lines.append(f"{f}:{lineno}:{ln}")
+        if len(content_lines) > 500:
+            content_lines.append("… [truncated; refine the search]")
+            break
+    if output_mode == "files_with_matches":
+        return "\n".join(matched_files) or "(no matches)"
+    if output_mode == "count":
+        return "\n".join(counts) or "(no matches)"
+    return "\n".join(content_lines) or "(no matches)"
 
 
 def _run_shell(
@@ -435,51 +614,133 @@ def subagent_tool_names() -> frozenset[str]:
 
 
 BUILTIN_TOOLS: dict[str, Tool] = {
-    "read_file": Tool(
-        name="read_file",
-        description="Read a UTF-8 text file from disk and return its contents.",
+    "Read": Tool(
+        name="Read",
+        description=(
+            "Read a UTF-8 text file as line-numbered text. Use offset/limit to "
+            "window large files. You must Read a file before you Edit or "
+            "overwrite it. (Images/PDF/notebooks: not yet supported.)"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute or relative path."},
+                "offset": {
+                    "type": "integer",
+                    "description": "0-based first line to show.",
+                    "default": 0,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max lines to show.",
+                    "default": _READ_DEFAULT_LIMIT,
+                },
+            },
+            "required": ["path"],
+        },
+        func=_read,
+    ),
+    "Edit": Tool(
+        name="Edit",
+        description=(
+            "Replace an exact string in a file. old_string must match exactly "
+            "and be unique (else pass replace_all). Requires a prior Read of the "
+            "file. Strip the line-number prefix from Read output before matching."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path to the file."},
+                "old_string": {"type": "string", "description": "Exact text to replace."},
+                "new_string": {"type": "string", "description": "Replacement (must differ)."},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence.",
+                    "default": False,
+                },
             },
-            "required": ["path"],
+            "required": ["path", "old_string", "new_string"],
         },
-        func=_read_file,
+        func=_edit,
     ),
-    "write_file": Tool(
-        name="write_file",
-        description="Write UTF-8 text content to a file (overwriting if it exists).",
+    "Write": Tool(
+        name="Write",
+        description=(
+            "Write content to a file, overwriting if it exists. Prefer Edit for "
+            "changes; use Write for new files or full rewrites. Overwriting an "
+            "existing file requires a prior Read."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path to write."},
-                "content": {"type": "string", "description": "Content to write."},
+                "content": {"type": "string", "description": "Full file content."},
             },
             "required": ["path", "content"],
         },
-        func=_write_file,
+        func=_write,
     ),
-    "list_dir": Tool(
-        name="list_dir",
-        description="List entries in a directory (one per line, prefixed 'd' or 'f').",
+    "Grep": Tool(
+        name="Grep",
+        description=(
+            "Search file contents by regular expression (ripgrep when available). "
+            "Prefer this over Bash grep/rg."
+        ),
         parameters={
             "type": "object",
             "properties": {
+                "pattern": {"type": "string", "description": "Regex to search for."},
                 "path": {
                     "type": "string",
-                    "description": "Directory path (defaults to current).",
+                    "description": "Dir or file to search (default cwd).",
+                    "default": ".",
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "Filter files by glob, e.g. '*.py'.",
+                },
+                "output_mode": {
+                    "type": "string",
+                    "enum": list(_GREP_OUTPUT_MODES),
+                    "description": "files_with_matches (default) | content | count.",
+                    "default": "files_with_matches",
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Case-insensitive match.",
+                    "default": False,
+                },
+            },
+            "required": ["pattern"],
+        },
+        func=_grep,
+    ),
+    "Glob": Tool(
+        name="Glob",
+        description=(
+            "Find files by glob pattern (supports **), newest first. Prefer this "
+            "over Bash find/ls."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob, e.g. '**/*.py'."},
+                "path": {
+                    "type": "string",
+                    "description": "Base directory (default cwd).",
                     "default": ".",
                 },
             },
+            "required": ["pattern"],
         },
-        func=_list_dir,
+        func=_glob,
     ),
-    "run_shell": Tool(
-        name="run_shell",
+    "Bash": Tool(
+        name="Bash",
         description=(
-            "Run a shell command and return its stdout/stderr/exit_code. "
-            "Use sparingly; for destructive ops, ask the user first."
+            "Run a shell command; returns stdout/stderr/exit_code. Use sparingly. "
+            "Prefer the dedicated tools — Read (not cat/head/tail), Edit (not sed), "
+            "Grep (not grep/rg), Glob (not find/ls). For destructive ops, ask first."
         ),
         parameters={
             "type": "object",

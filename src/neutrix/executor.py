@@ -60,9 +60,17 @@ class Executor:
     # Set by ContextManager at wiring time; forwarded to tools that declare a
     # ``slot`` kwarg (v0.10.0 ``Agent`` builds its subagent LLM from it).
     slot: Slot | None = None
+    # v1.1.0 read-before-edit: resolved paths the LLM has Read this session.
+    # Edit/Write check membership; per-session (a subagent gets a fresh
+    # Executor → fresh read-state, correctly isolated).
+    read_paths: set[str] = field(default_factory=set, repr=False)
     _pool: list[subprocess.Popen] = field(default_factory=list, repr=False)
     _cancel_events: list[threading.Event] = field(default_factory=list, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
+
+    def mark_read(self, resolved_path: str) -> None:
+        """Record that ``Read`` has seen this path (v1.1.0 read-before-edit)."""
+        self.read_paths.add(resolved_path)
 
     def register_cancellable(self, proc: subprocess.Popen) -> None:
         self._pool.append(proc)

@@ -298,14 +298,14 @@ def test_tool_schemas_well_formed():
 
 
 def test_tool_dispatch_read_write(tmp_path):
+    # v1.1.0: Write (new file) then Read (line-numbered cat -n output).
     target = tmp_path / "hello.txt"
-    write_res = dispatch(
-        "write_file", json.dumps({"path": str(target), "content": "hi"})
-    )
+    write_res = dispatch("Write", json.dumps({"path": str(target), "content": "hi"}))
     assert "OK" in write_res
     assert target.read_text() == "hi"
-    read_res = dispatch("read_file", json.dumps({"path": str(target)}))
-    assert read_res == "hi"
+    read_res = dispatch("Read", json.dumps({"path": str(target)}))
+    assert "hi" in read_res
+    assert "1\t" in read_res  # cat -n style line number
 
 
 def test_tool_dispatch_unknown():
@@ -314,16 +314,18 @@ def test_tool_dispatch_unknown():
 
 
 def test_tool_dispatch_bad_json():
-    result = dispatch("read_file", "{not json")
+    result = dispatch("Read", "{not json")
     assert result.startswith("ERROR: invalid JSON args")
 
 
-def test_tool_dispatch_list_dir(tmp_path):
+def test_tool_dispatch_glob(tmp_path):
+    # v1.1.0: list_dir is gone; Glob finds files by pattern.
     (tmp_path / "a.txt").write_text("x")
     (tmp_path / "sub").mkdir()
-    result = dispatch("list_dir", json.dumps({"path": str(tmp_path)}))
-    assert "f a.txt" in result
-    assert "d sub" in result
+    (tmp_path / "sub" / "b.py").write_text("y")
+    result = dispatch("Glob", json.dumps({"pattern": "**/*", "path": str(tmp_path)}))
+    assert "a.txt" in result
+    assert "b.py" in result
 
 
 # transcript round-trip tests live in tests/test_transcript.py.
