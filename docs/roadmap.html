@@ -378,15 +378,18 @@
   <span class="theme">
     Smart Advisor — third actor with LLM-driven task judgment
     <small>
-      A second LLM that watches the store and revises the task list
-      with judgment instead of mechanical bookkeeping. Plugs into
-      the v0.9.3 <code>ContextManager</code> event surface as an
-      additional event consumer / cancel target.
+      A third actor (own cheap LLM call on the <code>fast</code> slot) consulted
+      at turn-end (every 5 turns, or <code>/advise</code>): revises the task list
+      via the Task tools, or injects a judged <code>&lt;advisor&gt;</code>
+      suggestion the main LLM sees next turn. <code>run_once</code> is
+      side-effect-free; injection routes through a <code>ContextManager</code>
+      method (single-mutator preserved). Run-lock + session cap; skipped after a
+      cancelled turn. Idle trigger deferred (split #1). Suite 283.
+      (<a href="splits/v0.10.4-smart-advisor.html">7 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p1">P1</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 

@@ -88,6 +88,12 @@ TASK_MANAGEMENT_TOOLS = frozenset({"TaskCreate", "TaskUpdate"})
 
 LLM_ERROR_PREFIX = "[LLM error: "
 
+# v0.10.4 Smart Advisor: a judged suggestion is injected as a pseudo-user turn
+# wrapped in these tags, so it renders distinctly and is excluded from Up-arrow
+# recall — the same treatment as the task reminder / compact markers.
+ADVISOR_TAG_OPEN = "<advisor>"
+ADVISOR_TAG_CLOSE = "</advisor>"
+
 CancelReason = Literal["user", "timeout"]
 
 
@@ -414,6 +420,22 @@ class ContextManager:
         while index > prefix and _is_unfinished_tail(self.messages[index - 1]):
             index -= 1
         return index
+
+    # ---------------------------------------------------------------- advisor
+
+    def inject_advisor_message(self, text: str) -> None:
+        """Inject a v0.10.4 Advisor suggestion as a pseudo-user turn.
+
+        The Advisor is a third actor but must NOT mutate ``messages``/store
+        itself (only CM does) — it routes its judged suggestion through here.
+        Wrapped in ``<advisor>`` tags so it renders distinctly and is excluded
+        from Up-arrow recall. Appends to ``messages`` and the store in lockstep
+        (mirrors :py:meth:`_append_user_message`); the next LLM round sees it as
+        input. Call only while IDLE (the turn-end caller guarantees it).
+        """
+        content = f"{ADVISOR_TAG_OPEN}{text}{ADVISOR_TAG_CLOSE}"
+        self.messages.append({"role": "user", "content": content})
+        self.store.append_message(MessageRecord(role="user", content=content))
 
     # -------------------------------------------------- internal handlers
 
@@ -846,6 +868,11 @@ def is_task_reminder(content: Any) -> bool:
     if not content.startswith(TASK_REMINDER_TAG_OPEN):
         return False
     return TASK_REMINDER_MARKER in content
+
+
+def is_advisor_message(content: Any) -> bool:
+    """Whether ``content`` is an injected v0.10.4 ``<advisor>`` suggestion."""
+    return isinstance(content, str) and content.startswith(ADVISOR_TAG_OPEN)
 
 
 def format_reminder_notice(tasks: tuple[Task, ...]) -> str:

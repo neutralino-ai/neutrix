@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.4 splits — Smart Advisor</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --fg:#1a1a1a; --muted:#6a6a6a; --dim:#9a9a9a; --bg:#fafaf7;
+    --card:#fff; --border:#e3e3dc; --accent:#b14a00; --decided:#2f7d32; }
+  html { background: var(--bg); }
+  body { font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .tagline { color:var(--muted); margin:0 0 8px; font-size:14px; }
+  .note { color:var(--dim); margin:0 0 24px; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--muted); margin:32px 0 12px; font-weight:600; }
+  .split { background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:16px 18px; margin:0 0 14px; }
+  .split.flag { border-color:var(--accent); border-width:2px; }
+  .split .head { display:grid; grid-template-columns:36px 1fr auto; gap:12px;
+    align-items:baseline; margin-bottom:10px; }
+  .split .num { font-weight:600; color:var(--muted); }
+  .split .name { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    padding:3px 8px; border-radius:3px; font-weight:600; white-space:nowrap; }
+  .badge.decided { color:var(--decided); background:#e8f3e9; }
+  .split dl { display:grid; grid-template-columns:130px 1fr; gap:4px 16px; margin:0; font-size:14px; }
+  .split dt { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.06em; padding-top:5px; }
+  .split dd { margin:0 0 8px; }
+  .split .decision { color:var(--decided); }
+  .split .recommend { color:var(--accent); }
+  code { font:13px/1 ui-monospace,Menlo,monospace; background:#f1f0eb; padding:1px 4px; border-radius:3px; }
+  footer { color:var(--dim); font-size:12px; margin-top:48px; border-top:1px solid var(--border); padding-top:16px; }
+</style>
+</head>
+<body>
+
+<h1>v0.10.4 splits — Smart Advisor (third actor)</h1>
+<p class="tagline">
+  A third actor that watches the store, makes its own cheap LLM call on a
+  trigger, and either revises the task list (via Task tools) or injects a judged
+  <code>&lt;advisor&gt;</code> suggestion the main LLM sees next turn.
+</p>
+<p class="note">
+  Durable record. <strong>Decided autonomously under a delegating
+  <code>/goal</code>.</strong> CC analog: the auto-dream / extractMemories /
+  promptSuggestion turn-end forked actors (<code>cc2/src/services/autoDream/</code>,
+  <code>extractMemories/</code>, <code>PromptSuggestion/</code>) — same shape
+  (turn-end hook, cheap gate, own LLM call, surface via inline message + state
+  mutation, run between turns), different domain (task-list judgment).
+</p>
+
+<h2>CC survey — turn-end background actors</h2>
+<div class="split">
+  <div class="head"><span class="num">★</span><span class="name">auto-dream / extractMemories / promptSuggestion</span><span class="badge decided">survey</span></div>
+  <dl>
+    <dt>Trigger</dt>
+    <dd>Post-sampling <strong>stop hook</strong> at turn-end, fire-and-forget; cheap gates first (time → session-count → lock). <code>query/stopHooks.ts:154</code>, <code>autoDream.ts:54-67</code>.</dd>
+    <dt>LLM call</dt>
+    <dd><code>runForkedAgent()</code> — a cache-sharing fork; own prompt + restricted tools. <code>autoDream.ts:224</code>, <code>promptSuggestion.ts:294</code>.</dd>
+    <dt>Output</dt>
+    <dd>Inline system message (<code>appendSystemMessage</code>) + state mutation (task panel / suggestion in AppState). Runs between turns, never mid-turn. <code>autoDream.ts:240-247</code>.</dd>
+    <dt>Concurrency</dt>
+    <dd>Single-writer via immutable <code>setAppState</code> updaters; PID lock cross-process; agentId guard so subagents don't recurse. <code>task/framework.ts:48</code>.</dd>
+    <dt>Config</dt>
+    <dd>setting → feature flag → hardcoded defaults; on/off + interval. <code>autoDream/config.ts</code>.</dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head"><span class="num">1.</span><span class="name">Trigger mechanism + cadence</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC — turn-end hook.</strong> The Advisor is invoked from <code>TerminalChat._worker_loop</code> after a turn completes (the neutrix analog of CC's stop hook). Triggers: <strong>periodic</strong> (every N=5 completed turns) + <strong>explicit</strong> <code>/advise</code>; a <strong>run-lock</strong> drops re-entry; a <strong>session cap</strong> (20 auto-runs) then auto-trigger stops (<code>/advise</code> still works). <strong>Idle-timer trigger deferred</strong> (needs a background task coordinating with the lock + IDLE-state requirement) — record, not infeasible.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">2.</span><span class="name">Awaited vs fire-and-forget</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC</dt><dd>Fire-and-forget + an apply-only-when-idle guard / input lock.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — awaited at turn-end (race-free in neutrix's single loop).</strong> <code>_input_loop</code> and <code>_worker_loop</code> are decoupled, so the user keeps typing into the queue during the advisor call; only the next turn's <em>processing</em> waits a beat (occasional, fast-slot). Awaited avoids the lock + idle-guard machinery fire-and-forget would need. The advisor call is wrapped like <code>handle_event</code> (its failure never kills the worker), and runs only after a turn that <strong>completed</strong> (skip after a cancelled turn — the user just interrupted).</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">3.</span><span class="name">Injection path — the single-mutator invariant</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The landmine</dt>
+    <dd><code>context_manager.py</code> is "the <em>only</em> layer that mutates <code>messages</code> and <code>ChatStore</code>" — v0.10.3 just reinforced this. An Advisor doing <code>ctx.messages.append(...)</code> breaks it and desyncs messages/store/renderer.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Route injection through CM.</strong> <code>Advisor.run_once(...)</code> is <strong>side-effect-free</strong> — it makes the LLM call and returns an <code>AdvisorOutcome(task_calls, suggestion)</code>. The orchestrator applies task mutations via <code>tools.dispatch(store=...)</code> (Task tools mutating the store IS the intended path) and injects the suggestion via a new CM method <code>inject_advisor_message(text)</code> that writes <code>messages</code> + store record in lockstep (mirrors <code>_append_user_message</code>), run while CM is IDLE (turn-end guarantees it). This also makes both channels trivially mock-testable.</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">4.</span><span class="name">Marker handling — recall exclusion + distinct render</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Treat <code>&lt;advisor&gt;</code> like the reminder/compact markers.</strong> (a) Add <code>is_advisor_message(content)</code> and include it in <code>_is_real_user_prompt</code> so Up-arrow recall (v0.9.7) never surfaces advisor pseudo-turns as user input. (b) Add an <code>&lt;advisor&gt;</code> branch to <code>_render_record</code> (before the user branch) → an expanded dim <code>↳ advisor:</code> notice with the advice body, distinct from the v0.8.0 folded reminder. Missing either site is a real bug (caught in review).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name">Advisor's LLM / slot</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Fresh client, fast slot (Follow CC intent).</strong> Build a <em>new</em> <code>OpenAIChatLLM</code> for the advisor (the v0.10.0 don't-mutate-the-shared-client lesson — never switch <code>ctx.llm</code> and switch back). Use the configured <code>fast</code> slot if present, else the active slot. <code>run_once</code> takes an injected <code>llm</code> so tests pass a stub.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Rendering advisor Task-tool calls</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Folded one-line audit (locked PRD proposal).</strong> An advisor task mutation renders as a dim <code>↳ advisor: marked #3 completed</code> notice — an audit trail without the visual weight of full tool blocks. The suggestion message renders expanded (split #4).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">7.</span><span class="name">Tag name + guardrails</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong><code>&lt;advisor&gt;…&lt;/advisor&gt;</code></strong> (locked; distinct from <code>&lt;system-reminder&gt;</code>). The advisor system prompt carries non-optional guardrails: review-and-suggest don't-execute; do not create/update/delete yourself or your scheduling; do not call <code>/advise</code> from within an advisor response; only Task tools.</dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.4 Smart Advisor · 7 split points, decided autonomously · turn-end hook,
+  awaited, completed-turns-only · injection routed through a CM method (single
+  mutator preserved) · idle trigger deferred · fresh fast-slot client.
+</footer>
+
+</body>
+</html>

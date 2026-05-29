@@ -35,9 +35,12 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from neutrix import transcript
+from neutrix.advisor import Advisor
 from neutrix.compaction import is_compact_marker
-from neutrix.config import SLOT_NAMES, Config, ConfigError, load_config
+from neutrix.config import SLOT_NAMES, Config, ConfigError, Slot, load_config
 from neutrix.context_manager import (
+    ADVISOR_TAG_CLOSE,
+    ADVISOR_TAG_OPEN,
     ClearEvent,
     ContextManager,
     ReplaceHistoryEvent,
@@ -45,10 +48,11 @@ from neutrix.context_manager import (
     State,
     UserMessageEvent,
     format_reminder_notice,
+    is_advisor_message,
     is_task_reminder,
 )
 from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
-from neutrix.tools import BUILTIN_TOOLS, get_schemas
+from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 
@@ -458,7 +462,7 @@ def _is_real_user_prompt(content: object) -> bool:
     """
     if not isinstance(content, str) or not content.strip():
         return False
-    if is_task_reminder(content) or is_compact_marker(content):
+    if is_task_reminder(content) or is_compact_marker(content) or is_advisor_message(content):
         return False
     return True
 
@@ -804,6 +808,11 @@ class TerminalChat:
         # blank. Reset to 0 on each IDLE→busy transition (see
         # _heartbeat_ticker) so a turn opens on a visible dot.
         self._heartbeat_tick: int = 0
+        # v0.10.4 Smart Advisor: a third actor consulted at turn-end. Its LLM
+        # is a fresh client on the fast slot (never the shared ctx.llm), built
+        # lazily so a session that never triggers it makes no client.
+        self.advisor = Advisor()
+        self._advisor_llm: Any = None
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
@@ -874,6 +883,10 @@ class TerminalChat:
                 self._busy = False
                 self._invalidate_app()
                 self._input_queue.task_done()
+            # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
+            # turns (the user keeps typing into the queue meanwhile).
+            self.advisor.note_turn()
+            await self._maybe_run_advisor()
 
     def _tool_status(self) -> str:
         if not self.ctx.use_tools:
@@ -1021,6 +1034,14 @@ class TerminalChat:
         if role == "user" and isinstance(content, str) and is_task_reminder(content):
             await self.view.print_notice(format_reminder_notice(self.store.tasks), style="dim")
             return
+        if role == "user" and is_advisor_message(content):
+            # v0.10.4: a judged Advisor suggestion — rendered expanded (it
+            # carries advice, not state echo), distinct from the folded reminder.
+            body = str(content)[len(ADVISOR_TAG_OPEN) :]
+            if body.endswith(ADVISOR_TAG_CLOSE):
+                body = body[: -len(ADVISOR_TAG_CLOSE)]
+            await self.view.print_notice(f"↳ advisor: {body.strip()}", style="italic cyan")
+            return
         if role == "system":
             if content:
                 text = str(content)
@@ -1085,6 +1106,67 @@ class TerminalChat:
         """
         return self.ctx.cancel()
 
+    # --------------------------------------------------------------- advisor
+
+    def _advisor_slot(self) -> Slot:
+        """The slot the Advisor uses — the cheap `fast` slot if configured."""
+        try:
+            return self.config.slot("fast")
+        except Exception:
+            return self.ctx.slot
+
+    def _get_advisor_llm(self):
+        if self._advisor_llm is None:
+            from neutrix.llm import OpenAIChatLLM
+
+            self._advisor_llm = OpenAIChatLLM(self._advisor_slot())
+        return self._advisor_llm
+
+    def _recent_turn_pairs(self) -> list[dict[str, Any]]:
+        """Last K real user/assistant turns for the Advisor's context."""
+        out: list[dict[str, Any]] = []
+        for m in self.ctx.messages:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            if role == "user" and not _is_real_user_prompt(m.get("content")):
+                continue  # skip injected markers/advisor turns
+            out.append({"role": role, "content": m.get("content")})
+        return out[-(self.advisor.recent_turns * 2) :]
+
+    async def _maybe_run_advisor(self, *, forced: bool = False) -> None:
+        """Turn-end Advisor hook (v0.10.4). Awaited between turns, IDLE only."""
+        if not forced:
+            if not self.advisor.should_run():
+                return
+            # Only after a turn that completed with an assistant reply — skip
+            # after a cancelled turn (last message is the interrupt marker).
+            if not (self.ctx.messages and self.ctx.messages[-1].get("role") == "assistant"):
+                return
+        try:
+            outcome = await self.advisor.run_once(
+                tasks=self.store.tasks,
+                recent_turns=self._recent_turn_pairs(),
+                llm=self._get_advisor_llm(),
+                model=self._advisor_slot().model,
+            )
+        except Exception as exc:
+            logger.warning("advisor run failed: {}", exc)
+            return
+        await self._apply_advisor_outcome(outcome)
+
+    async def _apply_advisor_outcome(self, outcome: Any) -> None:
+        """Apply both Advisor channels: task mutations + injected suggestion."""
+        for name, args in outcome.task_calls:
+            result = dispatch(name, args, store=self.store)
+            await self.view.print_notice(f"↳ advisor: {result}", style="dim")
+        if outcome.suggestion:
+            # Routed through CM (single mutator); the render watcher then prints
+            # the <advisor> branch as an expanded notice.
+            self.ctx.inject_advisor_message(outcome.suggestion)
+
     async def _store_and_print_tool_result(
         self, name: str, arguments: str, result: str
     ) -> ToolRecord:
@@ -1101,7 +1183,9 @@ class TerminalChat:
         if handler is None:
             await self.view.print_notice(f"unknown command: /{cmd}. Try /help.", style="bold red")
             return
-        if self._busy and cmd in {"fast", "strong", "save", "load", "onboard", "compact", "rewind"}:
+        if self._busy and cmd in {
+            "fast", "strong", "save", "load", "onboard", "compact", "rewind", "advise",
+        }:
             await self.view.print_notice(
                 f"/{cmd} waits for the assistant to finish", style="yellow"
             )
@@ -1135,6 +1219,7 @@ class TerminalChat:
                     "  /tools on|off       enable/disable tool calling",
                     "  /tool [N]           list folded tool results or expand one",
                     "  /show system|tools  expand a folded LLM-input channel",
+                    "  /advise             ask the Advisor to review the task list now",
                     "  /quit               exit",
                 ]
             )
@@ -1142,6 +1227,11 @@ class TerminalChat:
 
     async def _cmd_status(self, args: list[str]) -> None:
         await self.view.print_plain(self._status_line())
+
+    async def _cmd_advise(self, args: list[str]) -> None:
+        """On-demand Advisor run (v0.10.4) — bypasses the periodic trigger."""
+        await self.view.print_notice("↳ advisor: reviewing…", style="dim")
+        await self._maybe_run_advisor(forced=True)
 
     async def _cmd_show(self, args: list[str]) -> None:
         """Expand-by-append a folded LLM-input channel (v0.10.2 parity)."""

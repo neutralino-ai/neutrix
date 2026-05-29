@@ -4,6 +4,36 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.4] — 2026-05-29
+
+### Added
+- **Smart Advisor — a third actor that judges the task list.** New
+  `neutrix.advisor` module: at turn-end (every N=5 completed turns, or on
+  `/advise`) the Advisor makes its own cheap LLM call (a fresh client on the
+  `fast` slot) to review the task list + recent turns, then either revises tasks
+  via the Task tools or injects a judged `<advisor>…</advisor>` suggestion the
+  main LLM sees next turn. `Advisor.run_once()` is **side-effect-free** (returns
+  an `AdvisorOutcome`); the orchestrator applies it — task mutations via
+  `dispatch(store=…)` (rendered as a folded `↳ advisor:` audit) and the
+  suggestion via the new `ContextManager.inject_advisor_message()` (rendered
+  expanded as `↳ advisor: <advice>`). A run-lock prevents re-entry; a session
+  cap (20) bounds auto-runs; the Advisor is skipped after a cancelled turn.
+- **`/advise`** — on-demand Advisor review (busy-guarded).
+
+### Changed
+- Injection routes through a **`ContextManager` method**, never a direct
+  `messages` write — preserving the single-mutator invariant v0.10.3 reinforced.
+- `<advisor>` pseudo-turns are excluded from Up-arrow recall (`is_advisor_message`)
+  and render as a distinct expanded notice, not a raw user turn.
+
+### Non-goals (recorded)
+- **Idle-timer trigger deferred** (needs a background timer coordinating with the
+  run-lock + IDLE requirement); periodic + `/advise` are the testable core. Also
+  out: multi-advisor, user-configurable advisor prompt, advisor streaming UI.
+
+See [docs/PRDs/v0.10.4-smart-advisor.md](docs/PRDs/v0.10.4-smart-advisor.md)
+and [docs/splits/v0.10.4-smart-advisor.html](docs/splits/v0.10.4-smart-advisor.html).
+
 ## [v0.10.3] — 2026-05-29
 
 ### Changed
