@@ -65,7 +65,14 @@ from typing import Any, Literal, Protocol
 
 from loguru import logger
 
-from neutrix.compaction import CompactionOutcome, compact_messages
+from neutrix.compaction import (
+    CompactionOutcome,
+    compact_messages,
+    compact_to_token_budget,
+    should_compact,
+    smart_compact,
+    truncate_large_tool_results,
+)
 from neutrix.config import Slot
 from neutrix.executor import Executor, ToolEvent
 from neutrix.llm import (
@@ -73,7 +80,7 @@ from neutrix.llm import (
     LLMEvent,
     LLMResponse,
 )
-from neutrix.store import ChatStore, MessageRecord, Task
+from neutrix.store import ChatStore, CompactionEvent, MessageRecord, Task
 from neutrix.tools import get_schemas
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Keep it simple."
@@ -360,9 +367,32 @@ class ContextManager:
         short to drop a tool-round-safe slice).
         """
         await self._cancel_and_wait()
-        new_messages, outcome = compact_messages(self.messages)
+        # v0.10.5: prefer summary-based compaction (one LLM call on the active
+        # slot, run while IDLE here); fall back to the mechanical drop if the
+        # summary is empty/fails, so /compact always does something useful.
+        new_messages, outcome = await smart_compact(
+            self.messages,
+            llm=self.llm,
+            model=self.slot.model,
+            max_context_tokens=self.slot.max_context_tokens,
+        )
+        kind = "summary"
+        if not outcome.did_compact:
+            new_messages, outcome = compact_messages(self.messages)
+            kind = "mechanical"
         if not outcome.did_compact:
             return outcome
+        self._apply_compaction(new_messages, outcome, kind=kind)
+        return outcome
+
+    def _apply_compaction(
+        self, new_messages: list[dict[str, Any]], outcome: CompactionOutcome, *, kind: str
+    ) -> None:
+        """Swap in the compacted messages, rebuild the store, record the event.
+
+        Mirrors :py:meth:`compact`'s store rebuild and PRESERVES tasks. The
+        single place the compacted result lands in ``messages``/store.
+        """
         tasks = self.store.tasks
         self.messages = new_messages
         self.store.reset()
@@ -370,7 +400,54 @@ class ContextManager:
             self.store.append_message(_record_from_openai(msg))
         if tasks:
             self.store.replace_tasks(tasks)
-        return outcome
+        self.store.add_compaction_event(
+            CompactionEvent(
+                turns_compacted=outcome.turns_dropped,
+                original_tokens=outcome.approx_tokens_dropped,
+                summary_tokens=0,
+                kind=kind,
+            )
+        )
+
+    async def _maybe_auto_compact(self) -> None:
+        """Threshold-triggered summary compaction (v0.10.5), once per turn.
+
+        Called at the top of :py:meth:`_drive` before any LLM call (IDLE w.r.t.
+        the LLM, so it can safely reuse ``self.llm``). No-op when the slot has no
+        ``max_context_tokens`` or the payload is under threshold.
+        """
+        if not should_compact(
+            self.messages, max_context_tokens=self.slot.max_context_tokens
+        ):
+            return
+        new_messages, outcome = await smart_compact(
+            self.messages,
+            llm=self.llm,
+            model=self.slot.model,
+            max_context_tokens=self.slot.max_context_tokens,
+        )
+        if outcome.did_compact:
+            self._apply_compaction(new_messages, outcome, kind="summary")
+
+    def _recover_from_prompt_too_long(self) -> bool:
+        """React to a provider prompt-too-long error (v0.10.5 hardening #2/#3).
+
+        First truncate oversized ``role:tool`` bodies (the single-huge-message
+        case), then drop oldest turns under 80% of the window. Returns True iff
+        anything was trimmed (so retrying the round is worthwhile).
+        """
+        budget = int((self.slot.max_context_tokens or 0) * 0.8)
+        truncated, n_truncated = truncate_large_tool_results(self.messages, cap=8000)
+        new_messages, outcome = compact_to_token_budget(truncated, budget=budget)
+        if outcome.did_compact:
+            self._apply_compaction(new_messages, outcome, kind="budget")
+            return True
+        if n_truncated:
+            self._apply_compaction(
+                truncated, CompactionOutcome(True, 0, 0), kind="truncate"
+            )
+            return True
+        return False
 
     # ----------------------------------------------------------------- rewind
 
@@ -541,7 +618,12 @@ class ContextManager:
         rather than propagating the cancellation up to the UI.
         """
         rounds = 0
+        ptl_retried = False
         try:
+            # v0.10.5: threshold-triggered summary compaction before the first
+            # LLM call, once per turn (no-op unless the slot has a window and
+            # the payload is over threshold).
+            await self._maybe_auto_compact()
             while True:
                 self.state = State.AWAITING_LLM
                 self.last_progress_at = time.monotonic()
@@ -558,11 +640,23 @@ class ContextManager:
                         return
                     except Exception as exc:
                         err = _compact_error(exc)
+                        self._streaming_partial = ""
+                        # v0.10.5 hardening #2/#3: a prompt-too-long error is
+                        # recoverable — truncate oversized tool bodies + drop
+                        # oldest under budget, then retry the round once.
+                        if (
+                            not ptl_retried
+                            and self.slot.max_context_tokens
+                            and _is_prompt_too_long(exc)
+                            and self._recover_from_prompt_too_long()
+                        ):
+                            ptl_retried = True
+                            logger.warning("prompt too long; compacted and retrying")
+                            continue
                         logger.warning("LLM call failed: {}", err)
                         # Discard any partial stream text on a hard error
                         # (v0.10.1 split #5): the [LLM error] message is the
                         # outcome — one assistant message, not partial+error.
-                        self._streaming_partial = ""
                         self._append_assistant_message(
                             {
                                 "role": "assistant",
@@ -917,6 +1011,28 @@ def supports_openai_tools(slot: Slot) -> bool:
     if provider == "ihep" and model.startswith("anthropic/"):
         return False
     return True
+
+
+def _is_prompt_too_long(exc: Exception) -> bool:
+    """Heuristic: does this provider error mean the payload exceeded the window?
+
+    String-matches the common phrasings across OpenAI-compatible gateways (no
+    structured error code is portable). Used to trigger the v0.10.5 reactive
+    compact-and-retry.
+    """
+    msg = str(exc).lower()
+    needles = (
+        "context length",
+        "context_length",
+        "maximum context",
+        "context window",
+        "too long",
+        "prompt is too long",
+        "reduce the length",
+        "string too long",
+        "413",
+    )
+    return any(n in msg for n in needles)
 
 
 def _compact_error(exc: Exception, *, limit: int = 600) -> str:

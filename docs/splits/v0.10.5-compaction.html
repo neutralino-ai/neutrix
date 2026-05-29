@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.5 splits — smart compaction</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --fg:#1a1a1a; --muted:#6a6a6a; --dim:#9a9a9a; --bg:#fafaf7;
+    --card:#fff; --border:#e3e3dc; --accent:#b14a00; --decided:#2f7d32; }
+  html { background: var(--bg); }
+  body { font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .tagline { color:var(--muted); margin:0 0 8px; font-size:14px; }
+  .note { color:var(--dim); margin:0 0 24px; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--muted); margin:32px 0 12px; font-weight:600; }
+  .split { background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:16px 18px; margin:0 0 14px; }
+  .split.flag { border-color:var(--accent); border-width:2px; }
+  .split .head { display:grid; grid-template-columns:36px 1fr auto; gap:12px;
+    align-items:baseline; margin-bottom:10px; }
+  .split .num { font-weight:600; color:var(--muted); }
+  .split .name { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    padding:3px 8px; border-radius:3px; font-weight:600; white-space:nowrap; }
+  .badge.decided { color:var(--decided); background:#e8f3e9; }
+  .split dl { display:grid; grid-template-columns:140px 1fr; gap:4px 16px; margin:0; font-size:14px; }
+  .split dt { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.06em; padding-top:5px; }
+  .split dd { margin:0 0 8px; }
+  .split .decision { color:var(--decided); }
+  code { font:13px/1 ui-monospace,Menlo,monospace; background:#f1f0eb; padding:1px 4px; border-radius:3px; }
+  footer { color:var(--dim); font-size:12px; margin-top:48px; border-top:1px solid var(--border); padding-top:16px; }
+</style>
+</head>
+<body>
+
+<h1>v0.10.5 splits — smart conversation compaction</h1>
+<p class="tagline">
+  Summary-based compaction on top of v0.9.6's mechanical drop: a threshold
+  trigger summarizes older turns into one folded <code>&lt;system-summary&gt;</code>,
+  plus the >1M-token hardening (under-limit cut, reactive retry, content
+  truncation) deferred from v0.9.6. The v1.0 gate.
+</p>
+<p class="note">
+  Durable record. <strong>Decided autonomously under a delegating
+  <code>/goal</code>.</strong> CC analog: <code>manageConversation</code> /
+  <code>/compact</code> (summarize-and-continue) + <code>truncateHeadForPTLRetry</code>
+  + <code>microCompact.ts</code>. <strong>Version-drift:</strong> the skeleton
+  calls itself "v0.11.1", the advisor "v0.11.0", parity "v0.10.0", and links a
+  dead <code>v0.11.0-smart-advisor.md</code> — all reconciled to current numbers
+  in the PRD. Scope follows the saved <code>v0105-compaction-scope</code> memory.
+</p>
+
+<h2>Split points (skeleton open questions, now decided)</h2>
+
+<div class="split">
+  <div class="head"><span class="num">1.</span><span class="name">Where the summary lives in the payload</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong><code>role:user</code> wrapped in <code>&lt;system-summary&gt;…&lt;/system-summary&gt;</code></strong> (locked proposal). Avoids the "two system messages" ambiguity providers handle differently; consistent with the v0.8.0 <code>&lt;system-reminder&gt;</code> / v0.9.6 <code>&lt;system-compact&gt;</code> shapes, and reuses the existing marker-render + recall-exclusion machinery.</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">2.</span><span class="name">Tool round spanning the cut point</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Cut only between rounds.</strong> Reuse v0.9.6 <code>compact_messages</code>'s forward-snap so the kept tail never begins on an orphan <code>role:tool</code> (which the pairing layer does NOT repair — it only synthesizes orphan <code>tool_use</code> results). The summary segment ends on a clean boundary.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name">Summary-call failure mode</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Leave messages unchanged + visible notice.</strong> If the summarize call raises or returns empty, <code>smart_compact</code> returns the original list with <code>did_compact=False</code>; the caller surfaces a dim error notice. The user can retry. The auto-trigger won't loop (it only fires above threshold; a failed summary leaves it above threshold, so guard against immediate re-fire — see #6).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Threshold: per-slot via max_context_tokens</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Per-slot.</strong> Add <code>max_context_tokens: int | None = None</code> to <code>Slot</code>. <code>None</code> ⇒ auto-compaction disabled for that slot (manual <code>/compact</code> still works). Auto-fires when <code>estimate_tokens(messages) > 0.75 * max_context_tokens</code>. Token estimate is the cheap <code>len(json.dumps(messages))//4</code> heuristic (revisit only if it drifts).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name">/compact upgraded — smart, with mechanical fallback</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Smart when possible, mechanical when over-limit.</strong> <code>/compact</code> and the auto-trigger run summary-based compaction. But the summarize call itself sends the segment — impossible when already over the limit. So the under-limit <strong>token-budget cut</strong> (hardening #1) runs FIRST to get the payload safely sendable, then the summary runs on the (now-bounded) segment. v0.9.6's mechanical drop is the primitive the smart version stands on.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Re-compaction + auto-trigger re-fire guard</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Allow re-compaction; guard the loop.</strong> A summary is just a message; a later compaction may fold an older summary into a new one (single-level by definition). The auto-trigger fires at most once per turn boundary and only if the last compaction actually reduced tokens — a no-op/failed compaction does not immediately re-fire.</dd>
+  </dl>
+</div>
+
+<h2>The >1M hardening (from the v0105-compaction-scope memory)</h2>
+<div class="split flag">
+  <div class="head"><span class="num">7.</span><span class="name">Three pieces v0.9.6 deliberately deferred</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Why here</dt>
+    <dd>Message-count halving doesn't guarantee getting under an arbitrary token limit (a huge <em>recent</em> message survives), and summary-based compaction can't run when already over-limit (the summarize call would itself exceed it). So the smart version needs these primitives.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>#1 Token-budget cut</strong> — <code>compact_to_token_budget(messages, budget)</code>: drop oldest (round-safe) until <code>estimate_tokens &lt; budget</code>. The under-the-limit guarantee + the pre-summary primitive (#5).<br>
+      <strong>#2 Reactive PTL retry</strong> — catch the provider's prompt-too-long error in <code>_call_llm</code>, run the token-budget cut, retry once (CC's <code>truncateHeadForPTLRetry</code>). One retry, then surface the error.<br>
+      <strong>#3 Content-truncation</strong> — <code>truncate_large_tool_results(messages, cap)</code>: truncate <em>within</em> an oversized <code>role:tool</code> body (CC's <code>microCompact</code>), the single-huge-message case message-dropping can't fix.
+    </dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.5 smart compaction · 7 split points, decided autonomously · summary-based
+  compaction + the 3-piece >1M hardening from the saved scope memory · the v1.0
+  gate · numeric tag order (after v0.10.4).
+</footer>
+
+</body>
+</html>

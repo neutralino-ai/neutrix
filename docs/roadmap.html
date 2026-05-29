@@ -398,17 +398,17 @@
   <span class="theme">
     Smart conversation compaction
     <small>
-      CC analog: <code>manageConversation</code> / <code>/compact</code>
-      with LLM-summarized older turns. Builds on v0.9.6's mechanical
-      <code>/compact</code> by adding an automatic threshold trigger
-      and a summarizer call against the cut segment. Required before
-      v1.0 — Advisor without compaction hits the cliff faster, not
-      slower.
+      <code>/compact</code> + an automatic 75%-of-window threshold now summarize
+      the older segment (one LLM call) into a folded <code>&lt;system-summary&gt;</code>
+      (<code>/show summary</code>), keeping the recent ~50% verbatim, round-safe.
+      Plus the >1M hardening from the planning memory: token-budget cut,
+      reactive prompt-too-long catch+retry, and in-message tool-result
+      truncation. <code>Slot.max_context_tokens</code> gates the auto-trigger.
+      The v1.0 gate. Suite 296. (<a href="splits/v0.10.5-compaction.html">7 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p1">P1</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 

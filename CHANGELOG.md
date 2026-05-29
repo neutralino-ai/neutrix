@@ -4,6 +4,45 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.5] — 2026-05-29
+
+### Added
+- **Smart conversation compaction.** `/compact` and an automatic threshold
+  trigger (75% of the slot's `max_context_tokens`) now summarize the older
+  segment with one LLM call and replace it with a folded
+  `<system-summary>…</system-summary>` (`/show summary` expands), instead of the
+  v0.9.6 mechanical drop. The cut keeps the recent ~50% of budget verbatim and
+  snaps to a tool-round boundary (no orphan `tool_use`/`tool_result`). Summary
+  failure falls back to the mechanical drop, so `/compact` always does something.
+- **`Slot.max_context_tokens`** (per-slot, in config.yaml). `None` ⇒ automatic
+  compaction disabled for that slot (manual `/compact` still works).
+- **The >1M-token hardening** (deferred from v0.9.6, per the planning memory):
+  (1) `compact_to_token_budget` — drop oldest (round-safe) until under a token
+  budget (the under-the-limit guarantee + the pre-summary primitive when already
+  over-limit); (2) reactive **prompt-too-long catch + one retry** in the drive
+  loop (truncate oversized tool bodies + budget-cut, then retry the round);
+  (3) `truncate_large_tool_results` — truncate *within* an oversized `role:tool`
+  body (the single-huge-message case dropping can't fix).
+- **`store.compaction_events`** (`CompactionEvent`) records each compaction.
+
+### Changed
+- `ContextManager.compact()` is now summary-first (mechanical fallback);
+  `_drive` runs a threshold auto-compact once per turn before the first LLM call.
+- `<system-summary>` markers are excluded from Up-arrow recall and render as a
+  folded `[summary]` notice (visibility parity). The render watcher is now
+  shrink-aware — a CM-internal compaction that shrinks the store realigns the
+  render cursor instead of going silent.
+
+### Known limitation (deferred)
+- The compaction **summary LLM call runs while the state is IDLE** (true for
+  both `/compact` and the auto-trigger), so Esc does not cancel it mid-call.
+  Closing this needs the cancel/uncancel machinery around the summary call;
+  deferred to v1.x (recorded, not silent).
+
+This is the **v1.0 gate** — the agentic-depth arc (judgment + budget) closes.
+See [docs/PRDs/v0.10.5-compaction.md](docs/PRDs/v0.10.5-compaction.md)
+and [docs/splits/v0.10.5-compaction.html](docs/splits/v0.10.5-compaction.html).
+
 ## [v0.10.4] — 2026-05-29
 
 ### Added

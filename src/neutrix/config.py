@@ -77,6 +77,10 @@ class Slot:
     base_url: str
     api_key: str
     llm_timeout_s: float = 300.0
+    # v0.10.5: the model's context window in tokens. None ⇒ unknown ⇒
+    # automatic (threshold) compaction is disabled for this slot (manual
+    # /compact still works). Set per-slot in config.yaml.
+    max_context_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +124,7 @@ class Config:
             base_url=base_url,
             api_key=api_key,
             llm_timeout_s=llm_timeout_s,
+            max_context_tokens=_read_max_context_tokens(spec, name=name, path=self.path),
         )
 
 
@@ -193,6 +198,32 @@ def _read_llm_timeout(spec: dict[str, Any], *, name: str, path: Path) -> float:
     if value <= 0:
         raise ConfigError(
             f"slot {name!r} in {path}: llm_timeout_s must be positive, "
+            f"got {value}"
+        )
+    return value
+
+
+def _read_max_context_tokens(
+    spec: dict[str, Any], *, name: str, path: Path
+) -> int | None:
+    """Parse ``max_context_tokens`` from a slot spec; None when absent (v0.10.5).
+
+    None disables automatic compaction for the slot. Raises
+    :class:`ConfigError` on non-integer or non-positive values.
+    """
+    raw = spec.get("max_context_tokens")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"slot {name!r} in {path}: max_context_tokens must be an integer, "
+            f"got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ConfigError(
+            f"slot {name!r} in {path}: max_context_tokens must be positive, "
             f"got {value}"
         )
     return value

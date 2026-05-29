@@ -100,6 +100,21 @@ class ToolRecord:
     result: str
 
 
+@dataclass(frozen=True)
+class CompactionEvent:
+    """A record that a compaction happened (v0.10.5).
+
+    Pure data; lives here (not in `compaction.py`) so the leaf store module
+    needn't import the LLM-dependent compaction module. ``kind`` is one of
+    ``"summary"`` / ``"mechanical"`` / ``"budget"`` / ``"truncate"``.
+    """
+
+    turns_compacted: int
+    original_tokens: int
+    summary_tokens: int
+    kind: str
+
+
 class ChatStore:
     """Mutable owner of chat state with an async change-notification API.
 
@@ -119,6 +134,7 @@ class ChatStore:
         self._next_task_id: int = 1
         self._llm_active: bool = False
         self._folded_tool_results: list[ToolRecord] = []
+        self._compaction_events: list[CompactionEvent] = []
         self._subscribers: set[asyncio.Event] = set()
 
     # --------------------------------------------------------------- reads
@@ -150,6 +166,10 @@ class ChatStore:
     @property
     def folded_tool_results(self) -> tuple[ToolRecord, ...]:
         return tuple(self._folded_tool_results)
+
+    @property
+    def compaction_events(self) -> tuple[CompactionEvent, ...]:
+        return tuple(self._compaction_events)
 
     # -------------------------------------------------------------- writes
 
@@ -214,6 +234,11 @@ class ChatStore:
         self._folded_tool_results.append(record)
         self._notify()
         return record
+
+    def add_compaction_event(self, event: CompactionEvent) -> None:
+        """Record that a compaction happened (v0.10.5) — persisted + rendered."""
+        self._compaction_events.append(event)
+        self._notify()
 
     def add_pending_tool_call(self, name: str, arguments: str) -> PendingToolCall:
         call = PendingToolCall(name=name, arguments=arguments)
@@ -330,6 +355,7 @@ class ChatStore:
         self._next_task_id = 1
         self._llm_active = False
         self._folded_tool_results.clear()
+        self._compaction_events.clear()
         if system_prompt is not None:
             self._messages.append(
                 MessageRecord(role="system", content=system_prompt)

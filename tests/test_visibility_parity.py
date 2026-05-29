@@ -188,6 +188,59 @@ async def test_no_hidden_channel(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_shrink_realigns_cursor_and_keeps_rendering(tmp_path: Path) -> None:
+    """A CM-internal compaction shrinks the store; the renderer must not go silent.
+
+    Reproduces the v0.10.5 render-desync: the monotonic cursor exceeds
+    len(records) after an auto-compaction (no manual realign), so the next
+    assistant turn would never render. The shrink-aware watcher realigns.
+    """
+    ctx = _ctx([{"role": "system", "content": "sp"}])
+    # Simulate a long, already-rendered transcript.
+    for i in range(12):
+        ctx.store.append_message(MessageRecord(role="user", content=f"u{i}"))
+        ctx.store.append_message(MessageRecord(role="assistant", content=f"a{i}"))
+    chat, output = _chat(ctx, tmp_path)
+    await chat._render_initial_transcript()
+    high_water = chat._rendered_message_count
+    assert high_water > 10
+
+    # A CM-internal compaction shrinks the store (no cursor realign by anyone).
+    ctx.store.reset(system_prompt="sp")
+    ctx.store.append_message(
+        MessageRecord(role="user", content="<system-summary>did a, b, c</system-summary>")
+    )
+    ctx.store.append_message(MessageRecord(role="assistant", content="recent reply"))
+
+    await chat._render_new_records()  # shrink-aware: realign + summary notice
+    assert chat._rendered_message_count == len(ctx.store.messages)
+    assert "[summary]" in output.getvalue()
+
+    # A subsequent assistant turn must still render (the bug made it silent).
+    ctx.store.append_message(MessageRecord(role="assistant", content="AFTER-COMPACT"))
+    await chat._render_new_records()
+    assert "AFTER-COMPACT" in output.getvalue()
+    assert chat._summary_full == "did a, b, c"
+
+
+@pytest.mark.asyncio
+async def test_summary_renders_folded_and_expands(tmp_path: Path) -> None:
+    """A <system-summary> compaction marker renders folded; /show summary expands."""
+    summary = "Earlier: set up the parser and fixed the off-by-one."
+    ctx = _ctx([{"role": "system", "content": "sp"}])
+    ctx.store.append_message(
+        MessageRecord(role="user", content=f"<system-summary>{summary}</system-summary>")
+    )
+    chat, output = _chat(ctx, tmp_path)
+    await chat._render_initial_transcript()
+    text = output.getvalue()
+    assert "[summary]" in text and "folded" in text
+    assert "<system-summary>" not in text  # not dumped raw
+    await chat._cmd_show(["summary"])
+    assert "off-by-one" in output.getvalue()
+
+
+@pytest.mark.asyncio
 async def test_reminder_renders_as_distinct_notice(tmp_path: Path) -> None:
     """An injected <system-reminder> turn renders as a notice, not a plain user turn."""
     reminder = (

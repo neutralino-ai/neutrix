@@ -7,9 +7,16 @@ import pytest
 
 from neutrix.compaction import (
     COMPACT_MARKER_OPEN,
+    SUMMARY_MARKER_OPEN,
     CompactionOutcome,
     compact_messages,
+    compact_to_token_budget,
+    estimate_tokens,
     is_compact_marker,
+    is_summary_marker,
+    should_compact,
+    smart_compact,
+    truncate_large_tool_results,
 )
 from neutrix.config import Slot
 from neutrix.context_manager import ContextManager
@@ -17,6 +24,8 @@ from neutrix.executor import Executor
 from neutrix.llm import (
     INTERRUPTED_BY_USER_MARKER,
     MISSING_TOOL_RESULT,
+    LLMEvent,
+    LLMResponse,
     _ensure_tool_result_pairing,
 )
 from neutrix.store import ChatStore
@@ -241,15 +250,22 @@ def test_token_estimate_monotonic():
 
 
 class _NullLLM:
+    """Stub that yields an empty summary → compact() falls back to mechanical.
+
+    v0.9.6's "compact must not call the LLM" contract changed in v0.10.5:
+    compact() now attempts a summary first; an empty/failed summary falls back
+    to the mechanical oldest-drop, which the two CM-compact tests below now
+    exercise via this stub.
+    """
+
     def switch(self, slot: Slot) -> None:  # pragma: no cover - trivial
         pass
 
     def stop(self) -> None:  # pragma: no cover - trivial
         pass
 
-    async def stream_response(self, **_: Any):  # pragma: no cover - never called
-        raise AssertionError("compact must not call the LLM")
-        yield None
+    async def stream_response(self, **_: Any):
+        yield LLMEvent("assistant", LLMResponse({"role": "assistant", "content": ""}, "stop"))
 
 
 def _ctx_with_body(n_pairs: int) -> ContextManager:
@@ -301,3 +317,141 @@ async def test_cm_compact_no_op_when_short_returns_unchanged():
     assert outcome.did_compact is False
     assert [m["role"] for m in ctx.messages] == ["system"]
     assert _markers(ctx.messages) == []
+
+
+# ===== v0.10.5: smart compaction + >1M hardening =========================
+
+
+class _SummaryLLM:
+    """Yields a fixed summary string as the assistant content."""
+
+    def __init__(self, summary: str = "SUMMARY: did X, next Y") -> None:
+        self.summary = summary
+        self.calls = 0
+
+    def switch(self, slot: Slot) -> None:  # pragma: no cover
+        pass
+
+    def stop(self) -> None:  # pragma: no cover
+        pass
+
+    async def stream_response(self, **_: Any):
+        self.calls += 1
+        yield LLMEvent("assistant", LLMResponse({"role": "assistant", "content": self.summary}, "stop"))
+
+
+def _big_messages(n: int, words_per_msg: int = 200) -> list[dict[str, Any]]:
+    blob = " ".join(["word"] * words_per_msg)
+    msgs: list[dict[str, Any]] = [_sys()]
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        msgs.append({"role": role, "content": f"{i} {blob}"})
+    return msgs
+
+
+def test_estimate_tokens_grows_with_payload():
+    small = estimate_tokens([_sys(), _user(1)])
+    big = estimate_tokens(_big_messages(20))
+    assert big > small > 0
+
+
+def test_should_compact_threshold():
+    msgs = _big_messages(40)  # plenty of tokens
+    assert should_compact(msgs, max_context_tokens=100) is True
+    assert should_compact([_sys()], max_context_tokens=100000) is False
+
+
+def test_should_compact_disabled_without_max():
+    assert should_compact(_big_messages(40), max_context_tokens=None) is False
+
+
+def test_compact_to_token_budget_gets_under_budget():
+    msgs = _big_messages(30)
+    budget = estimate_tokens(msgs) // 3
+    out, outcome = compact_to_token_budget(msgs, budget=budget)
+    assert outcome.did_compact is True
+    assert estimate_tokens(out) <= budget
+    assert out[0]["role"] == "system"  # prefix preserved
+    _validate_pairing(out)
+
+
+def test_truncate_large_tool_results_caps_body():
+    huge = "x" * 50000
+    msgs = [_sys(), _user(1), _asst_tools("c1"), _tool("c1")]
+    msgs[-1]["content"] = huge
+    out, n = truncate_large_tool_results(msgs, cap=8000)
+    assert n == 1
+    assert len(out[-1]["content"]) < len(huge)
+    assert "truncated" in out[-1]["content"]
+
+
+def test_truncate_leaves_small_results_untouched():
+    msgs = [_sys(), _asst_tools("c1"), _tool("c1")]
+    msgs[-1]["content"] = "small"
+    out, n = truncate_large_tool_results(msgs, cap=8000)
+    assert n == 0
+    assert out[-1]["content"] == "small"
+
+
+@pytest.mark.asyncio
+async def test_smart_compact_replaces_segment_with_summary():
+    msgs = _big_messages(20)
+    llm = _SummaryLLM("SUMMARY: earlier work")
+    out, outcome = await smart_compact(msgs, llm=llm, model="m", max_context_tokens=2000)
+    assert outcome.did_compact is True
+    assert llm.calls == 1
+    summary_markers = [m for m in out if is_summary_marker(m.get("content"))]
+    assert len(summary_markers) == 1
+    assert summary_markers[0]["role"] == "user"
+    assert "earlier work" in summary_markers[0]["content"]
+    assert out[0]["role"] == "system"  # prefix preserved
+    _validate_pairing(out)
+
+
+@pytest.mark.asyncio
+async def test_smart_compact_empty_summary_leaves_unchanged():
+    msgs = _big_messages(20)
+
+    class _Empty(_SummaryLLM):
+        async def stream_response(self, **_: Any):
+            yield LLMEvent("assistant", LLMResponse({"role": "assistant", "content": ""}, "stop"))
+
+    out, outcome = await smart_compact(msgs, llm=_Empty(), model="m", max_context_tokens=2000)
+    assert outcome.did_compact is False
+    assert out == msgs  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_smart_compact_keeps_recent_tail():
+    msgs = _big_messages(20)
+    out, outcome = await smart_compact(
+        msgs, llm=_SummaryLLM(), model="m", max_context_tokens=4000
+    )
+    assert outcome.did_compact is True
+    # The most-recent message survives verbatim after the summary.
+    assert out[-1]["content"] == msgs[-1]["content"]
+
+
+def test_is_summary_marker():
+    assert is_summary_marker(f"{SUMMARY_MARKER_OPEN}x</system-summary>")
+    assert not is_summary_marker("plain")
+    assert not is_summary_marker(None)
+
+
+@pytest.mark.asyncio
+async def test_cm_compact_smart_records_summary_event():
+    slot = Slot(
+        name="fast", provider="test", model="m",
+        base_url="https://example.test/v1", api_key="sk-test",
+        max_context_tokens=2000,
+    )
+    ctx = ContextManager(
+        slot=slot, llm=_SummaryLLM("SUMMARY: progress"), executor=Executor(),
+        store=ChatStore(), system_prompt="system prompt",
+        messages=_big_messages(16),
+    )
+    outcome = await ctx.compact()
+    assert outcome.did_compact is True
+    assert any(is_summary_marker(m.get("content")) for m in ctx.messages)
+    events = ctx.store.compaction_events
+    assert len(events) == 1 and events[0].kind == "summary"

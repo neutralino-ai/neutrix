@@ -36,7 +36,12 @@ from rich.text import Text
 
 from neutrix import transcript
 from neutrix.advisor import Advisor
-from neutrix.compaction import is_compact_marker
+from neutrix.compaction import (
+    SUMMARY_MARKER_CLOSE,
+    SUMMARY_MARKER_OPEN,
+    is_compact_marker,
+    is_summary_marker,
+)
 from neutrix.config import SLOT_NAMES, Config, ConfigError, Slot, load_config
 from neutrix.context_manager import (
     ADVISOR_TAG_CLOSE,
@@ -462,7 +467,12 @@ def _is_real_user_prompt(content: object) -> bool:
     """
     if not isinstance(content, str) or not content.strip():
         return False
-    if is_task_reminder(content) or is_compact_marker(content) or is_advisor_message(content):
+    if (
+        is_task_reminder(content)
+        or is_compact_marker(content)
+        or is_advisor_message(content)
+        or is_summary_marker(content)
+    ):
         return False
     return True
 
@@ -796,6 +806,7 @@ class TerminalChat:
         # stashed so /show can re-print them below (expand-by-append).
         self._system_full: str = ""
         self._tools_full: list[dict[str, Any]] = []
+        self._summary_full: str = ""  # v0.10.5: last compaction summary, for /show summary
         # Per-render lookup so a ``role:tool`` record can find the
         # arguments string that the matching assistant ``tool_call``
         # carried. Populated by the renderer as it walks assistant
@@ -1023,10 +1034,43 @@ class TerminalChat:
 
     async def _render_new_records(self) -> None:
         records = self.store.messages
+        if len(records) < self._rendered_message_count:
+            # v0.10.5: a CM-internal compaction (auto-threshold or
+            # prompt-too-long recovery) shrank the store from inside _drive —
+            # unlike /compact, /rewind, /clear, /load which realign the cursor
+            # themselves (synchronously, before yielding). Without this, the
+            # monotonic cursor would exceed len(records) and the transcript
+            # would go silent. Realign and surface the summary; the kept tail is
+            # already in scrollback above, so it is NOT re-printed.
+            self._rendered_message_count = len(records)
+            await self._render_compaction_shrink(records)
+            return
         while self._rendered_message_count < len(records):
             record = records[self._rendered_message_count]
             await self._render_record(record)
             self._rendered_message_count += 1
+
+    async def _render_compaction_shrink(self, records: tuple[MessageRecord, ...]) -> None:
+        """Surface a CM-internal compaction: stash the summary + print a notice."""
+        for rec in reversed(records):
+            content = rec.content
+            if is_summary_marker(content):
+                body = str(content)[len(SUMMARY_MARKER_OPEN) :]
+                if body.endswith(SUMMARY_MARKER_CLOSE):
+                    body = body[: -len(SUMMARY_MARKER_CLOSE)]
+                self._summary_full = body.strip()
+                approx = approximate_token_count(body)
+                await self.view.print_notice(
+                    f"[summary]  context auto-compacted · ~{approx} tokens · folded"
+                    "  (/show summary)",
+                    style="dim",
+                )
+                return
+            if is_compact_marker(content):
+                break
+        await self.view.print_notice(
+            "context compacted to fit the window", style="dim"
+        )
 
     async def _render_record(self, record: MessageRecord) -> None:
         role = record.role
@@ -1041,6 +1085,19 @@ class TerminalChat:
             if body.endswith(ADVISOR_TAG_CLOSE):
                 body = body[: -len(ADVISOR_TAG_CLOSE)]
             await self.view.print_notice(f"↳ advisor: {body.strip()}", style="italic cyan")
+            return
+        if role == "user" and is_summary_marker(content):
+            # v0.10.5: a compaction summary — folded one-liner (visibility
+            # parity); the full summary expands via /show summary.
+            body = str(content)[len(SUMMARY_MARKER_OPEN) :]
+            if body.endswith(SUMMARY_MARKER_CLOSE):
+                body = body[: -len(SUMMARY_MARKER_CLOSE)]
+            self._summary_full = body.strip()
+            approx = approximate_token_count(body)
+            await self.view.print_notice(
+                f"[summary]  conversation compacted · ~{approx} tokens · folded  (/show summary)",
+                style="dim",
+            )
             return
         if role == "system":
             if content:
@@ -1218,7 +1275,7 @@ class TerminalChat:
                     "  /tools              list tools",
                     "  /tools on|off       enable/disable tool calling",
                     "  /tool [N]           list folded tool results or expand one",
-                    "  /show system|tools  expand a folded LLM-input channel",
+                    "  /show system|tools|summary  expand a folded block",
                     "  /advise             ask the Advisor to review the task list now",
                     "  /quit               exit",
                 ]
@@ -1254,8 +1311,13 @@ class TerminalChat:
                 await self.view.print_text(Text("\n".join(lines), style="dim"))
             else:
                 await self.view.print_notice("no tool schemas to show", style="dim")
+        elif what == "summary":
+            if self._summary_full:
+                await self.view.print_text(Text(self._summary_full, style="dim"))
+            else:
+                await self.view.print_notice("no compaction summary yet", style="dim")
         else:
-            await self.view.print_notice("usage: /show system|tools", style="bold red")
+            await self.view.print_notice("usage: /show system|tools|summary", style="bold red")
 
     async def _cmd_tasks(self, args: list[str]) -> None:
         tasks = self.store.tasks
