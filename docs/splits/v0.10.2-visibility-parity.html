@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.2 splits — visibility parity</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --fg:#1a1a1a; --muted:#6a6a6a; --dim:#9a9a9a; --bg:#fafaf7;
+    --card:#fff; --border:#e3e3dc; --accent:#b14a00; --open:#b14a00; --decided:#2f7d32; }
+  html { background: var(--bg); }
+  body { font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+    color:var(--fg); max-width:920px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:24px; margin:0 0 4px; letter-spacing:-0.01em; }
+  .tagline { color:var(--muted); margin:0 0 8px; font-size:14px; }
+  .note { color:var(--dim); margin:0 0 24px; font-size:13px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--muted); margin:32px 0 12px; font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:13.5px; margin:0 0 14px;
+    background:var(--card); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.06em; }
+  .split { background:var(--card); border:1px solid var(--border);
+    border-radius:6px; padding:16px 18px; margin:0 0 14px; }
+  .split.flag { border-color:var(--accent); border-width:2px; }
+  .split .head { display:grid; grid-template-columns:36px 1fr auto; gap:12px;
+    align-items:baseline; margin-bottom:10px; }
+  .split .num { font-weight:600; color:var(--muted); }
+  .split .name { font-weight:600; }
+  .badge { font-size:11px; text-transform:uppercase; letter-spacing:0.06em;
+    padding:3px 8px; border-radius:3px; font-weight:600; white-space:nowrap; }
+  .badge.decided { color:var(--decided); background:#e8f3e9; }
+  .split dl { display:grid; grid-template-columns:130px 1fr; gap:4px 16px; margin:0; font-size:14px; }
+  .split dt { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.06em; padding-top:5px; }
+  .split dd { margin:0 0 8px; }
+  .split .decision { color:var(--decided); }
+  .split .recommend { color:var(--accent); }
+  code { font:13px/1 ui-monospace,Menlo,monospace; background:#f1f0eb; padding:1px 4px; border-radius:3px; }
+  footer { color:var(--dim); font-size:12px; margin-top:48px; border-top:1px solid var(--border); padding-top:16px; }
+</style>
+</head>
+<body>
+
+<h1>v0.10.2 splits — visibility parity (show what the LLM sees)</h1>
+<p class="tagline">
+  Every channel the LLM receives renders in the transcript — system prompt,
+  tool schemas, reminders, tool results — differing only by fold, never by
+  omission. Plus a normative rule and an invariant test.
+</p>
+<p class="note">
+  Durable record (per <code>prd-compare-with-claude.md</code>).
+  <strong>Decided autonomously under a delegating <code>/goal</code>.</strong>
+  CC has <em>no direct analog</em> (parity is a neutrix invariant; CC's React
+  transcript doesn't enforce LLM-view == user-view), so this is mostly
+  "No CC analog" — the relevant prior art is neutrix's own append-only renderer.
+</p>
+
+<h2>Ground-truth: what each channel ACTUALLY renders today</h2>
+<p class="note">The skeleton's premises were stale (written pre-implementation).
+Verified against current <code>terminal_chat.py</code> before scoping:</p>
+<table>
+  <tr><th>Channel</th><th>State today</th><th>v0.10.2 action</th></tr>
+  <tr><td>system prompt</td><td>renders <strong>full</strong> inline (<code>_render_record</code> L988 → <code>print_system</code>)</td><td>fold to <code>[system] · N B</code> if long; short stays inline (parity already met)</td></tr>
+  <tr><td>tool schemas</td><td><strong>never rendered</strong> — the real gap</td><td>add folded <code>[tools] M schemas · K B</code> at session start + expand</td></tr>
+  <tr><td>reminders</td><td>already a distinct dim notice (L986 <code>format_reminder_notice</code>)</td><td>leave — parity met (cosmetic prefix only if cheap)</td></tr>
+  <tr><td>tool results</td><td>already fold-summary + <code>/tool N</code> expand</td><td>leave — done</td></tr>
+</table>
+
+<h2>Split points</h2>
+
+<div class="split flag">
+  <div class="head"><span class="num">1.</span><span class="name">Fold model — in-place toggle vs expand-by-append</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The collision</dt>
+    <dd>The skeleton's headline is a <code>Ctrl+E</code> fold/expand <em>toggle</em>. But the transcript is <strong>append-only scrollback</strong> (<code>console.print</code>, v0.6.8) — you cannot collapse or re-render a block already printed. A true in-place toggle would mean reversing the append-only architecture (full-screen TUI rework) — out of scope, arguably never.</dd>
+    <dt>Options</dt>
+    <dd><ul>
+      <li>In-place <code>Ctrl+E</code> toggle (needs append-only rework — infeasible here).</li>
+      <li>Expand-by-append: render a one-line folded summary; a command re-prints the full content <em>below</em> on demand (the existing <code>/tool N</code> idiom).</li>
+    </ul></dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Expand-by-append — forced by the architecture, and already the neutrix idiom (<code>/tool N</code> re-prints a result below). Parity = every channel has a folded summary rendered; full content reachable by re-printing.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — expand-by-append (no toggle).</strong> Generalize <code>/tool N</code> into a <code>/show &lt;what&gt;</code> command that re-prints the full content of a folded block (<code>system</code>, <code>tools</code>) below the cursor. <strong>No <code>Ctrl+E</code> binding</strong> — key-binding wiring has regressed twice; a command matches the idiom and meets parity (full content is command-reachable). "Collapse" is not offered (can't un-print). This also defines v0.10.0's deferred subagent fold (split #5).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">2.</span><span class="name">Scope — the skeleton's 4 channels vs the real gap</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Finding</dt>
+    <dd>Ground-truthing (table above) shows 3 of 4 channels already satisfy parity. The skeleton assumed all 4 were hidden; only <strong>tool schemas</strong> genuinely is.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Scope to the real gap.</strong> Deliver: (a) the <code>[tools]</code> folded block at session start (the gap), (b) fold the system prompt when it exceeds a threshold (short prompts stay inline — preserves current behavior for the default), (c) <code>.claude/rules/visibility-parity.md</code>, (d) the invariant test, (e) a <code>[subagent]</code> label (split #5), (f) the <code>/show</code> expand command. Reminders + tool results are already compliant and left untouched. The PRD's Problem section states this honestly.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name">The single-source bundle + AgentEvent</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The catch</dt>
+    <dd>The skeleton proposes emitting <code>AgentEvent("llm_round_start", bundle)</code>. But v0.9.3 <strong>removed AgentEvents</strong> — the renderer subscribes to <code>ChatStore.changes()</code>. System prompt + tool schemas are <em>session-static</em> (invariant across rounds).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>No event.</strong> Render the static system/tools channels <strong>once at session start</strong> (from <code>ctx</code>), which satisfies per-round parity since they don't change. Add a frozen <code>LLMRoundBundle(system, messages, tools)</code> snapshot in <code>context_manager.py</code> built on demand (<code>ctx.round_bundle()</code>), used by the <strong>invariant test</strong> to enumerate channels — not as an event.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Invariant test shape</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Capture both render phases; iterate bundle fields dynamically.</strong> The test spies on <code>TerminalView.print_*</code> across BOTH session-start rendering (system/tools) and the <code>store.changes()</code> walk (messages/results/reminders), then asserts every <em>populated</em> field of the <code>LLMRoundBundle</code> produced ≥1 render call. Iterate the bundle's fields (not a hardcoded <code>(system, messages, tools)</code> tuple) so a future 4th channel trips the test — that dynamic enumeration is what gives the rule teeth.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">5.</span><span class="name">v0.10.0's deferred subagent fold — what's actually needed</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>Finding</dt>
+    <dd>v0.10.0 renders the subagent result as a normal tool result (already folded + <code>/tool N</code>-expandable). So the "deferred fold machinery" is already there — the only gap is that it reads as a generic <code>tool_result</code>, not visibly a subagent.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Just a label, no new machinery.</strong> When the folded tool-result summary is for the <code>Agent</code> tool, render the keyword as <code>subagent</code> instead of <code>tool_result</code>. Reuses the entire existing fold/expand path. The v0.10.0 deferral is discharged by a one-line label change, not a fold subsystem.</dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.2 visibility parity · 5 split points, decided autonomously · fold model
+  forced to expand-by-append by the append-only renderer · scoped to the real
+  gap (tool schemas) after ground-truthing · discharges v0.10.0's subagent
+  deferral with a label.
+</footer>
+
+</body>
+</html>

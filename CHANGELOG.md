@@ -4,6 +4,40 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.2] — 2026-05-29
+
+### Added
+- **Visibility parity — the transcript now shows the one channel it hid: tool
+  schemas.** A folded `[tools] M schemas · folded · K B` block renders at session
+  start (when tools are enabled); `/show tools` re-prints the schema list below.
+  This closes the only genuine parity gap — ground-truthing the renderer showed
+  the system prompt, reminders, and tool results were already surfaced.
+- **`.claude/rules/visibility-parity.md`** — the normative rule (every LLM-bound
+  channel renders, differing only by fold), worded for the append-only
+  expand-by-append reality.
+- **`LLMRoundBundle` + `ContextManager.round_bundle()`** — a frozen snapshot of
+  the channels sent to the LLM, the single source of truth the invariant test
+  enumerates.
+- **`tests/test_visibility_parity.py`** — asserts every populated channel of the
+  round bundle produces ≥1 render call, iterating the bundle's fields
+  dynamically so a future hidden channel trips it.
+
+### Changed
+- A **long system prompt now folds** to `[system] · folded · N B` (>200 B);
+  short prompts (incl. the default) stay inline. `/show system` expands.
+- A subagent (`Agent` tool) result renders with a **`[subagent]` label** instead
+  of the generic `tool_result` keyword — discharging v0.10.0's deferred subagent
+  rendering with a label (the result already folds/expands via the tool-result
+  path; no new fold machinery).
+
+### Non-goal (recorded)
+- **No in-place `Ctrl+E` fold/expand toggle** — infeasible in append-only
+  scrollback (can't collapse a printed block). Expansion is by re-printing below
+  (`/show`, `/tool N`); no new key binding.
+
+See [docs/PRDs/v0.10.2-visibility-parity.md](docs/PRDs/v0.10.2-visibility-parity.md)
+and [docs/splits/v0.10.2-visibility-parity.html](docs/splits/v0.10.2-visibility-parity.html).
+
 ## [v0.10.1] — 2026-05-29
 
 ### Changed

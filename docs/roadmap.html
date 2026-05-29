@@ -337,18 +337,19 @@
   <span class="theme">
     Visibility parity — show what the LLM sees
     <small>
-      Renders the system prompt, tool schemas, and
-      <code>&lt;system-reminder&gt;</code> injections in the
-      transcript (folded). Adds a
-      <code>.claude/rules/visibility-parity.md</code> rule, an
-      <code>LLMRoundBundle</code> snapshot, a <code>Ctrl+E</code>
-      fold/expand affordance, and an invariant test asserting no
-      channel sent to the LLM is omitted from the user view.
+      Ground-truthing showed only one channel was hidden: <strong>tool
+      schemas</strong> → now a folded <code>[tools]</code> block at session
+      start (<code>/show tools</code> expands). Long system prompts fold
+      (<code>[system]</code>); subagent results get a <code>[subagent]</code>
+      label. Adds <code>.claude/rules/visibility-parity.md</code>, an
+      <code>LLMRoundBundle</code> snapshot, and an invariant test iterating the
+      bundle's channels. Fold = expand-by-append (no in-place
+      <code>Ctrl+E</code> toggle — append-only renderer, split #1). Suite 261.
+      (<a href="splits/v0.10.2-visibility-parity.html">5 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p1">P1</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 

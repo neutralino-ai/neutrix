@@ -17,6 +17,7 @@ CM (the key binding can't await), kept honest by the
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import sys
@@ -47,7 +48,7 @@ from neutrix.context_manager import (
     is_task_reminder,
 )
 from neutrix.store import ChatStore, MessageRecord, Task
-from neutrix.tools import BUILTIN_TOOLS
+from neutrix.tools import BUILTIN_TOOLS, get_schemas
 
 QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 
@@ -109,6 +110,9 @@ WORD_RE = re.compile(r"\S+")
 SYSTEM_STYLE = "dim yellow"
 USER_STYLE = "cyan"
 ASSISTANT_STYLE = "white"
+# v0.10.2 visibility parity: fold the system prompt only when it's long enough
+# to dominate session start; short prompts (incl. the default) stay inline.
+SYSTEM_FOLD_THRESHOLD = 200
 
 
 def result_line_count(result: str) -> int:
@@ -277,6 +281,12 @@ class ToolRecord:
     arguments: str
     result: str
 
+    @property
+    def _keyword(self) -> str:
+        # v0.10.2 split #5: a subagent (Agent tool) result reads as
+        # "subagent", reusing the whole tool-result fold/expand path.
+        return "subagent" if self.name == "Agent" else "tool_result"
+
     def _summary_body(self) -> str:
         args = compact_inline(self.arguments or "{}")
         lines = result_line_count(self.result)
@@ -288,10 +298,10 @@ class ToolRecord:
 
     @property
     def summary(self) -> str:
-        return f"<- {'tool_result'.ljust(TOOL_KEYWORD_WIDTH)}{self._summary_body()}"
+        return f"<- {self._keyword.ljust(TOOL_KEYWORD_WIDTH)}{self._summary_body()}"
 
     def summary_parts(self) -> tuple[str, str, str]:
-        return ("<- ", "tool_result".ljust(TOOL_KEYWORD_WIDTH), self._summary_body())
+        return ("<- ", self._keyword.ljust(TOOL_KEYWORD_WIDTH), self._summary_body())
 
 
 InputFunc = Callable[[str], str]
@@ -774,6 +784,10 @@ class TerminalChat:
         self._busy = False
         self._input_queue: asyncio.Queue[str] | None = None
         self._tool_records: list[ToolRecord] = []
+        # v0.10.2 visibility parity: full text of folded session channels,
+        # stashed so /show can re-print them below (expand-by-append).
+        self._system_full: str = ""
+        self._tools_full: list[dict[str, Any]] = []
         # Per-render lookup so a ``role:tool`` record can find the
         # arguments string that the matching assistant ``tool_call``
         # carried. Populated by the renderer as it walks assistant
@@ -793,6 +807,7 @@ class TerminalChat:
 
     async def run_async(self) -> None:
         await self._render_initial_transcript()
+        await self._render_tool_schemas_block()
         self._input_queue = asyncio.Queue()
         worker = asyncio.create_task(self._worker_loop())
         renderer = asyncio.create_task(self._render_watcher())
@@ -972,6 +987,23 @@ class TerminalChat:
         self._rendered_message_count = 0
         await self._render_new_records()
 
+    async def _render_tool_schemas_block(self) -> None:
+        """v0.10.2 visibility parity: render the tool-schemas channel folded.
+
+        The schemas sent to the LLM (the ``tools=`` bundle) are otherwise the
+        one input channel the user never sees. Session-static, so rendered once
+        at start; the full list is reachable via ``/show tools``.
+        """
+        if not self.ctx.effective_tools_enabled():
+            return
+        schemas = get_schemas(self.ctx.tool_names)
+        self._tools_full = schemas
+        approx_bytes = sum(len(json.dumps(s)) for s in schemas)
+        await self.view.print_notice(
+            f"[tools]    {len(schemas)} schemas · folded · {approx_bytes} B  (/show tools)",
+            style="dim",
+        )
+
     async def _render_new_records(self) -> None:
         records = self.store.messages
         while self._rendered_message_count < len(records):
@@ -987,7 +1019,18 @@ class TerminalChat:
             return
         if role == "system":
             if content:
-                await self.view.print_system(str(content))
+                text = str(content)
+                # v0.10.2: fold a long system prompt to a one-line summary
+                # (full text reachable via /show system); short prompts stay
+                # inline, preserving the default-prompt behavior.
+                if len(text) > SYSTEM_FOLD_THRESHOLD:
+                    self._system_full = text
+                    await self.view.print_notice(
+                        f"[system]   prompt · folded · {len(text)} B  (/show system)",
+                        style=SYSTEM_STYLE,
+                    )
+                else:
+                    await self.view.print_system(text)
             return
         if role == "user":
             if content:
@@ -1091,6 +1134,7 @@ class TerminalChat:
                     "  /tools              list tools",
                     "  /tools on|off       enable/disable tool calling",
                     "  /tool [N]           list folded tool results or expand one",
+                    "  /show system|tools  expand a folded LLM-input channel",
                     "  /quit               exit",
                 ]
             )
@@ -1098,6 +1142,30 @@ class TerminalChat:
 
     async def _cmd_status(self, args: list[str]) -> None:
         await self.view.print_plain(self._status_line())
+
+    async def _cmd_show(self, args: list[str]) -> None:
+        """Expand-by-append a folded LLM-input channel (v0.10.2 parity)."""
+        what = args[0].lower() if args else ""
+        if what == "system":
+            if self._system_full:
+                await self.view.print_system(self._system_full)
+            else:
+                await self.view.print_notice(
+                    "system prompt is shown inline (not folded)", style="dim"
+                )
+        elif what == "tools":
+            if self._tools_full:
+                lines = []
+                for schema in self._tools_full:
+                    fn = schema.get("function", {}) if isinstance(schema, dict) else {}
+                    name = fn.get("name", "?")
+                    desc = " ".join(str(fn.get("description", "")).split())[:88]
+                    lines.append(f"  {name} — {desc}")
+                await self.view.print_text(Text("\n".join(lines), style="dim"))
+            else:
+                await self.view.print_notice("no tool schemas to show", style="dim")
+        else:
+            await self.view.print_notice("usage: /show system|tools", style="bold red")
 
     async def _cmd_tasks(self, args: list[str]) -> None:
         tasks = self.store.tasks

@@ -104,6 +104,21 @@ class State(str, Enum):
 
 
 @dataclass(frozen=True)
+class LLMRoundBundle:
+    """Frozen snapshot of the channels sent to the LLM in a round (v0.10.2).
+
+    The single source of truth for the visibility-parity invariant
+    (``.claude/rules/visibility-parity.md``): the renderer must surface every
+    populated channel here. Built on demand by
+    :py:meth:`ContextManager.round_bundle`; consumed by the invariant test.
+    """
+
+    system: str
+    messages: tuple[dict[str, Any], ...]
+    tools: tuple[dict[str, Any], ...] | None
+
+
+@dataclass(frozen=True)
 class UserMessageEvent:
     """User typed a non-slash message — append and drive a turn."""
 
@@ -235,6 +250,27 @@ class ContextManager:
 
     def effective_tools_enabled(self) -> bool:
         return self.use_tools and self.supports_tools()
+
+    def round_bundle(self) -> LLMRoundBundle:
+        """Snapshot the channels the LLM would receive now (v0.10.2 parity).
+
+        ``system`` is the leading system message's content (the prompt);
+        ``messages`` is the full payload; ``tools`` is the schema list when
+        tools are effectively enabled, else ``None`` — exactly what
+        :py:meth:`_call_llm` sends. The single source of truth the renderer
+        and the visibility-parity invariant test both refer to.
+        """
+        system = ""
+        if self.messages and self.messages[0].get("role") == "system":
+            system = str(self.messages[0].get("content") or "")
+        tools = (
+            tuple(get_schemas(self.tool_names)) if self.effective_tools_enabled() else None
+        )
+        return LLMRoundBundle(
+            system=system,
+            messages=tuple(self.messages),
+            tools=tools,
+        )
 
     # ------------------------------------------------------------------ events
 
