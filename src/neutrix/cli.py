@@ -39,6 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="load a saved session JSON file",
     )
     p.add_argument(
+        "--continue", "-c", dest="continue_session", action="store_true",
+        help="resume the most recent session in this directory",
+    )
+    p.add_argument(
+        "--resume", metavar="ID", dest="resume_id",
+        help="resume a specific session by id (prefix ok)",
+    )
+    p.add_argument(
         "--no-tools", action="store_true",
         help="disable tool calling for this session",
     )
@@ -106,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     effective_system_prompt = compose_system_prompt(DEFAULT_SYSTEM_PROMPT, os.getcwd())
     seed_messages: list[dict] = [{"role": "system", "content": effective_system_prompt}]
     loaded_tasks: list = []
+    resume_session_id: str | None = None
     if args.load:
         try:
             loaded_store, metadata = transcript.load(args.load)
@@ -119,6 +128,30 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             print(f"neutrix: error loading transcript: {e}", file=sys.stderr)
             return 1
+    elif args.continue_session or args.resume_id:
+        # v1.5.2: resume an auto-persisted CC-compatible session for this cwd.
+        from neutrix.session_store import list_sessions, load_session, most_recent
+
+        if args.resume_id:
+            info = next(
+                (s for s in list_sessions(os.getcwd())
+                 if s.session_id.startswith(args.resume_id)),
+                None,
+            )
+        else:
+            info = most_recent(os.getcwd())
+        if info is None:
+            print("neutrix: no session to resume in this directory", file=sys.stderr)
+            return 1
+        raw_messages, _records, tasks = load_session(info.path)
+        if raw_messages:
+            seed_messages = list(raw_messages)
+        loaded_tasks = list(tasks)
+        resume_session_id = info.session_id
+        logger.info(
+            "resuming session {}: {} msgs, {} tasks",
+            info.session_id, len(seed_messages), len(loaded_tasks),
+        )
 
     ctx = ContextManager(
         slot=slot,
@@ -153,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     from neutrix.terminal_chat import TerminalChat
 
     chat = TerminalChat(ctx, config=config, render_markdown=not args.no_markdown)
+    # v1.5.2: on resume, append to the resumed session file (skip its records).
+    if resume_session_id is not None:
+        chat._resume_session_id = resume_session_id
     # v1.4.8: give the ContextManager the interactive port so AskUserQuestion and
     # the permission `ask` verdict can reach the human. The CM is the only layer
     # that holds it (the Executor stays a pure event leaf); None everywhere else.

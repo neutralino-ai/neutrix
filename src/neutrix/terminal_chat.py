@@ -65,6 +65,7 @@ from neutrix.prompts import (
     parse_answer_line,
     render_question,
 )
+from neutrix.session_store import SessionWriter, list_sessions, new_session_id
 from neutrix.skills import discover_skills, render_skill, skills_signature
 from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
@@ -907,13 +908,26 @@ class TerminalChat:
         # a chat-side flag drives its indicator.
         self._advisor_busy: bool = False
         self._advisor_started_at: float | None = None
+        # v1.5.2 session persistence: append every settled record to a
+        # CC-compatible JSONL so a killed session is resumable. The writer +
+        # its own append cursor are independent of the render cursor (which
+        # resets on /load·/clear·/resume). cli sets _resume_session_id to append
+        # to a resumed file (skipping the already-logged records).
+        self._session_writer: SessionWriter | None = None
+        self._session_written_count: int = 0
+        self._resume_session_id: str | None = None
+        # Base dir for session logs (None → real ~/.cache/neutrix); tests set a
+        # tmp dir so they never write to the real cache.
+        self._session_home: str | Path | None = None
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
         asyncio.run(self.run_async())
 
     async def run_async(self) -> None:
+        self._setup_session_writer()
         await self._render_initial_transcript()
+        self._persist_new_records()  # log the seed (fresh: system+; resume: skipped)
         await self._render_tool_schemas_block()
         self._input_queue = asyncio.Queue()
         worker = asyncio.create_task(self._worker_loop())
@@ -941,6 +955,7 @@ class TerminalChat:
             # batches asynchronously; on shutdown there may still be
             # unrendered records the worker just appended.
             await self._render_new_records()
+            self._persist_new_records()
 
     async def _input_loop(self) -> None:
         while self._running:
@@ -991,6 +1006,10 @@ class TerminalChat:
                 self._busy = False
                 self._invalidate_app()
                 self._input_queue.task_done()
+            # v1.5.2: snapshot the task list to the session log per turn (last
+            # snapshot wins on resume).
+            if self._session_writer is not None:
+                self._session_writer.append_tasks(self.store.tasks)
             # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
             # turns (the user keeps typing into the queue meanwhile). v1.5.0:
             # flag it so the status bar shows "Advisor · Ns" during the window.
@@ -1169,7 +1188,35 @@ class TerminalChat:
         """
         async for _ in self.store.changes():
             await self._render_new_records()
+            self._persist_new_records()
             self._invalidate_app()
+
+    def _setup_session_writer(self) -> None:
+        """Create the session log writer (v1.5.2). On resume, append to the
+        resumed file and skip the records already in it."""
+        sid = self._resume_session_id or new_session_id()
+        self._session_writer = SessionWriter(os.getcwd(), sid, home=self._session_home)
+        self._session_written_count = (
+            len(self.store.messages) if self._resume_session_id else 0
+        )
+
+    def _persist_new_records(self) -> None:
+        """Append store records past the writer's cursor to the session log.
+
+        Independent of the render cursor (which resets on /load·/clear·/resume).
+        Best-effort (the writer swallows OS errors). On a store shrink
+        (compaction) the cursor realigns without re-appending — the log is
+        append-only and already holds the pre-compaction turns.
+        """
+        if self._session_writer is None:
+            return
+        records = self.store.messages
+        if len(records) < self._session_written_count:
+            self._session_written_count = len(records)
+            return
+        while self._session_written_count < len(records):
+            self._session_writer.append_message(records[self._session_written_count])
+            self._session_written_count += 1
 
     async def _render_initial_transcript(self) -> None:
         """Render every record currently in the store, once at startup."""
@@ -1650,6 +1697,66 @@ class TerminalChat:
         await self.view.print_notice(
             f"loaded {args[0]} ({len(raw_messages)} msgs, "
             f"{len(loaded.tasks)} tasks); current slot unchanged",
+            style="green",
+        )
+        await self._render_new_records()
+
+    async def _cmd_resume(self, args: list[str]) -> None:
+        """List / resume an auto-persisted session for the cwd (v1.5.2).
+
+        ``/resume`` lists sessions (newest first); ``/resume N`` or
+        ``/resume <id-prefix>`` reloads one. Resuming continues appending to the
+        same session file.
+        """
+        sessions = list_sessions(os.getcwd())
+        if not sessions:
+            await self.view.print_notice(
+                "no saved sessions for this directory", style="yellow"
+            )
+            return
+        if not args:
+            lines = ["sessions (newest first) — /resume N to load:"]
+            for i, s in enumerate(sessions, 1):
+                when = datetime.fromtimestamp(s.mtime).strftime("%m-%d %H:%M")
+                lines.append(
+                    f"  {i}. {when} · {s.n_messages} msgs · "
+                    f"{compact_inline(s.first_prompt, limit=60)}"
+                )
+            await self.view.print_system("\n".join(lines))
+            return
+        sel = args[0]
+        if sel.isdigit() and 1 <= int(sel) <= len(sessions):
+            chosen = sessions[int(sel) - 1]
+        else:
+            chosen = next(
+                (s for s in sessions if s.session_id.startswith(sel)), None
+            )
+        if chosen is None:
+            await self.view.print_notice(
+                f"no session {sel!r}; /resume to list", style="bold red"
+            )
+            return
+        await self._load_session_path(chosen.path, chosen.session_id)
+
+    async def _load_session_path(self, path: Path, session_id: str) -> None:
+        from neutrix.session_store import load_session
+
+        raw_messages, records, tasks = load_session(path)
+        await self.ctx.handle_event(
+            ReplaceHistoryEvent(
+                raw_messages=list(raw_messages), records=records, tasks=tasks
+            )
+        )
+        self._tool_call_lookup.clear()
+        self._rendered_message_count = 0
+        # Re-point the writer at the resumed file; skip the records already in it.
+        self._session_writer = SessionWriter(
+            os.getcwd(), session_id, home=self._session_home
+        )
+        self._session_written_count = len(self.store.messages)
+        await self.view.print_notice(
+            f"resumed {session_id[:8]} ({len(raw_messages)} msgs, "
+            f"{len(tasks)} tasks); current slot unchanged",
             style="green",
         )
         await self._render_new_records()

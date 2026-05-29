@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.5.1 splits — session persist + resume</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.5.1 splits — session persist + resume</h1>
+<p class="tagline">Auto-persist every turn to a CC-compatible session log; <code>--continue</code> the most recent, <code>/resume</code> a chosen one. Records per-turn timing (user-flagged gap).</p>
+<p class="note">Scope: <strong>conversation resume only</strong> (user split it from the roadmap's "/goal+resume" bundle; the native <code>/goal</code> loop is a separate later release). Builds on the existing
+<code>transcript.py</code> <code>/save</code>·<code>/load</code> (single pretty-JSON file). CC survey: sessions live at
+<code>~/.claude/projects/&lt;sanitized-cwd&gt;/&lt;uuid&gt;.jsonl</code>, appended per message, each entry stamped with <code>timestamp</code>/<code>cwd</code>/<code>sessionId</code>;
+<code>--continue</code> = most-recent-by-mtime in the cwd dir; <code>--resume</code> = picker over head/tail-lite reads
+(<code>utils/sessionStorage.ts</code>, <code>conversationRecovery.ts</code>, <code>listSessionsImpl.ts</code>, <code>sessionRestore.ts</code>).</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">On-disk format + location — JSONL, but NOT in ~/.claude</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>One <code>.jsonl</code> per session under <code>~/.claude/projects/&lt;sanitized-cwd&gt;/&lt;uuid&gt;.jsonl</code>, appended per message, never rewritten.</dd>
+<dt>The fork</dt><dd>(a) write at CC's path (<code>~/.claude/projects</code>) for <code>ccusage</code>/CC-<code>--resume</code> compatibility; (b) write in neutrix's own dir, out of <code>~/.claude</code>.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>User-directed different — (b): <code>~/.cache/neutrix/sessions/&lt;sanitized-cwd&gt;/&lt;uuid&gt;.jsonl</code>, NOT <code>~/.claude</code></strong> (user, 2026-05-29: "don't write to ~/.claude folder"). Keep CC's line <em>shape</em> (append-per-message, <code>{type, message, timestamp, …}</code>) so it's familiar + future-portable, but the files live in neutrix's own cache. <strong>Tradeoff accepted:</strong> <code>ccusage</code> scans <code>~/.claude/projects</code> so it won't natively see neutrix sessions — the user prefers a clean <code>~/.claude</code>; resume value is fully preserved. Base honors <code>$NEUTRIX_SESSION_HOME</code> (override / test isolation). <code>transcript.py</code> <code>/save</code>·<code>/load</code> stays for explicit snapshots; this auto-log is additive. <em>(Revises the earlier ".claude-write" inference: discovery of <code>.claude</code> config stays; writing INTO it does not.)</em></dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">When to write — append-as-you-go vs on-exit</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Buffered append per message, flushed async (survives a crash mid-session).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC — append-as-you-go.</strong> The CM is the sole message mutator; hook the session-writer to <code>ChatStore.changes()</code> (same subscription the renderer uses) and append each new <code>MessageRecord</code> as a JSONL line. A crash/kill mid-session (the user's recurring hang) then leaves a resumable log up to the last completed turn — exactly what was missing.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">3.</span><span class="name">Per-entry timing record (user-flagged gap)</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Each entry carries a wall-clock <code>timestamp</code>.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Follow CC + Alternative add: per-turn durations.</strong> User: "LLM, tool time is not recorded, right?" — correct, the v1.5.0 elapsed is live-only. Each JSONL entry gets a <code>timestamp</code>; additionally, an assistant entry records its <code>llm_ms</code> (round wall-time, from <code>phase_started_at</code>) and a tool entry records <code>tool_ms</code>. So durations become queryable from the log — the seed for the later cost/timing view. Pure additive metadata (CC ignores unknown fields).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name"><code>--continue</code> — most recent in cwd</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Loads the highest-mtime <code>.jsonl</code> in the cwd's project dir, restores the message array (replayed to the model on the next turn).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> New CLI flag <code>--continue</code>/<code>-c</code>: pick the most-recent session log for the cwd by mtime, rebuild <code>messages</code> + <code>ChatStore</code> + tasks via the existing <code>ReplaceHistoryEvent</code> path (already used by <code>/load</code>). No index file — just a dir scan + sort (CC does the same).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">5.</span><span class="name"><code>/resume</code> — pick a past session</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Interactive picker listing sessions with first-prompt/title/branch/mtime, from head+tail lite reads.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — numbered in-flow list (reuse the AskUserQuestion channel), not a full-screen picker.</strong> <code>/resume</code> lists the cwd's sessions (newest first) as <code>N. &lt;first-prompt&gt; · &lt;n msgs&gt; · &lt;ago&gt;</code>; the user types a number (same numbered-answer model as v1.4.8, append-only-friendly). A bare CLI <code>--resume &lt;id&gt;</code> loads a specific session non-interactively. Lite head/tail read for the list metadata (don't parse whole files).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">6.</span><span class="name">What's restored</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Full message array, tasks/todos, agent+model setting, worktree/cwd; NOT ephemeral UI/stream state.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC (scoped to what neutrix has):</strong> the full <code>messages</code> array (for the model), the typed <code>MessageRecord</code>s (for the renderer), and <code>tasks</code> — exactly what <code>ReplaceHistoryEvent</code> already restores. Slot stays the launch slot (don't override the user's <code>--fast</code>/<code>--strong</code> choice on resume). Pending/streaming state is never restored (ephemeral). Orphan-tool_call repair is the existing pairing layer.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">7.</span><span class="name">Session identity + interrupted-resume</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision">A session id is a UUID minted at launch; the live session writes to its own file. Resuming a session <strong>continues appending to the same file</strong> (no fork by default — matches "continue this conversation"). If the last entry is a user turn with no assistant reply (a killed/hung turn — the user's exact case), surface it normally; the model just answers it on the next send (no synthetic "continue" injection — neutrix already has cancel-as-steer). UUID minting needs a seed; <code>Math.random</code>/<code>uuid4</code> is fine at launch (not in the replayable loop).</dd></dl></div>
+
+<footer>v1.5.2 session persist + resume · 7 split points · <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> (NOT ~/.claude — user-directed) append-per-turn ·
+per-entry timestamp + per-turn <code>llm_ms</code>/<code>tool_ms</code> (closes the user-flagged timing gap) · <code>--continue</code> most-recent · <code>/resume</code> numbered picker ·
+restores messages+tasks via the existing ReplaceHistoryEvent path. <code>/goal</code> loop parked as a separate release.</footer>
+</body></html>

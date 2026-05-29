@@ -192,6 +192,8 @@ def _make_chat(
         input_func=input_func,
         console=console,
     )
+    # v1.5.2: redirect session logs to tmp so tests never touch the real cache.
+    chat._session_home = tmp_path
     return chat, output, prompts
 
 

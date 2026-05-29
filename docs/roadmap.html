@@ -613,14 +613,16 @@
   <span class="theme">
     Conversation resume (<code>--continue</code> / <code>/resume</code>)
     <small>
-      Auto-persist every turn to a Claude-Code-compatible
-      <code>~/.claude/projects/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> (per-entry timestamps);
-      <code>--continue</code> reloads the most recent session, <code>/resume</code> picks one
-      (so a killed session survives). <code>session_store.py</code> already built + tested.
-      The neutrix-native <code>/goal</code> loop is split off to its own later release.
+      Auto-persist every turn as JSONL (per-entry timestamps) so a killed session
+      survives: <code>--continue</code> reloads the most recent, <code>--resume</code>/<code>/resume</code>
+      pick one (restore messages + tasks via <code>ReplaceHistoryEvent</code>). Written to
+      <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> — <strong>NOT ~/.claude</strong>
+      (user-directed; <code>$NEUTRIX_SESSION_HOME</code> overrides). CC's JSONL shape, minus
+      ccusage-compat. The neutrix-native <code>/goal</code> loop is a separate later release.
+      (<a href="splits/v1.5.2-session-resume.html">7 split-point decisions</a>.) Suite 404.
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">next</span></span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">

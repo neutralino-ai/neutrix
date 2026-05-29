@@ -4,6 +4,25 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.5.2] — 2026-05-29
+
+### Added
+- **Conversation resume** — every turn is now auto-persisted as JSONL, so a
+  killed session (e.g. after a hang) is recoverable:
+  - `--continue` / `-c` reloads the most recent session for the current directory;
+    `--resume <id>` reloads a specific one; `/resume` lists sessions and `/resume N`
+    loads one. Restores the full message history + tasks (via the existing
+    `ReplaceHistoryEvent` path); resuming continues appending to the same file.
+  - Each entry carries a `timestamp`; the JSONL line shape mirrors Claude Code's
+    (`{type, message, timestamp, …}`).
+  - **Sessions are written to `~/.cache/neutrix/sessions/<cwd>/<uuid>.jsonl`, NOT
+    `~/.claude`** (user-directed — neutrix never writes into `~/.claude`).
+    `$NEUTRIX_SESSION_HOME` overrides the base (tests use it for isolation).
+- `/save`·`/load` (single-file export) is unchanged and still available.
+
+See [docs/PRDs/v1.5.2-session-resume.md](docs/PRDs/v1.5.2-session-resume.md)
+and [docs/splits/v1.5.2-session-resume.html](docs/splits/v1.5.2-session-resume.html).
+
 ## [v1.5.1] — 2026-05-29
 
 ### Fixed
