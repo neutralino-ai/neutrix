@@ -217,6 +217,18 @@ class ChatStore:
         self._notify()
         return record
 
+    def clear_pending_assistant_text(self) -> None:
+        """Drop the in-progress streamed text WITHOUT appending a record (v1.4.7).
+
+        The committed assistant message (with tool_calls) is appended separately
+        via :py:meth:`ContextManager._append_assistant_message`; the live preview
+        just needs the pending text cleared in the same synchronous beat as the
+        commit so the render watcher never sees both the committed record and a
+        stale preview (the v0.10.5 desync class).
+        """
+        self._pending_assistant_text = None
+        self._notify()
+
     def add_folded_tool_result(
         self, name: str, arguments: str, result: str
     ) -> ToolRecord:

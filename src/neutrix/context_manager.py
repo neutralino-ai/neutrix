@@ -229,11 +229,11 @@ class ContextManager:
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     cancel_reason: CancelReason = field(default="user", init=False)
-    # v0.10.1 streaming: text accumulated from "token" events during the
-    # current LLM round, stashed so _do_cancel can commit it as a partial
-    # assistant turn (keep-partial-on-cancel) without restructuring the
-    # tested happy-path append. Reset each round; cleared once committed.
-    _streaming_partial: str = field(default="", init=False, repr=False)
+    # v0.10.1 streaming / v1.4.7 live render: the in-progress assistant text
+    # for the current round lives in ``store.pending_assistant_text`` (the
+    # single state holder — v0.10.3). It drives the live preview AND is what
+    # _do_cancel commits on a mid-stream cancel (keep-partial). Started/extended
+    # in _call_llm; cleared in the same beat as the committed append.
     _drive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _llm_timeout_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
@@ -548,10 +548,10 @@ class ContextManager:
         # marker (ordering landmine #3), so cancel-as-steer carries the prior
         # assistant intent. Runs for both user and timeout reasons. Orphan
         # tool_use (if any) is repaired by the pairing layer at next send.
-        partial = self._streaming_partial
+        partial = self.store.pending_assistant_text
         if partial:
             self._append_assistant_message({"role": "assistant", "content": partial})
-            self._streaming_partial = ""
+            self.store.clear_pending_assistant_text()
         # User-initiated cancel: append the steer marker. Timeout
         # cancels skip the user marker — the drive loop's
         # ``_finalize_cancel`` will append the
@@ -640,7 +640,7 @@ class ContextManager:
                         return
                     except Exception as exc:
                         err = _compact_error(exc)
-                        self._streaming_partial = ""
+                        self.store.clear_pending_assistant_text()
                         # v0.10.5 hardening #2/#3: a prompt-too-long error is
                         # recoverable — truncate oversized tool bodies + drop
                         # oldest under budget, then retry the round once.
@@ -672,9 +672,10 @@ class ContextManager:
                     return
 
                 self._append_assistant_message(assistant_msg)
-                # The full message is committed; drop the partial stash so a
-                # later cancel (e.g. during tool dispatch) can't re-commit it.
-                self._streaming_partial = ""
+                # Clear the live-preview pending text in the SAME synchronous
+                # beat as the committed append (no await between) so the render
+                # watcher never sees both the record and a stale preview.
+                self.store.clear_pending_assistant_text()
                 rounds += 1
 
                 tool_calls = _extract_tool_calls(assistant_msg)
@@ -783,7 +784,7 @@ class ContextManager:
         """
         tools = get_schemas(self.tool_names) if self.effective_tools_enabled() else None
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
-        self._streaming_partial = ""
+        self.store.start_assistant_stream()
         async for event in self.llm.stream_response(
             model=self.slot.model,
             messages=self.messages,
@@ -793,7 +794,7 @@ class ContextManager:
                 continue
             if event.kind == "token":
                 if isinstance(event.data, str):
-                    self._streaming_partial += event.data
+                    self.store.extend_assistant_stream(event.data)
             elif event.kind == "assistant":
                 payload = event.data
                 if isinstance(payload, LLMResponse):

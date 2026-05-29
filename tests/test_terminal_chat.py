@@ -892,3 +892,26 @@ async def test_cmd_allow_toggles_permission_mode(tmp_path):
     assert ctx.executor.permission_mode == "allow-all"
     await chat._cmd_allow([])
     assert ctx.executor.permission_mode == "auto"
+
+
+def test_stream_preview_bounds_to_last_lines():
+    from neutrix.terminal_chat import STREAM_PREVIEW_LINES, _stream_preview
+
+    assert _stream_preview(None) == ""
+    assert _stream_preview("") == ""
+    assert _stream_preview("one line") == "one line"
+    many = "\n".join(f"L{i}" for i in range(1, STREAM_PREVIEW_LINES + 5))
+    out = _stream_preview(many)
+    assert out.startswith("… ")  # earlier lines elided
+    assert out.endswith(f"L{STREAM_PREVIEW_LINES + 4}")  # last line shown
+    assert "L1\n" not in out  # first lines dropped
+
+
+def test_above_input_shows_streaming_preview(tmp_path):
+    """v1.4.7: pending assistant text renders in the live region (not scrollback)."""
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    ctx.store.start_assistant_stream()
+    ctx.store.extend_assistant_stream("hello streaming world")
+    rendered = _render(chat._above_input())
+    assert "hello streaming world" in rendered

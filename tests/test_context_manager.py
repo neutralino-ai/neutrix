@@ -702,3 +702,28 @@ async def test_llm_error_after_partial_tokens_yields_one_message():
     assert assistants[0]["content"].startswith(LLM_ERROR_PREFIX)
     # The partial text was discarded, not committed.
     assert not any(m.get("content") == "partial text" for m in ctx.messages)
+
+
+@pytest.mark.asyncio
+async def test_streaming_pending_cleared_after_commit():
+    """v1.4.7: tokens populate store.pending; it clears on the committed append."""
+    llm = FakeLLM([[_token("hel"), _token("lo"), _assistant_text("hello")]])
+    ctx = _make_ctx(llm, use_tools=False)
+    await ctx.handle_event(UserMessageEvent("hi"))
+    assert ctx.store.pending_assistant_text is None  # cleared in the commit beat
+    assert ctx.messages[-1]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_streaming_pending_holds_partial_midstream():
+    """The live-preview source (store.pending) accumulates tokens during a round."""
+    llm = _StreamingSuspendLLM(["par", "tial"])
+    ctx = _make_ctx(llm, use_tools=False)
+    task = asyncio.create_task(ctx.handle_event(UserMessageEvent("hi")))
+    await llm.yielded.wait()
+    assert ctx.store.pending_assistant_text == "partial"
+    ctx.cancel()
+    await asyncio.wait_for(task, timeout=0.5)
+    # keep-partial-on-cancel still holds, now sourced from store.pending.
+    assert ctx.messages[-2] == {"role": "assistant", "content": "partial"}
+    assert ctx.store.pending_assistant_text is None

@@ -146,6 +146,23 @@ def format_token_count(n: int) -> str:
     return str(n)
 
 
+STREAM_PREVIEW_LINES = 8
+
+
+def _stream_preview(pending: str | None) -> str:
+    """Bounded tail of the in-progress assistant text for the live region (v1.4.7).
+
+    Shows the last ``STREAM_PREVIEW_LINES`` lines (the full text is committed to
+    scrollback on finish); ``…`` marks earlier lines elided.
+    """
+    if not pending:
+        return ""
+    lines = pending.splitlines() or [pending]
+    tail = lines[-STREAM_PREVIEW_LINES:]
+    prefix = "… " if len(lines) > STREAM_PREVIEW_LINES else ""
+    return prefix + "\n".join(tail)
+
+
 def compact_inline(value: object, *, limit: int = 160) -> str:
     """Collapse a value to one terminal line with a bounded length."""
     text = " ".join(str(value).split())
@@ -944,7 +961,11 @@ class TerminalChat:
         tasks = self.store.tasks
         queued = self.store.queued_user_messages
         quit_hint = self._quit_hint_text()
-        if not heartbeat and not tasks and not queued and quit_hint is None:
+        # v1.4.7 live streaming preview: a bounded tail of the in-progress
+        # assistant text, shown ONLY in this live region (committed text goes to
+        # scrollback via _render_record — strictly disjoint channels).
+        preview = _stream_preview(self.store.pending_assistant_text)
+        if not heartbeat and not tasks and not queued and quit_hint is None and not preview:
             return ""
         try:
             from prompt_toolkit.formatted_text import FormattedText
@@ -956,6 +977,8 @@ class TerminalChat:
             heartbeat_text = "".join(text for _style, text in heartbeat).rstrip("\n")
             if heartbeat_text:
                 lines.append(heartbeat_text)
+            if preview:
+                lines.append(preview)
             for _style, text in format_task_panel(tasks):
                 lines.append(text.rstrip("\n"))
             for q in queued:
@@ -965,6 +988,8 @@ class TerminalChat:
             return "\n".join(lines) + "\n" if lines else ""
 
         fragments: list[tuple[str, str]] = list(heartbeat)
+        if preview:
+            fragments.append(("fg:ansibrightblack italic", f"{preview}\n"))
         fragments.extend(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))

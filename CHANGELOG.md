@@ -4,6 +4,27 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.4.7] — 2026-05-29
+
+### Added
+- **Live streaming render** — assistant tokens now render as they arrive
+  (completes the v0.10.1 deferral; user-asked "come here"). `_call_llm` routes
+  token deltas to `store.pending_assistant_text`; `_above_input` shows a bounded
+  preview (last 8 lines, dim italic) in the live region; the full message commits
+  to scrollback on finish. Scrollback stays append-only — preview and committed
+  text are strictly disjoint channels.
+
+### Changed
+- **Unified the in-flight assistant text on `store.pending_assistant_text`**,
+  retiring v0.10.1's `ContextManager._streaming_partial` (one state holder, per
+  the v0.10.3 contract — deletes the two-mirror divergence risk). Pending is
+  cleared in the same synchronous beat as the committed append (no await
+  between) so the renderer never double-prints. Keep-partial-on-cancel is now
+  sourced from the store; the v0.10.1 + v0.10.5 behavior tests stay green.
+
+See [docs/PRDs/v1.4.7-streaming-render.md](docs/PRDs/v1.4.7-streaming-render.md)
+and [docs/splits/v1.4.7-streaming-render.html](docs/splits/v1.4.7-streaming-render.html).
+
 ## [v1.4.0] — 2026-05-29
 
 ### Added

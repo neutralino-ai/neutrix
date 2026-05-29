@@ -529,6 +529,23 @@
 </div>
 
 <div class="entry">
+  <span class="ver">v1.4.7</span>
+  <span class="theme">
+    Live streaming render
+    <small>
+      Render assistant tokens live (completes the v0.10.1 deferral): mirror
+      <code>token</code> deltas → <code>store.pending_assistant_text</code>, show a
+      bounded preview in the <code>_above_input</code> live region, commit to
+      scrollback + clear on finish (scrollback stays append-only). Unified the
+      in-flight text on <code>store.pending_assistant_text</code> (retired
+      <code>_streaming_partial</code>). User-asked "come here".
+      (<a href="splits/v1.4.7-streaming-render.html">3 split-point decisions</a>.) Suite 347.
+    </small>
+  </span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.5.0</span>
   <span class="theme">
     <code>/goal</code> + conversation resume

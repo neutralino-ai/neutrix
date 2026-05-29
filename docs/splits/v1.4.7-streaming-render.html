@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.4.7 splits — live streaming render</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.4.7 splits — live streaming render</h1>
+<p class="tagline">Render assistant tokens live — completes the v0.10.1 deferral. User-asked "come here, not future".</p>
+<p class="note">Decided autonomously under the <code>build-to-v2.0.0</code> /goal; design validated by the advisor
+(unify the mirror; strict channel separation; clear-in-the-commit-beat). Regression guards: the v0.10.1
+cancel-keep + v0.10.5 shrink-cursor tests stay green.</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">One mirror, not two — retire <code>_streaming_partial</code></span><span class="badge decided">decided</span></div>
+<dl><dt>The risk</dt><dd>v0.10.1 stashed in-flight text on <code>ContextManager._streaming_partial</code> (for cancel-keep). A new render source (<code>store.pending_assistant_text</code>) would be a second mirror — two holders to keep in sync across 4 exit paths (the v0.10.1 reconcile-the-append-sites landmine, doubled).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Unify on <code>store.pending_assistant_text</code></strong> (the single state holder — v0.10.3). v0.10.1 used a CM field <em>because there was no render consumer</em>; that inverts now. <code>_call_llm</code> routes <code>token</code> deltas to <code>store.extend_assistant_stream</code>; <code>_do_cancel</code> commits from <code>store.pending_assistant_text</code>; clear-pending replaces clear-stash on every path. Deletes the divergence rather than managing it.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">Channel separation + commit timing</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Strictly disjoint channels.</strong> The pending preview renders ONLY in the <code>_above_input</code> live region (ephemeral, re-rendered); committed text renders ONLY via <code>_render_record</code>→<code>console.print</code> (append-only scrollback). No token batch ever flows through <code>console.print</code> (else permanent duplication). On finalize: <code>_append_assistant_message(full)</code> then <code>clear_pending_assistant_text()</code> with <strong>no await between</strong> — store mutations are synchronous and the watcher only runs at an await, so it never sees both the record and a stale preview (the v0.10.5 desync class).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Preview shape</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision">Pending holds the <em>full</em> partial; the preview shows the <strong>last <code>STREAM_PREVIEW_LINES</code>=8</strong> lines (dim italic, <code>…</code> marks elided), so a long growing response can't overflow the bottom region. Commit/cancel use the full pending text, not the truncated view. The per-token <code>extend</code>→notify→invalidate is coalesced by prompt_toolkit (acceptable; tick-decoupling is a later optimization).</dd></dl></div>
+
+<footer>v1.4.7 live streaming render · 3 split points, decided autonomously (advisor-validated) · single store-owned
+pending source · disjoint preview/scrollback channels · clear-in-the-commit-beat. Completes the v0.10.1 deferral.</footer>
+</body></html>
