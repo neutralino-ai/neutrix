@@ -4,6 +4,34 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.0.0] — 2026-05-29
+
+### The v1.0 lock
+
+The v0.10.x band closed both arcs the roadmap set for v1.0 — **agentic depth**
+(the `Agent` subagent tool + the Smart Advisor) and the **supporting machinery**
+(streaming with cancel-as-steer, visibility parity, renderer purity, smart
+compaction). v1.0.0 declares that cumulative surface stable for the 1.x line.
+
+Shipped in this band (each with its own PRD + tag):
+- **v0.10.0** — subagent framework (`Agent` tool): fresh-context worker, returns
+  final text, recursion-blocked, runaway/size capped.
+- **v0.10.1** — streaming restored with cancel-as-steer (keep-partial-on-cancel).
+- **v0.10.2** — visibility parity: tool-schemas block, system-prompt fold, the
+  `.claude/rules/visibility-parity.md` rule + invariant test, `[subagent]` label.
+- **v0.10.3** — TUIView as a pure `ChatStore` reader + the `FakeView` swap-test.
+- **v0.10.4** — Smart Advisor: a third actor that judges the task list at
+  turn-end.
+- **v0.10.5** — smart, summary-based compaction + the >1M-token hardening.
+
+No new code in v1.0.0 — it is the annotated tag on the completed band. Full
+suite green (297) and ruff clean at the tagged commit. From 1.0, behavior
+changes to the stable surface bump appropriately; internal refactors stay free.
+Post-1.0 / 1.x scope (web frontend, parallel subagents, cost tracking, live
+token rendering, …) is recorded per-release.
+
+See [docs/PRDs/v1.0.0-lock.md](docs/PRDs/v1.0.0-lock.md).
+
 ## [v0.10.5] — 2026-05-29
 
 ### Added
