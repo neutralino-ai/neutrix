@@ -241,6 +241,10 @@ class ContextManager:
     ask_user: AskUserPort | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
+    # v1.5.0: wall-clock start of the current busy phase (this LLM round / this
+    # tool dispatch), for the status-bar elapsed field. Distinct from
+    # ``last_progress_at`` (which is bumped per token); ``None`` while IDLE.
+    phase_started_at: float | None = field(default=None, init=False)
     cancel_reason: CancelReason = field(default="user", init=False)
     # v0.10.1 streaming / v1.4.7 live render: the in-progress assistant text
     # for the current round lives in ``store.pending_assistant_text`` (the
@@ -640,6 +644,7 @@ class ContextManager:
             while True:
                 self.state = State.AWAITING_LLM
                 self.last_progress_at = time.monotonic()
+                self.phase_started_at = self.last_progress_at
                 self._llm_timeout_task = asyncio.create_task(
                     self._llm_timeout_watchdog()
                 )
@@ -708,6 +713,7 @@ class ContextManager:
                     return
 
                 self.state = State.AWAITING_EXECUTOR
+                self.phase_started_at = time.monotonic()
                 try:
                     await self._dispatch_tools(tool_calls)
                 except asyncio.CancelledError:
@@ -720,6 +726,7 @@ class ContextManager:
         finally:
             self.store.clear_pending_tool_calls()
             self.state = State.IDLE
+            self.phase_started_at = None
 
     @staticmethod
     def _consume_cancel() -> None:

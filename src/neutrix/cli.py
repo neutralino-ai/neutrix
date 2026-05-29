@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
@@ -132,6 +133,22 @@ def main(argv: list[str] | None = None) -> int:
         ctx.store.replace_tasks(loaded_tasks)
 
     _configure_chat_logging()
+
+    # v1.5.0 diagnosability: log WHICH code this process actually loaded. A
+    # running Python process freezes its imported source at startup; the
+    # setuptools_scm __version__ is install-frozen and can lag the live editable
+    # source. The module path + its mtime answer "what code is this, how fresh"
+    # — the recurring stale-process confusion.
+    import neutrix as _nx
+
+    _src = os.path.dirname(_nx.__file__)
+    try:
+        _mtime = datetime.fromtimestamp(
+            os.path.getmtime(os.path.join(_src, "context_manager.py"))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except OSError:
+        _mtime = "?"
+    logger.info("neutrix {} starting — src={} (loaded {})", __version__, _src, _mtime)
 
     from neutrix.terminal_chat import TerminalChat
 

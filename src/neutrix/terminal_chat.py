@@ -153,6 +153,20 @@ def format_token_count(n: int) -> str:
     return str(n)
 
 
+def format_duration_short(seconds: float) -> str:
+    """Compact elapsed for the status bar (v1.5.0): ``Ns`` under a minute, else
+    ``M:SS``."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}:{s % 60:02d}"
+
+
+# v1.5.0: only surface "last token Ns ago" once the gap exceeds this floor, so a
+# steadily-streaming response doesn't flicker a 0-1s age on every tick.
+PROGRESS_AGE_FLOOR_S = 3.0
+
+
 STREAM_PREVIEW_LINES = 8
 
 
@@ -264,39 +278,63 @@ def format_heartbeat(
     *,
     last_progress_at: float | None = None,
     stall_threshold_s: float = HEARTBEAT_STALL_FLOOR_S,
+    phase_started_at: float | None = None,
+    now: float | None = None,
 ) -> list[tuple[str, str]]:
-    """Render the liveness pulse above the input as prompt_toolkit fragments.
+    """Render the status bar above the input as prompt_toolkit fragments.
 
-    Returns ``[]`` when ``state == IDLE``. Otherwise returns two
-    fragments: the liveness glyph and a static label naming the current
-    phase. The glyph *winks* on/off by visibility — ``HEARTBEAT_GLYPH``
-    on even ``tick``, a same-width blank on odd ``tick`` (v0.9.8 split #1:
-    a presence toggle, not a brightness fade, so nothing quantizes on a
-    256-color terminal). The dot is bright white normally.
+    Returns ``[]`` when ``state == IDLE``. Otherwise two fragments: the liveness
+    glyph and a ``·``-joined status label for the **active actor** (v1.5.0).
+    The glyph *winks* on/off by visibility — ``HEARTBEAT_GLYPH`` on even
+    ``tick``, a same-width blank on odd ``tick`` (v0.9.8 split #1: a presence
+    toggle, not a brightness fade, so nothing quantizes on a 256-color
+    terminal).
 
-    When ``state == AWAITING_LLM`` and ``last_progress_at`` is set and
-    more than ``stall_threshold_s`` seconds ago, the glyph winks red
-    (``HEARTBEAT_STALLED_GLYPH_STYLE``) and the label becomes
-    ``"LLM (stalled)"`` — v0.9.5 stall hint, v0.9.8 colour swap. The hint
-    is UI-only; the hard timeout is enforced by
-    :class:`~neutrix.context_manager.ContextManager`'s watchdog.
+    The label combines, space-separated by ``·``:
+      - the actor — ``LLM`` / ``Exec: <tool>`` / ``cancelling…``;
+      - the current phase's elapsed time (``phase_started_at``);
+      - **LLM only:** an approximate in-flight token count, and the progress
+        age — ``last token Ns ago`` past :data:`PROGRESS_AGE_FLOOR_S`, escalating
+        to ``⚠ Ns no tokens`` + a red glyph once the gap exceeds
+        ``stall_threshold_s`` (v1.4.9 inactivity; UI-only — the hard cancel is
+        the CM watchdog).
+
+    The stall flag and progress age are **suppressed during AWAITING_EXECUTOR**
+    (CC parity: a tool legitimately produces no tokens — a long ``Exec: Bash``
+    reads as alive, not stalled). ``now`` is injectable for tests.
     """
     if state == State.IDLE:
         return []
+    if now is None:
+        now = time.monotonic()
     is_stalled = (
         state == State.AWAITING_LLM
         and last_progress_at is not None
-        and (time.monotonic() - last_progress_at) > stall_threshold_s
+        and (now - last_progress_at) > stall_threshold_s
     )
+    parts: list[str] = []
     if state == State.AWAITING_LLM:
-        label = "LLM (stalled)" if is_stalled else "LLM"
+        parts.append("LLM")
     elif state == State.AWAITING_EXECUTOR:
         pending = store.pending_tool_calls
-        label = f"tool: {pending[0].name}" if pending else "tool"
+        parts.append(f"Exec: {pending[0].name}" if pending else "Exec")
     elif state == State.CANCELLING:
-        label = "cancelling…"
+        parts.append("cancelling…")
     else:  # pragma: no cover - defensive for future states
-        label = state.value
+        parts.append(state.value)
+    if phase_started_at is not None:
+        parts.append(format_duration_short(max(0.0, now - phase_started_at)))
+    if state == State.AWAITING_LLM:
+        approx = approximate_token_count(store.pending_assistant_text or "")
+        if approx:
+            parts.append(f"{format_token_count(approx)} tok")
+        if last_progress_at is not None:
+            age = now - last_progress_at
+            if is_stalled:
+                parts.append(f"⚠ {int(age)}s no tokens")
+            elif age >= PROGRESS_AGE_FLOOR_S:
+                parts.append(f"last token {int(age)}s ago")
+    label = " · ".join(parts)
     visible = tick % 2 == 0
     glyph_style = HEARTBEAT_STALLED_GLYPH_STYLE if is_stalled else HEARTBEAT_GLYPH_STYLE
     # On/off wink: a same-width blank when off, so the label never shifts.
@@ -860,6 +898,10 @@ class TerminalChat:
         # enqueuing a new user message. The 4-state ContextManager is unchanged.
         self._pending_question: Question | None = None
         self._pending_answer: asyncio.Future[str] | None = None
+        # v1.5.0 status bar: the turn-end Advisor runs while the CM is IDLE, so
+        # a chat-side flag drives its indicator.
+        self._advisor_busy: bool = False
+        self._advisor_started_at: float | None = None
 
     def run(self) -> None:
         """Run the blocking terminal chat loop."""
@@ -945,9 +987,18 @@ class TerminalChat:
                 self._invalidate_app()
                 self._input_queue.task_done()
             # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
-            # turns (the user keeps typing into the queue meanwhile).
+            # turns (the user keeps typing into the queue meanwhile). v1.5.0:
+            # flag it so the status bar shows "Advisor · Ns" during the window.
             self.advisor.note_turn()
-            await self._maybe_run_advisor()
+            self._advisor_busy = True
+            self._advisor_started_at = time.monotonic()
+            self._invalidate_app()
+            try:
+                await self._maybe_run_advisor()
+            finally:
+                self._advisor_busy = False
+                self._advisor_started_at = None
+                self._invalidate_app()
 
     def _tool_status(self) -> str:
         if not self.ctx.use_tools:
@@ -978,7 +1029,20 @@ class TerminalChat:
             self._heartbeat_tick,
             last_progress_at=self.ctx.last_progress_at,
             stall_threshold_s=stall_threshold_for(self.ctx.slot.llm_timeout_s),
+            phase_started_at=self.ctx.phase_started_at,
         )
+        # v1.5.0: the turn-end Advisor runs while the CM is IDLE, so the
+        # state-driven heartbeat can't show it — render it from a chat-side flag.
+        if not heartbeat and self._advisor_busy and self._advisor_started_at is not None:
+            elapsed = format_duration_short(
+                max(0.0, time.monotonic() - self._advisor_started_at)
+            )
+            visible = self._heartbeat_tick % 2 == 0
+            glyph = f"{HEARTBEAT_GLYPH} " if visible else "  "
+            heartbeat = [
+                (HEARTBEAT_GLYPH_STYLE, glyph),
+                (HEARTBEAT_LABEL_STYLE, f"Advisor · {elapsed}\n"),
+            ]
         tasks = self.store.tasks
         queued = self.store.queued_user_messages
         quit_hint = self._quit_hint_text()

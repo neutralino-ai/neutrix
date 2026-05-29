@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.5.0 splits — LLM/Exec/Advisor status bar</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--open:#a06a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.rec{color:var(--open);background:#fbf0d8;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .rec{color:var(--open);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  .mock{background:#1a1a1a;color:#eee;font:13px/1.5 ui-monospace,monospace;padding:12px 14px;border-radius:6px;margin:8px 0;white-space:pre;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.5.0 splits — LLM / Exec / Advisor status bar</h1>
+<p class="tagline">"I can't tell if it's dead or running." Make the live region show WHICH actor holds the turn, how long, and when it last made progress.</p>
+<p class="note"><strong>Recommendations only — awaiting your decisions.</strong> Builds on the existing <code>_above_input</code> heartbeat
+(v0.9.4/v0.9.8) and the v1.4.9 <code>last_progress_at</code> (now bumped per token). CC survey:
+<code>components/Spinner/SpinnerAnimationRow.tsx</code> (one line: glyph + verb + <code>· elapsed · N tokens</code>, 50ms glimmer),
+<code>useStalledAnimation.ts</code> (red-shift after 3s of no tokens, <strong>suppressed when tools active</strong>),
+mutually-exclusive modes thinking/requesting/responding/tool-use/tool-input.</p>
+
+<div class="mock">  ● LLM · 0:47 · 1.2k tok · last token 2s ago        (live, streaming)
+  ● LLM · 0:47 · 1.2k tok · ⚠ 41s no tokens          (stalling — the signal you were missing)
+  ◆ Exec · Bash · 0:12                                (tool running — no stall flag)
+  ◇ Advisor · 0:03                                    (turn-end advisor, CM is IDLE)
+  › queued: 2                                         (input backlog, unchanged)</div>
+
+<h2>Split points (recommendations — your call on each)</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">One line (active actor) vs three simultaneous indicators</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>One line, mutually-exclusive modes — only one phase shows at a time.</dd>
+<dt>The fork</dt><dd>You said "LLM/executor/advisor busy/queuing or not" — that reads like 3 lamps. But neutrix's CM is single-actor: it is in exactly ONE of AWAITING_LLM / AWAITING_EXECUTOR at a time, and the Advisor runs between turns (while IDLE). Three always-on lamps would show two "idle" and one "busy" — noise.</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>Follow CC — one line showing the ACTIVE actor</strong> (LLM / Exec / Advisor), not three lamps. Honest to the state machine and matches your "no ugly idle affordances" preference. (Alternative if you prefer: a fixed 3-lamp row.)</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">Progress-age — show "last token Ns ago" as TEXT</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>No text — encodes staleness only as the spinner glyph's red-shift after 3s.</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>No CC analog — show it as explicit text.</strong> This is the exact signal you were missing during the hang. While AWAITING_LLM: show <code>last token Ns ago</code> once the gap exceeds a small floor (say 3s), escalating to <code>⚠ Ns no tokens</code> as it approaches <code>llm_timeout_s</code>. Derived from <code>last_progress_at</code> (v1.4.9). A glyph color alone is too subtle for "is it dead".</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Elapsed: per-phase vs per-turn</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>Wall-clock since the turn's loading start (paused across some boundaries).</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>Per-phase elapsed</strong> — "LLM 0:47" = this round has run 47s; "Exec Bash 0:12" = this tool has run 12s. More actionable than a turn total for spotting a slow step. (Could add a small turn-total later.)</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">In-flight token/size counter</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>Animated streamed-token counter (<code>N tokens</code>, <code>·</code>-separated).</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>Follow CC</strong> — show an approximate token/char count of the in-flight reply from <code>store.pending_assistant_text</code> (reuse <code>approximate_token_count</code>). A rising counter is itself a liveness cue. No per-second rate (YAGNI).</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">5.</span><span class="name">Stall flag suppressed during tool execution</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd><code>isStalled = timeSinceLastToken &gt; 3000 &amp;&amp; !hasActiveTools</code> — the red stall is explicitly OFF while a tool runs (tools make no tokens; flagging them would be a false alarm).</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>Follow CC.</strong> The stall/⚠ applies ONLY to AWAITING_LLM. During Exec, show the tool name + elapsed instead (a long Bash build reads as "Exec Bash 2:14", alive, not stalled). The v1.4.9 watchdog already only runs during AWAITING_LLM, so this is consistent.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">6.</span><span class="name">Advisor indicator while CM is IDLE</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>No analog (neutrix-specific turn-end Advisor).</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>No CC analog — track an advisor-busy flag on the chat.</strong> The Advisor runs at turn-end while the CM is IDLE, so <code>format_heartbeat</code> (which returns nothing when IDLE) can't show it. Have <code>_maybe_run_advisor</code> set a flag the status line reads, so "◇ Advisor 0:03" appears during that window.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">7.</span><span class="name">Animation — keep presence-blink, not CC's glimmer/fade</span><span class="badge rec">recommend</span></div>
+<dl><dt>CC</dt><dd>50ms horizontal glimmer + smooth red intensity fade (truecolor).</dd>
+<dt class="rec">Recommend</dt><dd class="rec"><strong>Alternative — keep the v0.9.8 presence-blink</strong> (on/off wink) and the discrete white→red color SWAP for stall. A brightness/red FADE bands in the user's 256-color tmux (the established TUI-animation finding); CC's glimmer assumes truecolor. New fields (elapsed/tokens/age) are static text that update per heartbeat tick.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">8.</span><span class="name">Visibility-parity / append-only constraints</span><span class="badge rec">recommend</span></div>
+<dl><dt class="rec">Recommend</dt><dd class="rec">The status bar is the <strong>ephemeral live region</strong> (<code>_above_input</code>) only — it does not enter scrollback (no parity obligation; it shows no LLM-bound content, just liveness metadata). Pure render derived from <code>(ctx.state, store, last_progress_at, advisor flag)</code> — no new state holder.</dd></dl></div>
+
+<footer>v1.5.0 status bar · 8 split points (recommendations pending your call) · one active-actor line · explicit progress-age text (the anti-"is it dead" signal) ·
+per-phase elapsed + token count · stall suppressed during tools (CC parity) · advisor-busy flag · presence-blink kept (256-color). Builds on v1.4.9 last_progress_at.</footer>
+</body></html>

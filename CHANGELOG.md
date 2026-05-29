@@ -4,6 +4,29 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.5.0] — 2026-05-29
+
+### Added
+- **Status bar** — the live region above the input now shows the **active actor**
+  with elapsed time and progress, so you can tell at a glance whether the agent is
+  alive, streaming, or stalled:
+  - `● LLM · 0:47 · 1.2k tok · last token 2s ago` while streaming; the age
+    escalates to `⚠ Ns no tokens` (+ red dot) once a gap exceeds the stall
+    threshold (inactivity, v1.4.9).
+  - `● Exec: Bash · 0:12` while a tool runs — **no stall flag** (a tool makes no
+    tokens; matches Claude Code's `!hasActiveTools` suppression), so a long build
+    reads as alive, not hung.
+  - `● Advisor · 0:03` during the turn-end advisor (CM is idle then; driven by a
+    chat-side flag).
+  - Keeps the v0.9.8 presence-blink + discrete white→red stall swap (no brightness
+    fade — 256-color ceiling).
+- **Startup diagnostics** — logs `neutrix <ver> starting — src=<path> (loaded <mtime>)`
+  so a running process's actual code + freshness is greppable (the `__version__`
+  is install-frozen and can lag the live editable source).
+
+See [docs/PRDs/v1.5.0-status-bar.md](docs/PRDs/v1.5.0-status-bar.md)
+and [docs/splits/v1.5.0-status-bar.html](docs/splits/v1.5.0-status-bar.html).
+
 ## [v1.4.9] — 2026-05-29
 
 ### Fixed

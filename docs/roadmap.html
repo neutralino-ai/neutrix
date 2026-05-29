@@ -514,6 +514,25 @@
 </div>
 
 <div class="entry">
+  <span class="ver">v1.5.0</span>
+  <span class="theme">
+    Status bar — LLM / Exec / Advisor liveness
+    <small>
+      User-requested after the hang/stall debug ("can't tell if it's dead or
+      running"). The live region shows the ACTIVE actor + elapsed + progress:
+      <code>● LLM · 0:47 · 1.2k tok · last token 2s ago</code>, escalating to
+      <code>⚠ Ns no tokens</code> + red dot past the stall threshold;
+      <code>● Exec: Bash · 0:12</code> with NO stall flag (a tool makes no tokens
+      — CC <code>!hasActiveTools</code> parity); <code>● Advisor · 0:03</code> on
+      the turn-end advisor. Keeps the v0.9.8 presence-blink (256-color). Plus a
+      startup log of the loaded source path + mtime (stale-process diagnosability).
+      (<a href="splits/v1.5.0-status-bar.html">8 split-point decisions</a>.) Suite 395.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.4.9</span>
   <span class="theme">
     Turn resilience — no-progress LLM timeout
@@ -572,7 +591,7 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.5.0</span>
+  <span class="ver">v1.5.1</span>
   <span class="theme">
     <code>/goal</code> + conversation resume
     <small>

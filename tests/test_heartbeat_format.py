@@ -22,6 +22,7 @@ from neutrix.terminal_chat import (
     HEARTBEAT_LABEL_STYLE,
     HEARTBEAT_STALL_FLOOR_S,
     HEARTBEAT_STALLED_GLYPH_STYLE,
+    format_duration_short,
     format_heartbeat,
     stall_threshold_for,
 )
@@ -59,7 +60,7 @@ def test_awaiting_executor_label_uses_tool_head() -> None:
 
     fragments = format_heartbeat(State.AWAITING_EXECUTOR, store, 0)
     text = "".join(t for _s, t in fragments)
-    assert "tool: run_shell" in text
+    assert "Exec: run_shell" in text
     assert "read_file" not in text
     assert fragments[0][0] == HEARTBEAT_GLYPH_STYLE  # tool dot is white, not red
 
@@ -68,7 +69,7 @@ def test_awaiting_executor_with_no_pending_falls_back() -> None:
     """Defensive: tiny window between state transition and add_pending_tool_call."""
     fragments = format_heartbeat(State.AWAITING_EXECUTOR, ChatStore(), 0)
     text = "".join(t for _s, t in fragments)
-    assert "tool" in text
+    assert "Exec" in text
 
 
 def test_cancelling_label() -> None:
@@ -139,7 +140,7 @@ def test_stall_hint_on_above_threshold() -> None:
     stale = time.monotonic() - (HEARTBEAT_STALL_FLOOR_S + 5.0)
     fragments = format_heartbeat(State.AWAITING_LLM, ChatStore(), 0, last_progress_at=stale)
     assert fragments[0][0] == HEARTBEAT_STALLED_GLYPH_STYLE
-    assert "LLM (stalled)" in fragments[1][1]
+    assert "no tokens" in fragments[1][1]  # v1.5.0: explicit "⚠ Ns no tokens"
 
 
 def test_stalled_dot_still_winks() -> None:
@@ -171,9 +172,9 @@ def test_stall_hint_threshold_is_customizable() -> None:
         stall_threshold_s=1.0,
     )
     assert stalled[0][0] == HEARTBEAT_STALLED_GLYPH_STYLE
-    assert "stalled" in stalled[1][1]
+    assert "no tokens" in stalled[1][1]
     assert fresh[0][0] == HEARTBEAT_GLYPH_STYLE
-    assert "stalled" not in fresh[1][1]
+    assert "no tokens" not in fresh[1][1]
 
 
 def test_stall_threshold_derives_from_timeout_with_floor() -> None:
@@ -192,3 +193,65 @@ def test_stall_hint_only_during_awaiting_llm() -> None:
     fragments = format_heartbeat(State.AWAITING_EXECUTOR, store, 0, last_progress_at=stale)
     assert fragments[0][0] == HEARTBEAT_GLYPH_STYLE
     assert "stalled" not in fragments[1][1]
+
+
+# ---- v1.5.0 status bar: elapsed / tokens / progress-age / exec-suppression --
+
+
+def test_format_duration_short_units() -> None:
+    assert format_duration_short(0) == "0s"
+    assert format_duration_short(5) == "5s"
+    assert format_duration_short(59) == "59s"
+    assert format_duration_short(65) == "1:05"
+    assert format_duration_short(600) == "10:00"
+
+
+def test_llm_phase_shows_elapsed() -> None:
+    f = format_heartbeat(State.AWAITING_LLM, ChatStore(), 0, phase_started_at=1000.0, now=1047.0)
+    assert "LLM" in f[1][1] and "47s" in f[1][1]
+
+
+def test_llm_phase_elapsed_minutes_format() -> None:
+    f = format_heartbeat(State.AWAITING_LLM, ChatStore(), 0, phase_started_at=1000.0, now=1083.0)
+    assert "1:23" in f[1][1]
+
+
+def test_llm_phase_shows_inflight_token_count() -> None:
+    store = ChatStore()
+    store.start_assistant_stream()
+    store.extend_assistant_stream("one two three four five")
+    f = format_heartbeat(State.AWAITING_LLM, store, 0)
+    assert "5 tok" in f[1][1]
+
+
+def test_llm_progress_age_text_above_floor() -> None:
+    f = format_heartbeat(
+        State.AWAITING_LLM, ChatStore(), 0,
+        last_progress_at=1000.0, now=1010.0, stall_threshold_s=50.0,
+    )
+    assert "last token 10s ago" in f[1][1]
+    assert f[0][0] == HEARTBEAT_GLYPH_STYLE  # not red — under threshold
+
+
+def test_llm_progress_age_hidden_below_floor() -> None:
+    f = format_heartbeat(
+        State.AWAITING_LLM, ChatStore(), 0,
+        last_progress_at=1000.0, now=1001.0, stall_threshold_s=50.0,
+    )
+    assert "last token" not in f[1][1]  # 1s < PROGRESS_AGE_FLOOR_S
+
+
+def test_exec_phase_suppresses_stall_and_age() -> None:
+    """CC parity: a tool produces no tokens — never flag it stalled. A long
+    Exec reads as alive (name + elapsed), white glyph, no age/no-tokens text."""
+    store = ChatStore()
+    store.add_pending_tool_call("Bash", '{"command":"make"}')
+    f = format_heartbeat(
+        State.AWAITING_EXECUTOR, store, 0,
+        last_progress_at=1000.0, now=2000.0, stall_threshold_s=50.0,
+        phase_started_at=1988.0,
+    )
+    label = f[1][1]
+    assert "Exec: Bash" in label and "12s" in label
+    assert "no tokens" not in label and "last token" not in label
+    assert f[0][0] == HEARTBEAT_GLYPH_STYLE  # white, not red
