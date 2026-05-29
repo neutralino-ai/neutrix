@@ -1,14 +1,14 @@
-"""Heartbeat ticker loop tests (v0.9.4).
+"""Heartbeat ticker loop tests (v0.9.4 → v0.9.8).
 
-Uses a deterministic ``asyncio.sleep`` override so the assertions
-about tick counts and wake-up timing stay stable. The production
-default applies ±10% jitter (see ``jittered_sleep``); the jitter
-itself is unit-tested in :func:`test_jitter_stays_within_bounds`.
+Uses a deterministic ``asyncio.sleep`` override so the assertions about
+tick counts and wake-up timing stay stable. v0.9.8 replaces the jittered
+brightness cadence with a strict on/off blink and adds the
+``on_enter_busy`` reset hook (so a turn opens on a visible dot).
 """
+
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 
 import pytest
@@ -16,10 +16,8 @@ import pytest
 from neutrix.context_manager import State
 from neutrix.store import ChatStore, MessageRecord
 from neutrix.terminal_chat import (
-    HEARTBEAT_JITTER_RATIO,
-    HEARTBEAT_TICK_MS,
+    HEARTBEAT_BLINK_INTERVAL_MS,
     heartbeat_loop,
-    jittered_sleep,
 )
 
 
@@ -98,7 +96,6 @@ async def test_ticker_wakes_on_store_change() -> None:
         )
     )
     try:
-        # Give the loop a moment to subscribe to store.changes().
         await asyncio.sleep(0.05)
 
         start = time.monotonic()
@@ -118,8 +115,7 @@ async def test_ticker_wakes_on_store_change() -> None:
 
 @pytest.mark.asyncio
 async def test_ticker_clean_shutdown_on_cancel() -> None:
-    """Cancelling the ticker task exits within one tick without raising
-    anything other than CancelledError."""
+    """Cancelling the ticker exits within one tick, raising only CancelledError."""
     store = ChatStore()
     state: list[State] = [State.AWAITING_LLM]
     task = asyncio.create_task(
@@ -141,58 +137,76 @@ async def test_ticker_clean_shutdown_on_cancel() -> None:
     assert elapsed < 0.15
 
 
-@pytest.mark.asyncio
-async def test_jitter_stays_within_bounds(monkeypatch) -> None:
-    """``jittered_sleep`` applies a multiplier in [1-r, 1+r]; mean ~ 1.0."""
-    rng = random.Random(0xC0FFEE)
-    nominal = 0.1
-    multipliers: list[float] = []
-
-    real_sleep = asyncio.sleep
-
-    async def fake_sleep(seconds: float) -> None:
-        multipliers.append(seconds / nominal)
-        await real_sleep(0)
-
-    monkeypatch.setattr("neutrix.terminal_chat.asyncio.sleep", fake_sleep)
-
-    for _ in range(200):
-        await jittered_sleep(nominal, jitter_ratio=HEARTBEAT_JITTER_RATIO, rng=rng)
-
-    assert len(multipliers) == 200
-    for m in multipliers:
-        assert 1.0 - HEARTBEAT_JITTER_RATIO - 1e-9 <= m <= 1.0 + HEARTBEAT_JITTER_RATIO + 1e-9
-    mean = sum(multipliers) / len(multipliers)
-    assert abs(mean - 1.0) < 0.02
+# ---- v0.9.8 on_enter_busy reset (first-frame-visible) ---------------------
 
 
 @pytest.mark.asyncio
-async def test_jitter_zero_is_exact(monkeypatch) -> None:
-    """``jitter_ratio=0`` disables jitter entirely (used by deterministic tests)."""
-    observed: list[float] = []
-    real_sleep = asyncio.sleep
+async def test_on_enter_busy_fires_before_first_tick() -> None:
+    """on_enter_busy is called once on IDLE→busy, ahead of the first tick."""
+    store = ChatStore()
+    state: list[State] = [State.AWAITING_LLM]  # already busy at start
+    events: list[str] = []
 
-    async def fake_sleep(seconds: float) -> None:
-        observed.append(seconds)
-        await real_sleep(0)
+    task = asyncio.create_task(
+        heartbeat_loop(
+            lambda: state[0],
+            store,
+            lambda: events.append("tick"),
+            sleep_seconds=0.05,
+            sleep_fn=asyncio.sleep,
+            on_enter_busy=lambda: events.append("enter"),
+        )
+    )
+    try:
+        await asyncio.sleep(0.16)
+        assert events, "no events fired"
+        assert events[0] == "enter"  # reset happens before any tick
+        assert "tick" in events[1:]
+        assert events.count("enter") == 1  # one continuous busy phase
+    finally:
+        await _cancel(task)
 
-    monkeypatch.setattr("neutrix.terminal_chat.asyncio.sleep", fake_sleep)
 
-    await jittered_sleep(0.123, jitter_ratio=0.0)
-    assert observed == [0.123]
-
-
-def test_default_tick_period_is_calm_breathing() -> None:
-    """Sanity guard: the default cycle is in the human resting-calm band.
-
-    Locks the Phase-2 reopen decision against accidental regression
-    back to a fast cadence. HEARTBEAT_TICK_MS * HEARTBEAT_CYCLE_FRAMES
-    must fall inside [2.0, 5.0] seconds — the 12-30 BPM range that
-    qualifies as resting calm breathing.
+@pytest.mark.asyncio
+async def test_on_enter_busy_resets_counter_so_turn_opens_visible() -> None:
+    """Models the app wiring: enter resets the blink counter to 0 (even →
+    visible dot), then ticks advance it. Guarantees no blank-dot turn start.
     """
-    from neutrix.terminal_chat import HEARTBEAT_CYCLE_FRAMES
+    store = ChatStore()
+    state: list[State] = [State.AWAITING_LLM]
+    tick = [5]  # leftover odd-ish value from a previous turn
+    seen_after_enter: list[int] = []
 
-    cycle_seconds = HEARTBEAT_TICK_MS / 1000 * HEARTBEAT_CYCLE_FRAMES
-    assert 2.0 <= cycle_seconds <= 5.0, (
-        f"cycle period {cycle_seconds:.2f}s outside the 2-5s calm-breathing band"
+    def on_enter_busy() -> None:
+        tick[0] = 0
+        seen_after_enter.append(tick[0])
+
+    def on_tick() -> None:
+        tick[0] += 1
+
+    task = asyncio.create_task(
+        heartbeat_loop(
+            lambda: state[0],
+            store,
+            on_tick,
+            sleep_seconds=0.05,
+            sleep_fn=asyncio.sleep,
+            on_enter_busy=on_enter_busy,
+        )
+    )
+    try:
+        await asyncio.sleep(0.16)
+        assert seen_after_enter == [0]  # reset to 0 exactly once, at busy entry
+        assert tick[0] >= 1  # then ticks advanced
+    finally:
+        await _cancel(task)
+
+
+def test_blink_interval_is_calm() -> None:
+    """Guard against regressing to a fast / 120 Hz cadence: one full on+off
+    wink cycle (two toggles) must sit in a calm 0.5-4 s band.
+    """
+    cycle_seconds = HEARTBEAT_BLINK_INTERVAL_MS / 1000 * 2
+    assert 0.5 <= cycle_seconds <= 4.0, (
+        f"blink cycle {cycle_seconds:.2f}s outside the calm 0.5-4 s band"
     )

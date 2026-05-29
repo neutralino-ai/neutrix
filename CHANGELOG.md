@@ -4,6 +4,37 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.9.8] — 2026-05-28
+
+### Changed
+- **Heartbeat liveness pulse: blink, not brightness.** The ``●`` above the
+  input now winks on/off (present on even ticks, a same-width blank on odd)
+  every 600 ms instead of fading through a truecolor gray gradient. On a
+  256-color terminal the old fade quantized onto only ~22 distinct grays
+  (the xterm 24-step ramp ``#080808..#eeeeee``), so it banded and read as
+  ~5 Hz regardless of refresh rate — the palette, not the clock, was the
+  ceiling, which is why v0.9.5's jump to 120 Hz didn't help. A 2-state
+  presence toggle has nothing to interpolate, so it stays smooth on every
+  terminal. Follows Claude Code's tool-use loader (``ToolUseLoader`` +
+  ``useBlink``, ``BLINK_INTERVAL_MS = 600``). The blink phase resets to a
+  visible dot on each IDLE→busy transition, so a turn never opens on a
+  blank dot. Stalled ``AWAITING_LLM`` winks **red** (``LLM (stalled)``) via
+  a discrete color swap. (6 split-point decisions, all converging on CC's
+  tool-loader wink —
+  see [docs/splits/v0.9.8-liveness-motion.html](docs/splits/v0.9.8-liveness-motion.html).)
+- **Heartbeat cadence reverts from 120 Hz to a 600 ms toggle**
+  (``HEARTBEAT_BLINK_INTERVAL_MS``), strict period (no jitter) — roughly
+  70× less heartbeat CPU.
+
+### Removed
+- The truecolor brightness machinery: ``HEARTBEAT_BREATH_PERIOD_S``,
+  ``HEARTBEAT_REFRESH_HZ``, ``HEARTBEAT_CYCLE_FRAMES``,
+  ``HEARTBEAT_TICK_MS``, ``HEARTBEAT_JITTER_RATIO``, the gray/red RGB
+  anchors, ``_build_brightness_cycle`` with its two precomputed cycle
+  tables, and ``jittered_sleep``.
+
+See [docs/PRDs/v0.9.8-liveness-motion.md](docs/PRDs/v0.9.8-liveness-motion.md).
+
 ## [v0.9.7] — 2026-05-28
 
 ### Added

@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.9.8 splits — CC-style liveness motion</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a;
+    --muted: #6a6a6a;
+    --dim: #9a9a9a;
+    --bg: #fafaf7;
+    --card: #ffffff;
+    --border: #e3e3dc;
+    --accent: #b14a00;
+    --shipped: #2f7d32;
+    --inflight: #b14a00;
+    --planned: #6a6a6a;
+    --open: #b14a00;
+    --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 8px; font-size: 14px; }
+  .note { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+  .split {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin: 0 0 14px;
+  }
+  .split.forced { border-color: var(--accent); border-width: 2px; }
+  .split .head {
+    display: grid;
+    grid-template-columns: 36px 1fr auto;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .split .num { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .split .name { font-weight: 600; color: var(--fg); }
+  .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 4px 16px;
+    margin: 0;
+    font-size: 14px;
+  }
+  .split dt {
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    padding-top: 5px;
+  }
+  .split dd { margin: 0 0 8px; color: var(--fg); }
+  .split dd ul { margin: 4px 0; padding-left: 20px; }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); font-style: normal; }
+  .split .recommend { color: var(--accent); font-style: normal; }
+  .quote { color: var(--muted); font-style: italic; }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .math {
+    background: #f6f5f0;
+    border-left: 3px solid var(--accent);
+    padding: 10px 14px;
+    margin: 8px 0;
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--fg);
+    white-space: pre-wrap;
+  }
+  footer {
+    color: var(--dim);
+    font-size: 12px;
+    margin-top: 48px;
+    border-top: 1px solid var(--border);
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.9.8 splits — CC-style liveness motion</h1>
+<p class="tagline">
+  Replace the heartbeat's single-cell brightness fade with a
+  <strong>palette-independent on/off blink</strong> (CC's tool-loader
+  wink), so the liveness pulse is robust on the user's
+  <code>tmux-256color</code> terminal (and every other) instead of banding.
+  <strong>Outcome:</strong> after surveying CC's shape-bloom and shimmer and
+  prototyping both, the user tested four dot candidates and chose the
+  on/off presence wink — the simplest palette-independent option, with
+  nothing to interpolate. Re-affirms v0.9.4 #2 (single calm <code>●</code>),
+  replaces #13 (truecolor gradient → presence toggle), and reverses the
+  v0.9.5 "120&nbsp;Hz" cadence (→ 600&nbsp;ms toggle).
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this file is
+  the durable record of the split-point discussion that happens
+  <strong>before</strong> the PRD is drafted. CC source under
+  <code>/datafs/users/dingxf/anthropic/cc2/src</code>. All six decisions
+  below are now <span class="badge decided">decided</span> (settled
+  turn-by-turn in chat). Labels: <strong>Follow CC</strong> /
+  <strong>Alternative</strong> / <strong>User-directed different</strong> /
+  <strong>No CC analog</strong>.
+</p>
+
+<h2>Why we're reopening v0.9.4</h2>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">The diagnosis changed — not the taste</span>
+    <span class="badge decided">root cause</span>
+  </div>
+  <dl>
+    <dt>Measured</dt>
+    <dd>
+      The user's terminal is <code>tmux-256color</code> with
+      <code>COLORTERM</code> unset, so prompt_toolkit resolves to
+      <strong>8-bit / 256-color</strong>. The truecolor gray gradient
+      <code>(60,60,60)→(255,255,255)</code> quantizes onto only
+      <strong>~22 distinct grays per cycle</strong> (truecolor would give
+      ~178). Because the raised cosine sits flat at trough/peak, those 22
+      changes bunch into the mid-slope as large jumps → reads as ~5&nbsp;Hz
+      and feels steppy. Raising the tick 10→120&nbsp;Hz at v0.9.5 changed
+      nothing because <em>the palette, not the clock, is the ceiling</em>.
+    </dd>
+    <dt>Implication</dt>
+    <dd>
+      v0.9.4 <strong>#2</strong> (calm single <code>●</code>, no shape
+      change) made brightness the <em>only</em> animation channel; v0.9.4
+      <strong>#13</strong> drove that channel with a truecolor gradient
+      and assumed non-truecolor terminals "degrade gracefully via
+      prompt_toolkit's fallback." The degradation <em>is</em> the bug.
+      #2 and #13 are retroactively incompatible. The taste behind #2
+      (calm, uncluttered) still stands — what must change is the
+      <em>channel</em>: from brightness (quantization-bound) to
+      shape/position (palette-independent).
+    </dd>
+    <dt>How CC avoids it</dt>
+    <dd>
+      CC never breathes brightness. Its spinner animates <em>shape</em>
+      (the ✻-family bloom, <code>· ✢ ✳ ✶ ✻ ✽</code> forward+reversed —
+      <code>components/Spinner/SpinnerGlyph.tsx:7</code>,
+      <code>utils.ts:6-10</code>) and <em>position</em> (a 2-colour shimmer
+      band sweeping the verb text —
+      <code>bridge/bridgeStatusUtil.ts:61-111</code>). It also clamps
+      <em>down</em> to 256-colour inside tmux on purpose
+      (<code>ink/colorize.ts:47-57</code>), because default tmux won't
+      re-emit truecolor SGR to the outer terminal — so "just force
+      truecolor" is a fix CC explicitly rejected.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">★</span>
+    <span class="name">The forcing constraint: the liveness-gap on short labels</span>
+    <span class="badge decided">survey</span>
+  </div>
+  <dl>
+    <dt>CC shimmer geometry</dt>
+    <dd>
+      A <strong>3-column</strong> band sweeps right→left one column per
+      <code>SHIMMER_INTERVAL_MS = 150</code>, cycling every
+      <code>cycleLength = width + 20</code> ticks (so ~10 empty columns of
+      lead-in/out → a deliberate pause between sweeps).
+      <code>bridgeStatusUtil.ts:21,61-67</code>.
+    </dd>
+    <dt>On a 3-char label</dt>
+    <dd>
+      <div class="math">label "LLM"  →  width = 3
+cycleLength = 3 + 20 = 23 ticks × 150 ms = 3.45 s / cycle
+band overlaps cols [0,2] only when index ∈ [-1,3] = 5 ticks = 0.75 s
+⇒ label is STATIC ● LLM for ~2.7 s — ~78% of every cycle</div>
+      For a CC <em>spinner</em> the bloom glyph animates through that gap.
+      Strip the bloom and a shimmer-only neutrix indicator is
+      <strong>frozen 78% of the time</strong> — worse than today's bug.
+      CC's verbs are 8–13 chars on purpose (30–45% animated); neutrix's
+      <code>LLM</code> / <code>tool: x</code> / <code>cancelling…</code>
+      can't match without becoming verbose, which v0.9.4 <strong>#4</strong>
+      rejected (the phase name IS the debug affordance).
+    </dd>
+    <dt>Consequence</dt>
+    <dd>
+      The motion-channel choice (split&nbsp;#1) is <strong>forced</strong>,
+      not aesthetic: either something blooms on the glyph during the gap,
+      or the shimmer must run continuously (no CC pause), or the label
+      grows. Short labels make a pure CC-geometry shimmer a non-starter.
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split forced">
+  <div class="head">
+    <span class="num">1.</span>
+    <span class="name">Motion channel — what carries the animation? (FORCED)</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Both at once: a shape-blooming glyph <em>and</em> a positional
+      shimmer band over a long verb. The bloom guarantees continuous
+      motion; the shimmer adds texture.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>(a) Shape-bloom on the glyph</strong> — the
+          <code>●</code> cell cycles through shapes/sizes. Carries motion
+          by itself, independent of label width. Palette-independent.</li>
+        <li><strong>(b) Continuous shimmer on the label</strong> — drop
+          CC's <code>+20</code> padding so the band sweeps without a gap.
+          Keeps the calm static <code>●</code>, but on a 3-char label the
+          band covers most of the word most of the time → reads as a
+          flicker, not a sweep.</li>
+        <li><strong>(c) Both (full CC)</strong> — bloom glyph + shimmer
+          on a (necessarily longer) label.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>(a) Shape-bloom on the glyph.</strong> neutrix's labels are
+      too short for a shimmer to carry the animation without the 78%-frozen
+      gap, and lengthening them re-opens the #4 debug-affordance trade we
+      already lost. A shape-bloom on the single glyph cell is
+      width-independent, palette-independent, and stays calm and
+      uncluttered (honoring #2's taste). Shimmer can return as polish in a
+      later release if a long-text surface ever appears — not now (YAGNI).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>User-directed different — (d) presence blink.</strong>
+      A new option that surfaced mid-discussion: toggle the dot's
+      <em>visibility</em> (<code>●</code> ↔ blank) rather than its shape or
+      position. The user pointed to CC's own
+      <code>components/ToolUseLoader.tsx</code> +
+      <code>hooks/useBlink.ts</code> (<code>BLINK_INTERVAL_MS = 600</code>),
+      which winks a <code>BLACK_CIRCLE</code> on/off for in-progress tools —
+      so this is <strong>Follow CC</strong> on the <em>tool</em> loader, not
+      the spinner. Chosen by eye after testing candidates A–D in the user's
+      terminal. A 2-state presence toggle has nothing to interpolate, so
+      the 256-color quantization that caused the bug cannot occur.
+      Supersedes the agent's shape-bloom lean (kept above for the record).
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">2.</span>
+    <span class="name">Bloom style — which shapes? (reopens v0.9.4 #2)</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      <code>['·','✢','✳','✶','✻','✽']</code> cycled forward then reversed
+      (12 frames) — a flower "blooming" open and closed.
+      <code>SpinnerGlyph.tsx:7</code>, <code>utils.ts:6-10</code>
+      (platform-aware: Windows/Ghostty substitute <code>*</code>).
+    </dd>
+    <dt>v0.9.4 history</dt>
+    <dd>
+      Split #2 was <strong>user-directed</strong>: you rejected the ✻
+      family as "spinning frantically" and chose a single <code>●</code> —
+      <span class="quote">"what would Steven Jobs do?"</span> The calm
+      goal is unchanged; only the channel must move off brightness.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>(a) Calm dot size-bloom</strong>
+          <code>· • ● • ·</code> (or <code>·</code>→<code>∙</code>→
+          <code>•</code>→<code>●</code>→<code>⬤</code> and back) — a single
+          dot gently growing and shrinking. Shape motion, no rotation, the
+          calm cousin of CC's bloom.</li>
+        <li><strong>(b) CC's ✻ family</strong> <code>· ✢ ✳ ✶ ✻ ✽</code>
+          forward+reversed — literal CC, busier.</li>
+        <li><strong>(c) Keep static <code>●</code></strong> — only viable
+          if split #1 picks shimmer to carry motion (rejected for short
+          labels).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>(a) Calm dot size-bloom.</strong> It satisfies both
+      constraints that pulled in opposite directions: palette-independent
+      shape motion (fixes the bug) <em>and</em> the calm, single-glyph
+      aesthetic you chose at #2 (no frantic rotation). The ✻ family stays
+      available if you now want the literal CC look. Final glyph set to be
+      pinned against terminal/font support.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Superseded → single <code>●</code>, no shape cycle.</strong>
+      The size-bloom was the agent's pick and was previewed, but the user
+      then chose the presence-blink (#1), so the glyph does <em>not</em>
+      change shape — it winks on/off. This re-affirms v0.9.4 #2 (a single
+      calm <code>●</code>); only the smoothing method (#13) changes. Glyph
+      stays <code>●</code> (<code>BLACK_CIRCLE</code>), width-1, no jiggle.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">3.</span>
+    <span class="name">Cadence — per-frame step (reverses v0.9.5 120 Hz)</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Bloom advances one frame per <strong>120 ms</strong> (12 frames =
+      1.44 s/cycle, <code>SpinnerGlyph.tsx</code>); shimmer one column per
+      <strong>150 ms</strong> (<code>bridgeStatusUtil.ts:21</code>).
+    </dd>
+    <dt>Why it changes</dt>
+    <dd>
+      Brightness fade needed many sub-steps, so v0.9.5 cranked the tick to
+      120&nbsp;Hz (8.33&nbsp;ms). Shape motion is paced <em>per visible
+      frame</em> by the eye — at 120&nbsp;Hz a 5-frame bloom would complete
+      in ~42&nbsp;ms (invisible). The loop reverts to a slow per-frame tick,
+      which also drops the heartbeat's CPU cost ~10–20×.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>120 ms/frame — CC bloom parity.</li>
+        <li>150 ms/frame — CC shimmer parity / slightly calmer.</li>
+        <li>Derive from a breath period: pick frame-count × interval to
+          hold a ~2–4 s cycle (echoes v0.9.4 #12's 4 s breath).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Pace per frame, ~120–150 ms.</strong> Choose the bloom's
+      frame count so one open-close breath lands in the calm 2–4 s band
+      (e.g. a 9-frame dot-bloom × ~140 ms ≈ 2.5 s). Follow CC's per-frame
+      ballpark; retire <code>HEARTBEAT_REFRESH_HZ = 120</code> and the
+      480-frame table.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC — 600 ms toggle (1.2 s cycle), strict.</strong>
+      Matches <code>useBlink</code>'s <code>BLINK_INTERVAL_MS = 600</code>;
+      tested at this rate (candidate C) and accepted. Reverses v0.9.5's
+      <code>HEARTBEAT_REFRESH_HZ = 120</code> — the loop now sleeps ~600 ms
+      and flips a boolean, retiring the 480-frame table and ~70× the
+      heartbeat CPU. Exposed as one constant
+      (<code>HEARTBEAT_BLINK_INTERVAL_MS</code>) so it's a one-line dial if
+      it ever reads too fast. <em>Divergence:</em> the blink phase is
+      anchored to busy-entry (tick reset to 0 each IDLE→busy) so the first
+      frame of a turn is always a visible <code>●</code> — CC's
+      <code>useBlink</code> uses a shared global clock and can start blank,
+      tolerable for its list of per-tool dots but not for neutrix's single
+      liveness dot.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">4.</span>
+    <span class="name">Color model — drop the gradient (reopens v0.9.4 #13)</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Two named theme colours; in the 256/ansi themes they are literally
+      <code>ansi:blue</code> + <code>ansi:blueBright</code>
+      (<code>utils/theme.ts:202-203</code>). The 2-colour shimmer switch is
+      a hard <code>flashOpacity &gt; 0.5</code> threshold
+      (<code>GlimmerMessage.tsx:162</code>) — no interpolation needed.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li><strong>(a) Single named ANSI colour, shape carries motion</strong>
+          — the bloom needs no colour change at all; one calm colour
+          (e.g. neutrix's existing white) with nothing to quantize.</li>
+        <li><strong>(b) Two named ANSI styles</strong> (e.g. normal +
+          <code>bold</code>/bright) if a little brightness texture on top
+          of the shape is wanted.</li>
+        <li><strong>(c) Keep truecolor hex gradient</strong> — the thing
+          that quantizes. Rejected.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>(a) Single named ANSI colour.</strong> Once motion lives in
+      the shape, the truecolor-vs-256 question simply <em>goes away</em> —
+      there's no gradient left to quantize, so depth-adaptivity stops being
+      load-bearing and we don't carry two render paths. Keep neutrix's
+      neutral/white identity (blue is available if you'd rather match CC).
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Single colour — bright white, presence toggle.</strong> With
+      an on/off wink the dot is either shown (one colour) or blank, so
+      there is no second colour and no gradient at all — the
+      truecolor-vs-256 question is fully moot. Drop the hex gray gradient
+      and the 480-shade table; keep neutrix's bright-white identity.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">5.</span>
+    <span class="name">Stalled state — keep the red signal</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>
+      Interpolates the message colour toward <code>ERROR_RED</code> by a
+      continuous <code>stalledIntensity</code>
+      (<code>GlimmerMessage.tsx:87-92</code>).
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Discrete swap to a red ANSI colour while the bloom continues
+          (neutrix's current discrete model, minus the gradient).</li>
+        <li>CC-style continuous interpolation toward red (needs truecolor;
+          reintroduces the quantization problem).</li>
+        <li>Bloom + red <code>blink</code> attribute for extra urgency.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Discrete red ANSI swap, bloom unchanged.</strong> Same intent
+      as CC (red = stalled) but via a named ANSI colour, not interpolation
+      — consistent with split #4 and the v0.9.5 stalled-palette decision.
+      The label still reads <code>LLM (stalled)</code>.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Red <code>●</code>, same on/off wink.</strong> When stalled
+      the dot winks red (maps to CC's <code>error</code> colour) and the
+      label reads <code>LLM (stalled)</code>; cadence unchanged. Discrete
+      white→red swap, no interpolation — consistent with #4 and the v0.9.5
+      stalled-palette decision.
+    </dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head">
+    <span class="num">6.</span>
+    <span class="name">Jitter — strict period now (revisits v0.9.4 #14)</span>
+    <span class="badge decided">decided</span>
+  </div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Strict periodic step (<code>setInterval</code>), no jitter.</dd>
+    <dt>Why it changes</dt>
+    <dd>
+      v0.9.4 #14 added ±10% tick jitter for an "organic" brightness fade.
+      On shape/positional motion, time-jitter makes the bloom visibly
+      speed up and slow down (and would make a shimmer band skip
+      backward/forward in time) — it reads as broken, not organic. The #14
+      rationale was specific to brightness and doesn't carry over.
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">
+      <strong>Follow CC — strict period.</strong> Drop the ±10% jitter for
+      the new motion model.
+    </dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision">
+      <strong>Follow CC — strict period, no jitter.</strong>
+      <code>useBlink</code> derives state from a strict clock
+      (<code>floor(time / interval) % 2</code>). Jitter on an on/off wink
+      would look erratic; v0.9.4 #14's organic-jitter rationale was specific
+      to the brightness fade and does not carry over. Retire
+      <code>jittered_sleep</code> from the heartbeat path.
+    </dd>
+  </dl>
+</div>
+
+<footer>
+  After you mark each Decision in chat, the decisions get embedded in
+  <code>docs/PRDs/v0.9.8-liveness-motion.md</code>
+  (<code>## Claude Code reference</code> section) and this file is the
+  linked full survey. Version is provisional v0.9.8 (after the planned
+  v0.9.7-rewind); say the word if you want it to ship sooner.
+</footer>
+
+</body>
+</html>

@@ -264,6 +264,34 @@
 </div>
 
 <div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.8-liveness-motion.md">v0.9.8</a></span>
+  <span class="theme">
+    Liveness motion — blink, not brightness
+    <small>
+      User-reported: the v0.9.4/v0.9.5 breathing dot still read as
+      stuck at ~5&nbsp;Hz on a <code>tmux-256color</code> terminal.
+      Root cause — 256-color exposes only ~22 distinct grays (the
+      xterm 24-step ramp <code>#080808..#eeeeee</code>), so a
+      brightness fade bands regardless of refresh; the v0.9.5 jump to
+      120&nbsp;Hz couldn't help because the palette, not the clock,
+      is the ceiling. Fix: animate the dot's <em>presence</em>, not
+      its brightness — a single <code>●</code> that winks on/off every
+      600&nbsp;ms, following CC's tool-use loader
+      (<code>ToolUseLoader</code> + <code>useBlink</code>). Red when
+      stalled; strict period; the turn always opens on a visible dot.
+      Re-affirms v0.9.4 #2, replaces #13, reverses v0.9.5's
+      120&nbsp;Hz. (<a href="splits/v0.9.8-liveness-motion.html">6
+      split-point decisions</a>, all converging on CC's tool-loader
+      wink.)
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge p0">P0</span>
+    <span class="badge inflight">awaiting accept</span>
+  </span>
+</div>
+
+<div class="entry">
   <span class="ver"><a href="PRDs/v0.10.0-subagent.md">v0.10.0</a></span>
   <span class="theme">
     Subagent framework (<code>Agent</code> tool)

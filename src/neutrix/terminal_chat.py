@@ -13,11 +13,11 @@ list directly — that's the CM's job. Cancel is a sync method on the
 CM (the key binding can't await), kept honest by the
 :class:`CancelEvent` async surface for non-keyboard callers.
 """
+
 from __future__ import annotations
 
 import asyncio
 import math
-import random
 import re
 import sys
 import time
@@ -54,24 +54,21 @@ QUEUED_PREFIX = "› "  # noqa: RUF001  -- U+203A is the chosen UI glyph
 MAX_PANEL_ROWS = 5
 
 HEARTBEAT_GLYPH = "●"
-# Breathing cadence. v0.9.5 raises the refresh from 10 Hz (the v0.9.4
-# 100 ms/tick) to 120 Hz so the fade reads as a continuous glow rather
-# than ~10 visible brightness steps/s — 10 fps sits below the
-# smooth-motion perception floor. The 4 s period (resting-calm
-# ~15 BPM) is unchanged; the frame count scales with the refresh so
-# one breath still spans exactly one period.
-HEARTBEAT_BREATH_PERIOD_S = 4.0
-HEARTBEAT_REFRESH_HZ = 120
-HEARTBEAT_CYCLE_FRAMES = round(HEARTBEAT_REFRESH_HZ * HEARTBEAT_BREATH_PERIOD_S)  # 480
-HEARTBEAT_TICK_MS = 1000 / HEARTBEAT_REFRESH_HZ  # ≈ 8.33 ms/frame
-HEARTBEAT_JITTER_RATIO = 0.10
-HEARTBEAT_TROUGH_RGB: tuple[int, int, int] = (60, 60, 60)
-HEARTBEAT_PEAK_RGB: tuple[int, int, int] = (255, 255, 255)
-# Stalled palette (v0.9.5 split #3): the breathing rhythm continues
-# — only the gradient anchors swap. Low-brightness red to bright red
-# so the dot keeps reading as "alive, but waiting too long."
-HEARTBEAT_STALLED_TROUGH_RGB: tuple[int, int, int] = (60, 0, 0)
-HEARTBEAT_STALLED_PEAK_RGB: tuple[int, int, int] = (255, 60, 60)
+# v0.9.8: the liveness pulse animates the dot's *presence* (an on/off
+# wink), not its brightness. A 256-color terminal (the user's
+# tmux-256color) exposes only ~22 distinct grays — the xterm 24-step gray
+# ramp #080808..#eeeeee — so a brightness fade bands no matter how it is
+# paced or how fast it refreshes: the palette, not the clock, is the
+# ceiling (which is why the v0.9.5 jump to 120 Hz didn't help). A 2-state
+# presence toggle has nothing to interpolate, so it stays smooth on every
+# terminal. Follows Claude Code's tool-use loader
+# (components/ToolUseLoader.tsx + hooks/useBlink.ts, BLINK_INTERVAL_MS=600).
+HEARTBEAT_BLINK_INTERVAL_MS = 600  # one on/off toggle per tick → 1.2 s cycle
+HEARTBEAT_GLYPH_STYLE = "fg:ansiwhite bold"
+# Stalled glyph (v0.9.5 intent, v0.9.8 mechanism): the dot keeps winking
+# but turns red — a discrete colour swap, no gradient — mapping to CC's
+# `error` colour for a call that has waited too long.
+HEARTBEAT_STALLED_GLYPH_STYLE = "fg:ansired bold"
 # Single-knob stall threshold (v0.9.5 post-gate revision): the stall
 # hint is derived from the slot's hard timeout rather than carrying a
 # separate magic number, so raising llm_timeout_s for a slow model
@@ -93,52 +90,6 @@ def stall_threshold_for(llm_timeout_s: float) -> float:
     """
     return max(HEARTBEAT_STALL_FLOOR_S, llm_timeout_s * HEARTBEAT_STALL_FRACTION)
 
-
-def _build_brightness_cycle(
-    trough: tuple[int, int, int],
-    peak: tuple[int, int, int],
-) -> tuple[str, ...]:
-    """Precompute HEARTBEAT_CYCLE_FRAMES hex-color style strings along
-    a raised-cosine breathing curve from trough (frame 0) to peak
-    (frame N/2) to trough (frame N).
-    """
-    cycle: list[str] = []
-    for frame in range(HEARTBEAT_CYCLE_FRAMES):
-        # Raised cosine in [0, 1]: 0 at frame 0 and N, 1 at frame N/2.
-        progress = (1 - math.cos(2 * math.pi * frame / HEARTBEAT_CYCLE_FRAMES)) / 2
-        r = round(trough[0] + (peak[0] - trough[0]) * progress)
-        g = round(trough[1] + (peak[1] - trough[1]) * progress)
-        b = round(trough[2] + (peak[2] - trough[2]) * progress)
-        cycle.append(f"fg:#{r:02x}{g:02x}{b:02x}")
-    return tuple(cycle)
-
-
-HEARTBEAT_BRIGHTNESS_CYCLE: tuple[str, ...] = _build_brightness_cycle(
-    HEARTBEAT_TROUGH_RGB, HEARTBEAT_PEAK_RGB
-)
-HEARTBEAT_STALLED_CYCLE: tuple[str, ...] = _build_brightness_cycle(
-    HEARTBEAT_STALLED_TROUGH_RGB, HEARTBEAT_STALLED_PEAK_RGB
-)
-
-
-async def jittered_sleep(
-    nominal_seconds: float,
-    *,
-    jitter_ratio: float = HEARTBEAT_JITTER_RATIO,
-    rng: random.Random | None = None,
-) -> None:
-    """Sleep ``nominal_seconds`` with a uniform ±jitter_ratio multiplier.
-
-    Default RNG is the :mod:`random` module-level singleton; tests
-    can pass a seeded :class:`random.Random` for determinism. With
-    ``jitter_ratio=0.0`` the sleep is exact (no randomness).
-    """
-    if jitter_ratio <= 0:
-        await asyncio.sleep(nominal_seconds)
-        return
-    sampler = rng.uniform if rng is not None else random.uniform
-    factor = sampler(1.0 - jitter_ratio, 1.0 + jitter_ratio)
-    await asyncio.sleep(nominal_seconds * factor)
 
 _TASK_PANEL_ICON = {
     "in_progress": "◼",
@@ -207,9 +158,7 @@ def format_task_panel(tasks: tuple[Task, ...]) -> list[tuple[str, str]]:
     for task in visible:
         icon = _TASK_PANEL_ICON.get(task.status, "?")
         style = _TASK_PANEL_STYLE.get(task.status, "")
-        fragments.append(
-            (style, f"  {icon} #{task.id} [{task.status}] {task.subject}\n")
-        )
+        fragments.append((style, f"  {icon} #{task.id} [{task.status}] {task.subject}\n"))
 
     if truncated:
         n_inprog = sum(1 for t in truncated if t.status == "in_progress")
@@ -232,30 +181,35 @@ async def heartbeat_loop(
     store: ChatStore,
     on_tick: Callable[[], None],
     *,
-    sleep_seconds: float = HEARTBEAT_TICK_MS / 1000,
+    sleep_seconds: float = HEARTBEAT_BLINK_INTERVAL_MS / 1000,
     sleep_fn: Callable[[float], Awaitable[None]] | None = None,
+    on_enter_busy: Callable[[], None] | None = None,
 ) -> None:
-    """Drive the heartbeat: tick while busy, wait on store changes when idle.
+    """Drive the heartbeat: wink while busy, wait on store changes when idle.
 
     While ``state_supplier()`` is busy (anything except
     :attr:`State.IDLE`), awaits ``sleep_fn(sleep_seconds)`` and then
-    calls ``on_tick``. When the state is :attr:`State.IDLE`, blocks
-    on the next :py:meth:`ChatStore.changes` yield — CM state
-    transitions always accompany a store mutation, so the next busy
-    phase wakes the loop. Cleanly cancellable.
+    calls ``on_tick`` — one blink toggle per tick. When the state is
+    :attr:`State.IDLE`, blocks on the next :py:meth:`ChatStore.changes`
+    yield — CM state transitions always accompany a store mutation, so the
+    next busy phase wakes the loop. Cleanly cancellable.
 
-    The default ``sleep_fn`` is :func:`jittered_sleep` which applies
-    ±10% noise to each tick for an organic, less-mechanical breathing
-    cadence. Tests pass a deterministic sleep (plain
-    :func:`asyncio.sleep`) to stabilize timing assertions.
+    ``on_enter_busy`` (if given) is called once on each IDLE→busy
+    transition, before the first tick, so the caller can reset its blink
+    phase and guarantee a turn opens on a *visible* dot rather than a
+    blank one. The default ``sleep_fn`` is :func:`asyncio.sleep` (strict
+    period — a presence wink desyncs badly under jitter). Tests inject a
+    fast deterministic ``sleep_fn`` / ``on_enter_busy`` to stabilize timing.
     """
     if sleep_fn is None:
-        sleep_fn = jittered_sleep
+        sleep_fn = asyncio.sleep
     changes = store.changes()
     try:
         while True:
             while state_supplier() == State.IDLE:
                 await changes.__anext__()
+            if on_enter_busy is not None:
+                on_enter_busy()
             while state_supplier() != State.IDLE:
                 await sleep_fn(sleep_seconds)
                 on_tick()
@@ -274,17 +228,17 @@ def format_heartbeat(
     """Render the liveness pulse above the input as prompt_toolkit fragments.
 
     Returns ``[]`` when ``state == IDLE``. Otherwise returns two
-    fragments: the breathing glyph (``HEARTBEAT_GLYPH`` styled per the
-    active cycle table) and a static label that names the current
-    phase. The glyph fades smoothly along a truecolor gradient; the
-    label stays bright (split #2 — Steve-Jobs-mode breathing dot,
-    split #13 — truecolor smoothing).
+    fragments: the liveness glyph and a static label naming the current
+    phase. The glyph *winks* on/off by visibility — ``HEARTBEAT_GLYPH``
+    on even ``tick``, a same-width blank on odd ``tick`` (v0.9.8 split #1:
+    a presence toggle, not a brightness fade, so nothing quantizes on a
+    256-color terminal). The dot is bright white normally.
 
     When ``state == AWAITING_LLM`` and ``last_progress_at`` is set and
-    more than ``stall_threshold_s`` seconds ago, the palette swaps to
-    ``HEARTBEAT_STALLED_CYCLE`` (red gradient) and the label becomes
-    ``"LLM (stalled)"`` — v0.9.5 split #1 / #2 / #3. The stall hint is
-    UI-only; the hard timeout is enforced by
+    more than ``stall_threshold_s`` seconds ago, the glyph winks red
+    (``HEARTBEAT_STALLED_GLYPH_STYLE``) and the label becomes
+    ``"LLM (stalled)"`` — v0.9.5 stall hint, v0.9.8 colour swap. The hint
+    is UI-only; the hard timeout is enforced by
     :class:`~neutrix.context_manager.ContextManager`'s watchdog.
     """
     if state == State.IDLE:
@@ -303,10 +257,12 @@ def format_heartbeat(
         label = "cancelling…"
     else:  # pragma: no cover - defensive for future states
         label = state.value
-    cycle = HEARTBEAT_STALLED_CYCLE if is_stalled else HEARTBEAT_BRIGHTNESS_CYCLE
-    glyph_style = cycle[tick % HEARTBEAT_CYCLE_FRAMES]
+    visible = tick % 2 == 0
+    glyph_style = HEARTBEAT_STALLED_GLYPH_STYLE if is_stalled else HEARTBEAT_GLYPH_STYLE
+    # On/off wink: a same-width blank when off, so the label never shifts.
+    glyph = f"{HEARTBEAT_GLYPH} " if visible else "  "
     return [
-        (glyph_style, f"{HEARTBEAT_GLYPH} "),
+        (glyph_style, glyph),
         (HEARTBEAT_LABEL_STYLE, f"{label}\n"),
     ]
 
@@ -826,7 +782,9 @@ class TerminalChat:
         # Index of the last rendered message. The render watcher walks
         # forward through ``store.messages`` from this point.
         self._rendered_message_count: int = 0
-        # Monotonic frame counter feeding the heartbeat brightness cycle.
+        # Heartbeat blink-phase counter: even tick → dot visible, odd →
+        # blank. Reset to 0 on each IDLE→busy transition (see
+        # _heartbeat_ticker) so a turn opens on a visible dot.
         self._heartbeat_tick: int = 0
 
     def run(self) -> None:
@@ -975,18 +933,26 @@ class TerminalChat:
     async def _heartbeat_ticker(self) -> None:
         """Run the heartbeat liveness pulse for the lifetime of the chat.
 
-        See :func:`heartbeat_loop` for the loop semantics. The tick
-        counter is incremented and the prompt_toolkit app invalidated
-        once per frame while CM is busy; idle phases consume no CPU.
+        See :func:`heartbeat_loop` for the loop semantics. While CM is
+        busy the tick counter is advanced once per blink interval and the
+        prompt_toolkit app invalidated; idle phases consume no CPU. On each
+        IDLE→busy transition the counter is reset to 0 so the turn opens on
+        a visible dot rather than a blank one.
         """
+
         def on_tick() -> None:
             self._heartbeat_tick += 1
+            self._invalidate_app()
+
+        def on_enter_busy() -> None:
+            self._heartbeat_tick = 0
             self._invalidate_app()
 
         await heartbeat_loop(
             state_supplier=lambda: self.ctx.state,
             store=self.store,
             on_tick=on_tick,
+            on_enter_busy=on_enter_busy,
         )
 
     async def _render_watcher(self) -> None:
@@ -1017,9 +983,7 @@ class TerminalChat:
         role = record.role
         content = record.content
         if role == "user" and isinstance(content, str) and is_task_reminder(content):
-            await self.view.print_notice(
-                format_reminder_notice(self.store.tasks), style="dim"
-            )
+            await self.view.print_notice(format_reminder_notice(self.store.tasks), style="dim")
             return
         if role == "system":
             if content:
@@ -1039,13 +1003,13 @@ class TerminalChat:
             return
         if role == "tool":
             call_id = record.tool_call_id or ""
-            name, arguments = self._tool_call_lookup.get(call_id, (record.tool_name or "tool", "{}"))
+            name, arguments = self._tool_call_lookup.get(
+                call_id, (record.tool_name or "tool", "{}")
+            )
             await self._store_and_print_tool_result(name, arguments, str(content or ""))
             return
 
-    def _tool_calls_from_record(
-        self, record: MessageRecord
-    ) -> list[tuple[str, str, str]]:
+    def _tool_calls_from_record(self, record: MessageRecord) -> list[tuple[str, str, str]]:
         extra = record.extra or {}
         tool_calls = extra.get("tool_calls")
         if not isinstance(tool_calls, list):
@@ -1218,9 +1182,7 @@ class TerminalChat:
     async def _cmd_compact(self, args: list[str]) -> None:
         outcome = await self.ctx.compact()
         if not outcome.did_compact:
-            await self.view.print_notice(
-                "nothing to compact (conversation too short)", style="dim"
-            )
+            await self.view.print_notice("nothing to compact (conversation too short)", style="dim")
             return
         # Notice-only: the kept tail is already in scrollback, so suppress
         # re-printing it and re-align the render index to the compacted

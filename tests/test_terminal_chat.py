@@ -737,6 +737,10 @@ async def test_heartbeat_renders_above_input_while_busy(tmp_path: Path) -> None:
         if chat.store.queued_user_messages:
             break
 
+    # v0.9.8: the dot winks on/off by tick parity; pin an even (visible)
+    # tick so this layout/stack-order assertion is deterministic. The wink
+    # timing itself is covered by tests/test_heartbeat_format.py.
+    chat._heartbeat_tick = 0
     rendered = _render(chat._above_input())
     assert HEARTBEAT_GLYPH in rendered
     assert "LLM" in rendered
