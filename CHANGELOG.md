@@ -4,6 +4,31 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.4.8] — 2026-05-29
+
+### Added
+- **`AskUserQuestion` tool** — the agent can pause the turn and ask the user a
+  structured question (1–4 questions, 2–4 options each, `multiSelect`, implicit
+  free-text "Other"); the answer returns as the tool result. Numbered in-flow
+  options + single-line answer (a number, comma-list, or free text), rendered to
+  durable scrollback. Excluded from subagents (no humanless deadlock).
+- **Interactive permission `ask`** — a `Bash(rm -rf …)`-style auto-flagged
+  command (or an `ask` rule) now prompts **yes / always / no** instead of
+  block-with-notice; "always" appends a session `allow` rule (Bash scoped to the
+  command's first token, e.g. `Bash(rm *)`).
+
+### Changed
+- **Interactive prompting is a bidirectional async generator.** `Executor.dispatch_all`
+  `yield`s a `needs_user_input` event and receives the answer via `gen.asend()`;
+  the **ContextManager** owns the `ask_user` port and drives the prompt. The
+  Executor never calls the UI — it stays a pure event leaf, preserving
+  `UI→store→CM→{LLM,Executor,Advisor}` layering. (Not an `asyncio.Queue`: the
+  flow is lockstep request-response, so a two-way generator fits, not a decoupled
+  MQ.) Split #1 was reworked mid-implementation after the layering was flagged.
+
+See [docs/PRDs/v1.4.8-ask-user-question.md](docs/PRDs/v1.4.8-ask-user-question.md)
+and [docs/splits/v1.4.8-ask-user-question.html](docs/splits/v1.4.8-ask-user-question.html).
+
 ## [v1.4.7] — 2026-05-29
 
 ### Added

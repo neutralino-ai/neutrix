@@ -915,3 +915,75 @@ def test_above_input_shows_streaming_preview(tmp_path):
     ctx.store.extend_assistant_stream("hello streaming world")
     rendered = _render(chat._above_input())
     assert "hello streaming world" in rendered
+
+
+# ---- v1.4.8 AskUserQuestion interactive port ------------------------------
+
+
+async def _until(predicate, *, ticks: int = 200) -> None:
+    for _ in range(ticks):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition not met")
+
+
+@pytest.mark.asyncio
+async def test_ask_user_port_roundtrip(tmp_path):
+    from neutrix.prompts import Option, Question, QuestionSpec
+
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    spec = QuestionSpec(questions=(
+        Question("Pick?", "Pick", (Option("A"), Option("B")), False),
+    ))
+    task = asyncio.create_task(chat._ask_user(spec))
+    await _until(lambda: chat._pending_answer is not None)
+    assert chat._pending_question is not None and chat._pending_question.header == "Pick"
+    chat._pending_answer.set_result("2")  # the input loop's job, simulated
+    answer = await task
+    assert answer.per_question[0].display == "B"
+    # cleared in the finally so the input loop stops routing
+    assert chat._pending_question is None and chat._pending_answer is None
+
+
+@pytest.mark.asyncio
+async def test_ask_user_cancel_clears_pending(tmp_path):
+    from neutrix.prompts import Option, Question, QuestionSpec
+
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    spec = QuestionSpec(questions=(
+        Question("Pick?", "Pick", (Option("A"), Option("B")), False),
+    ))
+    task = asyncio.create_task(chat._ask_user(spec))
+    await _until(lambda: chat._pending_answer is not None)
+    task.cancel()  # mirrors _drive_task.cancel() raising at `await ask_user`
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert chat._pending_question is None and chat._pending_answer is None
+
+
+@pytest.mark.asyncio
+async def test_input_loop_routes_pending_answer_ignoring_empty(tmp_path):
+    from neutrix.prompts import Option, Question
+
+    ctx = _make_ctx(FakeLLM())
+    chat, _output, _prompts = _make_chat(ctx, tmp_path, inputs=[])
+    loop = asyncio.get_running_loop()
+    chat._input_queue = asyncio.Queue()
+    chat._pending_question = Question("Pick?", "Pick", (Option("A"), Option("B")), False)
+    chat._pending_answer = loop.create_future()
+    feed = iter(["   ", "2"])  # whitespace ignored (re-prompt), then the real answer
+
+    async def fake_read():
+        try:
+            return next(feed)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    chat.view.read_input = fake_read  # type: ignore[assignment]
+    await chat._input_loop()
+    assert chat._pending_answer.done()
+    assert chat._pending_answer.result() == "2"
+    assert chat._input_queue.empty()  # answer never enqueued as a user message

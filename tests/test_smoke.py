@@ -55,6 +55,9 @@ def test_cli_launches_append_only_terminal_chat(monkeypatch, tmp_path):
         def __init__(self, *args, **kwargs):
             seen["init"] = (args, kwargs)
 
+        async def _ask_user(self, spec):  # v1.4.8: cli wires executor.ask_user
+            return None
+
         def run(self):
             seen["run"] = True
 

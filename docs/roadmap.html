@@ -514,18 +514,25 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.4.5</span>
+  <span class="ver">v1.4.8</span>
   <span class="theme">
     AskUserQuestion tool (interactive)
     <small>
       An <code>AskUserQuestion</code> tool — the agent surfaces a structured
-      question and the turn pauses for the user's answer (cross-thread input
-      channel between the Executor's worker thread and the input loop). Also
-      upgrades permission <code>ask</code> from block-with-notice to a real
-      interactive prompt. User-requested.
+      question (1-4 questions, 2-4 options, multiSelect, free-text "Other") and
+      the turn pauses for the user's answer. Built on a <strong>bidirectional
+      async generator</strong>: the Executor <code>yield</code>s a
+      <code>needs_user_input</code> event and receives the answer via
+      <code>gen.asend()</code>; the <strong>ContextManager</strong> owns the
+      <code>ask_user</code> port so the Executor stays a pure event leaf
+      (UI→CM→Executor layering intact). Also upgrades permission <code>ask</code>
+      from block-with-notice to a real yes/always/no prompt over the same
+      channel. User-requested; split #1 reworked mid-build after the user flagged
+      the layering.
+      (<a href="splits/v1.4.8-ask-user-question.html">9 split-point decisions</a>.) Suite 386.
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">next</span></span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">

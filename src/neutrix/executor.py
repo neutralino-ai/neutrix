@@ -28,7 +28,20 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from neutrix.permissions import PermissionPolicy, block_reason, decide
+from neutrix.permissions import (
+    USER_DENIED,
+    PermissionPolicy,
+    apply_always_rule,
+    block_reason,
+    decide,
+    permission_question,
+    verdict_from_answer,
+)
+from neutrix.prompts import (
+    ASK_NOT_AVAILABLE,
+    format_answers_result,
+    parse_question_spec,
+)
 from neutrix.store import ChatStore
 from neutrix.tools import dispatch
 
@@ -151,19 +164,48 @@ class Executor:
                 "tool_started",
                 {"tool_call_id": tcid, "tool_name": name, "args": args},
             )
-            # v1.4.0: permission gate (auto/allow-all) before any side effect.
+            # v1.4.0/v1.4.8 permission gate before any side effect. `ask` is a
+            # real yes/always/no prompt when the consumer can answer (a
+            # `needs_user_input` event the CM drives via `.asend()`), else
+            # block-with-notice. The Executor builds the request and interprets
+            # the reply but NEVER touches the UI — it only yields/receives on
+            # its channel, keeping UI→CM→Executor layering intact.
             verdict = decide(name, args, mode=self.permission_mode, policy=self.policy)
-            if verdict != "allow":
-                yield ToolEvent(
-                    "tool_finished",
-                    {
-                        "tool_call_id": tcid,
-                        "tool_name": name,
-                        "content": block_reason(name, verdict, self.permission_mode),
-                        "ok": False,
-                    },
-                )
+            if verdict == "deny":
+                yield _finished(tcid, name, block_reason(name, "deny"), ok=False)
                 continue
+            if verdict == "ask":
+                answer = yield _needs_input(permission_question(name, args, verdict))
+                if answer is None:  # no interactive consumer → v1.4.0 block-notice
+                    yield _finished(
+                        tcid, name, block_reason(name, "ask", self.permission_mode),
+                        ok=False,
+                    )
+                    continue
+                decision = verdict_from_answer(answer)
+                if decision == "no":
+                    yield _finished(tcid, name, USER_DENIED, ok=False)
+                    continue
+                if decision == "always":
+                    self.policy = apply_always_rule(self.policy, name, args)
+                # yes / always → fall through and run the tool
+
+            # v1.4.8: AskUserQuestion is interactive — round-trip through the
+            # `needs_user_input` channel, never to_thread. A ``None`` reply means
+            # no interactive consumer (inside a subagent / headless).
+            if name == "AskUserQuestion":
+                try:
+                    spec = parse_question_spec(args)
+                except ValueError as exc:
+                    yield _finished(tcid, name, f"ERROR: {exc}", ok=False)
+                    continue
+                answer = yield _needs_input(spec)
+                if answer is None:
+                    yield _finished(tcid, name, ASK_NOT_AVAILABLE, ok=False)
+                    continue
+                yield _finished(tcid, name, format_answers_result(answer), ok=True)
+                continue
+
             try:
                 result = await asyncio.to_thread(
                     dispatch, name, args, store=self.store, executor=self, slot=self.slot
@@ -172,15 +214,26 @@ class Executor:
                 logger.exception("dispatch raised for {}", name)
                 result = f"ERROR: tool crashed: {exc}"
             ok = not (isinstance(result, str) and result.startswith("ERROR:"))
-            yield ToolEvent(
-                "tool_finished",
-                {
-                    "tool_call_id": tcid,
-                    "tool_name": name,
-                    "content": result,
-                    "ok": ok,
-                },
-            )
+            yield _finished(tcid, name, result, ok=ok)
+
+
+def _finished(tcid: str, name: str, content: str, *, ok: bool) -> ToolEvent:
+    """Build a ``tool_finished`` event (keeps dispatch_all branches terse)."""
+    return ToolEvent(
+        "tool_finished",
+        {"tool_call_id": tcid, "tool_name": name, "content": content, "ok": ok},
+    )
+
+
+def _needs_input(spec: Any) -> ToolEvent:
+    """Build a ``needs_user_input`` request event (v1.4.8).
+
+    Yielded by :py:meth:`Executor.dispatch_all`; the consumer (ContextManager)
+    drives it with ``gen.asend(answer)`` — passing an
+    :class:`~neutrix.prompts.Answer` if it has an interactive port, or ``None``
+    if not. The Executor never holds the port, so it never calls the UI.
+    """
+    return ToolEvent("needs_user_input", {"spec": spec})
 
 
 def _tree_kill(proc: subprocess.Popen, grace_seconds: float = 0.2) -> None:

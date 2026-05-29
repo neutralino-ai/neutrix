@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from neutrix.prompts import Answer, Option, Question, QuestionSpec
+
 # The argument a `Tool(pattern)` rule matches against, per tool.
 _PRIMARY_ARG = {
     "Bash": "command",
@@ -157,3 +159,65 @@ def block_reason(tool_name: str, verdict: str, mode: str = "default") -> str:
     if verdict == "ask":
         return f"[blocked: {tool_name} needs user approval — not run]"
     return f"[blocked: {tool_name} denied by permission rules]"
+
+
+# ----- interactive `ask` prompt (v1.4.8) --------------------------------------
+# When an interactive `ask_user` port exists, the `ask` verdict becomes a real
+# yes/always/no prompt routed through the shared QuestionSpec channel.
+
+USER_DENIED = "[blocked: user denied this call]"
+
+
+def permission_question(tool_name: str, args_json: str, verdict: str) -> QuestionSpec:
+    """Build the yes/always/no :class:`QuestionSpec` for an ``ask`` verdict."""
+    summary = _primary_value(tool_name, args_json).strip()
+    detail = f": {summary}" if summary else ""
+    if len(detail) > 80:
+        detail = detail[:77] + "…"
+    return QuestionSpec(
+        questions=(
+            Question(
+                question=f"Allow {tool_name}{detail}?",
+                header="Permission",
+                options=(
+                    Option("Yes", "run this call once", value="yes"),
+                    Option("Always", f"run and always allow {tool_name} like this",
+                           value="always"),
+                    Option("No", "block this call", value="no"),
+                ),
+                multi_select=False,
+            ),
+        )
+    )
+
+
+def verdict_from_answer(answer: Answer) -> str:
+    """Map the answer to a permission ``ask`` prompt → ``yes`` | ``always`` |
+    ``no``. Free-text / empty answers fail closed to ``no``."""
+    if not answer.per_question:
+        return "no"
+    qa = answer.per_question[0]
+    if qa.is_other or not qa.values:
+        return "no"
+    return qa.values[0]
+
+
+def apply_always_rule(
+    policy: PermissionPolicy, tool_name: str, args_json: str = "{}"
+) -> PermissionPolicy:
+    """Return a new policy with an ``allow`` rule for "always allow this".
+
+    Bash is scoped to the command's first token (``Bash(git *)``) rather than
+    granting all shell — the user approved *this kind* of command, not every
+    command. Other tools get a bare tool-name allow.
+    """
+    rule = tool_name
+    if tool_name == "Bash":
+        cmd = _primary_value("Bash", args_json).strip().split()
+        if cmd:
+            rule = f"Bash({cmd[0]} *)"
+    if rule in policy.allow:
+        return policy
+    return PermissionPolicy(
+        allow=(*policy.allow, rule), deny=policy.deny, ask=policy.ask
+    )

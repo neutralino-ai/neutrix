@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.4.8 splits — AskUserQuestion (interactive)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.4.8 splits — AskUserQuestion (interactive)</h1>
+<p class="tagline">A tool the model calls to pause the turn and ask the human a structured question — and the same channel upgrades permission <code>ask</code> from block-with-notice to a real prompt.</p>
+<p class="note">Decided autonomously under the <code>build-to-v2.0.0</code> /goal (user: "also add AskUserQuestion tool").
+The concurrency-bearing splits (#1, #4, #5, #6) are advisor-gated before push. CC survey:
+<code>tools/AskUserQuestionTool/AskUserQuestionTool.tsx</code> (schema 14-73, 1-4 Q / 2-4 opts, answers keyed by question text, multiSelect joined ", ", implicit Other),
+<code>hooks/toolPermission/handlers/interactiveHandler.ts</code> (canUseTool, onAbort 137-152),
+<code>FallbackPermissionRequest.tsx</code> (yes / always / no), <code>useCancelRequest.ts</code> (Esc aborts the turn).</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Channel — bidirectional async generator, port on the CM (not the Executor)</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Tool execution calls an injected <code>canUseTool</code>/interactive handler that <code>await</code>s a UI promise — all in one JS event loop, no threads (<code>interactiveHandler.ts</code>).</dd>
+<dt>The fork</dt><dd>The turn already runs on the main loop (the <code>_worker_loop</code> task); AskUserQuestion does zero compute, so no worker thread is involved either way. The real question is <em>who holds the UI port</em>: (a) inject it into the <code>Executor</code> (CC's <code>canUseTool</code> shape) and <code>await</code> it inside <code>dispatch_all</code>; or (b) keep the <code>Executor</code> a pure event leaf — it <em>yields</em> a <code>needs_user_input</code> event and receives the answer via the generator's <code>.asend()</code>, with the <strong>CM</strong> owning the port and driving the prompt.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — (b) bidirectional async generator; port on the ContextManager.</strong> Diverges from CC <em>on purpose</em>: (a) makes the Executor call <em>up</em> into the UI, a sideways edge that breaks this repo's <code>UI→store→CM→{LLM,Executor,Advisor}</code> layering (the Executor is supposed to only yield events, never call anyone). (b) keeps that invariant — <code>dispatch_all</code> does <code>answer = yield ToolEvent("needs_user_input", {spec})</code>; <code>_dispatch_tools</code> drives it with <code>gen.asend(await self.ask_user(spec))</code> (or <code>asend(None)</code> when no port). The Executor still builds the question spec and interprets the reply (pure functions) but <strong>never touches the UI</strong>. This is the idiomatic two-way generator (<em>not</em> an <code>asyncio.Queue</code> MQ — we want lockstep request-response with backpressure, not a decoupled buffer). <em>(User-surfaced mid-implementation: "did you do full layered separation?" + "async for + yield … MQ?" — the first design leaked, this is the fix.)</em></dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Selector UI — numbered in-flow, not an arrow-key list</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Arrow-key selectable <code>Select</code>/<code>SelectMulti</code> components (Ink), Space toggles checkboxes, page up/down (<code>use-select-navigation.ts</code>).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — numbered options + single-line answer.</strong> Reason: neutrix's renderer is append-only <code>console.print</code> scrollback with a one-line <code>prompt_toolkit</code> input; a full-screen arrow selector (<code>radiolist_dialog</code>) fights both the append-only log and the <code>output_patch</code> context. We print <code>1. label — description</code> lines and read one line: a number (single), comma-separated numbers (multi), or free text (Other). The <em>semantics</em> (pick one / pick many / Other) match CC exactly; only the input modality differs, justified by the architecture.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Render target — scrollback (durable), not the live region</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>The question and the chosen answer live in the transcript.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC — durable scrollback.</strong> The question block prints to scrollback when <code>ask_user</code> fires (it is a real exchange, like a user/assistant message); the answer is recorded as the tool result, which renders through the existing <code>role:tool</code> path. Not the <code>_above_input</code> live region (that is for ephemeral heartbeat/preview). The Q&A becomes part of the permanent log — and the <code>~/.claude/projects</code> JSONL, so ccusage/transcripts see it.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">4.</span><span class="name">Input routing while pending — orthogonal flag, 4-state machine unchanged</span><span class="badge decided">decided</span></div>
+<dl><dt>The fork</dt><dd>Add a 5th ContextManager state (<code>AWAITING_USER_INPUT</code>), or keep 4 states and route input by a separate flag.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>No CC analog (CC has no equivalent state enum) — orthogonal flag, minimal-state.</strong> The turn is conceptually still <code>AWAITING_EXECUTOR</code> (a tool is in flight; it just happens to await a human), so the state machine stays 4-state. <code>TerminalChat</code> holds <code>_pending_question</code> + an <code>asyncio.Future</code>; <code>_input_loop</code> checks it: when set, the next input line resolves the future (answer) instead of <code>enqueue_user</code>. Worker task (the turn) and input task coordinate via the Future on the <em>same loop</em> — cross-task, not cross-thread. Growing the state machine would ripple into every <code>state ==</code> guard (cancel, heartbeat, compaction); the flag is contained.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">5.</span><span class="name">Cancel while a question is pending</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Esc fires <code>onAbort</code> → cancels the tool use AND aborts the whole turn (<code>interactiveHandler.ts</code> 137-152; <code>useCancelRequest.ts</code>).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC — Esc aborts the turn, reusing the existing cancel path with near-zero new machinery.</strong> <code>ctx.cancel()</code> → <code>_do_cancel()</code> → <code>_drive_task.cancel()</code> raises <code>CancelledError</code> at the <code>await self.ask_user(spec)</code> point inside the CM's drive loop; it unwinds exactly like a cancelled tool and is caught by <code>_drive</code>'s existing <code>except CancelledError</code>. The AskUserQuestion tool_call is left without a <code>role:tool</code> result — but <strong>that orphan is already repaired</strong> by <code>llm.py</code>'s pairing layer (synthesizes a placeholder; <code>[interrupted by user]</code> after it reads as cancelled). Two small additions: the UI <code>_ask_user</code>'s <code>finally</code> clears <code>_pending_question</code> so the input loop stops routing to a dead Future, and <code>_dispatch_tools</code>' <code>finally</code> <code>await gen.aclose()</code>s the executor generator parked at its <code>needs_user_input</code> yield. No new cancel code, no orphan handling.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">6.</span><span class="name">Permission <code>ask</code> unification — share the whole channel</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Permission prompts and AskUserQuestion are separate components that share a <code>Select</code> widget and the same abort channel (<code>FallbackPermissionRequest.tsx</code>: yes / yes-don't-ask-again / no).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — share the entire <code>ask_user</code> channel, not just a widget.</strong> v1.4.0's <code>ask</code> verdict is block-with-notice (no interactivity yet). v1.4.8 upgrades it: when <code>decide()</code> returns <code>ask</code> and a port exists, <code>dispatch_all</code> calls <code>ask_user</code> with a yes/no/always question; "yes" runs the tool, "always" runs it and appends an <code>allow</code> rule to the session policy, "no" blocks with the model-readable notice. SOLID win: one interactive channel for both. Falls back to v1.4.0 block-with-notice when the port is None (split #7).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">7.</span><span class="name">Headless / subagent fallback — <code>ask_user</code> is None</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Always interactive (a human REPL); a subagent's tool set excludes interactive prompts.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>No CC analog — explicit non-interactive fallback.</strong> When the port is None (tests, piped stdin, and crucially <em>inside a subagent</em> — a subagent has no terminal of its own): AskUserQuestion returns a tool error <code>[AskUserQuestion needs an interactive terminal — not available here]</code>; the permission <code>ask</code> path stays block-with-notice (v1.4.0). AskUserQuestion is excluded from <code>subagent_tool_names()</code> so a subagent never even sees it (matches CC excluding it from sub-agent tool sets). Rationale: a sub-turn that blocks forever on a human who can't answer is a deadlock; fail fast and visibly.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">8.</span><span class="name">Schema + answer encoding</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>1-4 questions, 2-4 options each, unique question/option text, <code>header</code> ≤12 chars, <code>multiSelect</code> default false, implicit Other; returns <code>{questions, answers:{questionText→label(s)}}</code>, multiSelect joined ", " (<code>AskUserQuestionTool.tsx</code> 14-73).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> Same bounds and validation; ask the questions sequentially (print Q1 options, read, Q2…). Return a readable result keyed by question text, multiSelect labels joined ", ", Other → the verbatim free text. Drop the <code>preview</code> field (a terminal can't render side-by-side markdown previews — a YAGNI omission, restorable later).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">9.</span><span class="name">Answer parsing rule — Other detection &amp; empty input</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>No CC analog (CC has an explicit Other affordance; numbered input needs a parse rule).</strong> Input that is entirely comma-separated integers all in <code>[1..N]</code> → those option labels (one for single-select; for single-select with multiple numbers, take the first). Anything else (non-numeric, out-of-range, mixed) → Other, recorded as the verbatim text. Empty input while a question is pending → re-prompt the same question (do not abort; abort is Esc, split #5). Whitespace trimmed.</dd></dl></div>
+
+<footer>v1.4.8 AskUserQuestion · 9 split points · bidirectional async generator (<code>yield needs_user_input</code> / <code>gen.asend(answer)</code>),
+port on the <strong>ContextManager</strong> so the Executor stays a pure event leaf (UI→CM→Executor layering intact) ·
+numbered in-flow selector · durable scrollback · 4-state machine unchanged · cancel reuses the pairing-layer repair + <code>aclose</code> ·
+permission <code>ask</code> upgraded to a real prompt. <em>Split #1 reworked mid-implementation after the user flagged the layering leak.</em></footer>
+</body></html>

@@ -136,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     from neutrix.terminal_chat import TerminalChat
 
     chat = TerminalChat(ctx, config=config, render_markdown=not args.no_markdown)
+    # v1.4.8: give the ContextManager the interactive port so AskUserQuestion and
+    # the permission `ask` verdict can reach the human. The CM is the only layer
+    # that holds it (the Executor stays a pure event leaf); None everywhere else.
+    ctx.ask_user = chat._ask_user
     chat.run()
     return 0
 

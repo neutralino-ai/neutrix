@@ -61,9 +61,12 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from neutrix.prompts import AskUserPort
 
 from neutrix.compaction import (
     CompactionOutcome,
@@ -226,6 +229,11 @@ class ContextManager:
     # chat, which passes neither.
     tool_names: frozenset[str] | None = None
     max_rounds: int | None = None
+    # v1.4.8 interactive port (CC's `canUseTool` role). Injected by the UI
+    # (TerminalChat); the CM is the ONLY layer that holds it, so the Executor
+    # stays a pure event leaf. None everywhere non-interactive (tests, piped
+    # stdin, inside a subagent) → AskUserQuestion / permission `ask` degrade.
+    ask_user: AskUserPort | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     cancel_reason: CancelReason = field(default="user", init=False)
@@ -804,45 +812,74 @@ class ContextManager:
         return assistant_msg
 
     async def _dispatch_tools(self, tool_calls: list[dict[str, str]]) -> None:
-        """Iterate executor events and apply each to messages + store.
+        """Drive the executor's event stream and apply each event to messages.
 
-        Sequential — the executor yields tool_started/tool_finished in
-        order. We append a ``role:tool`` message on each tool_finished
-        so the next LLM round sees the results in their proper place.
+        The executor is a bidirectional async generator (v1.4.8): it yields
+        ``tool_started`` / ``tool_finished`` like before, and — for the
+        interactive AskUserQuestion tool or a permission ``ask`` verdict — a
+        ``needs_user_input`` event. The CM is the ONLY layer that holds the
+        ``ask_user`` port: it resolves the prompt (via the UI) and feeds the
+        :class:`~neutrix.prompts.Answer` back in with ``gen.asend(answer)``
+        (``None`` when there is no interactive consumer). The Executor never
+        calls the UI; it only yields and receives on its own channel, so
+        UI→CM→Executor layering holds. Sequential — results append in order.
         """
-        async for event in self.executor.dispatch_all(tool_calls):
-            if not isinstance(event, ToolEvent):  # pragma: no cover - defensive
-                continue
-            data = event.data
-            if event.kind == "tool_started":
-                self.store.add_pending_tool_call(
-                    str(data.get("tool_name") or ""),
-                    str(data.get("args") or ""),
-                )
-            elif event.kind == "tool_finished":
-                tool_name = str(data.get("tool_name") or "")
-                tool_call_id = str(data.get("tool_call_id") or "")
-                content = str(data.get("content") or "")
-                self.store.remove_pending_tool_call(tool_name)
-                tool_msg: dict[str, Any] = {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": content,
-                }
-                self.messages.append(tool_msg)
-                self.store.append_message(
-                    MessageRecord(
-                        role="tool",
-                        content=content,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
+        gen = self.executor.dispatch_all(tool_calls)
+        send: Any = None
+        try:
+            while True:
+                try:
+                    event = await gen.asend(send)
+                except StopAsyncIteration:
+                    return
+                send = None
+                if not isinstance(event, ToolEvent):  # pragma: no cover - defensive
+                    continue
+                data = event.data
+                if event.kind == "needs_user_input":
+                    # Relay to the human (CM owns the port); the answer (or None
+                    # when non-interactive) is sent back on the next asend.
+                    spec = data.get("spec")
+                    send = await self.ask_user(spec) if self.ask_user is not None else None
+                    continue
+                if event.kind == "tool_started":
+                    self.store.add_pending_tool_call(
+                        str(data.get("tool_name") or ""),
+                        str(data.get("args") or ""),
                     )
-                )
-            if self.state == State.CANCELLING:
-                # Stop processing further events; abandoning the
-                # generator is OK because executor.cancel() already
-                # tree-killed subprocesses.
-                return
+                elif event.kind == "tool_finished":
+                    tool_name = str(data.get("tool_name") or "")
+                    tool_call_id = str(data.get("tool_call_id") or "")
+                    content = str(data.get("content") or "")
+                    self.store.remove_pending_tool_call(tool_name)
+                    tool_msg: dict[str, Any] = {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": content,
+                    }
+                    self.messages.append(tool_msg)
+                    self.store.append_message(
+                        MessageRecord(
+                            role="tool",
+                            content=content,
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                        )
+                    )
+                if self.state == State.CANCELLING:
+                    # Stop processing further events; abandoning the
+                    # generator is OK because executor.cancel() already
+                    # tree-killed subprocesses.
+                    return
+        finally:
+            # Close the suspended generator (e.g. cancel mid-prompt left it
+            # parked at a `needs_user_input` yield) so it unwinds cleanly.
+            # Best-effort: a re-delivered CancelledError (BaseException) still
+            # propagates; only mundane cleanup errors are swallowed.
+            try:
+                await gen.aclose()
+            except Exception:
+                pass
 
     # --------------------------------------------------- mutation helpers
 
