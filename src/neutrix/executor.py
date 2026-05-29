@@ -21,14 +21,18 @@ import asyncio
 import os
 import signal
 import subprocess
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from neutrix.store import ChatStore
 from neutrix.tools import dispatch
+
+if TYPE_CHECKING:
+    from neutrix.config import Slot
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,11 @@ class Executor:
     """
 
     store: ChatStore | None = None
+    # Set by ContextManager at wiring time; forwarded to tools that declare a
+    # ``slot`` kwarg (v0.10.0 ``Agent`` builds its subagent LLM from it).
+    slot: Slot | None = None
     _pool: list[subprocess.Popen] = field(default_factory=list, repr=False)
+    _cancel_events: list[threading.Event] = field(default_factory=list, repr=False)
     _cancel_requested: bool = field(default=False, repr=False)
 
     def register_cancellable(self, proc: subprocess.Popen) -> None:
@@ -62,6 +70,21 @@ class Executor:
     def unregister_cancellable(self, proc: subprocess.Popen) -> None:
         try:
             self._pool.remove(proc)
+        except ValueError:
+            pass
+
+    def register_cancel_event(self, event: threading.Event) -> None:
+        """Register a cross-loop cancel token (v0.10.0 subagent bridge).
+
+        The ``Agent`` tool runs its subagent on a worker-thread event loop;
+        an :class:`asyncio.Event` can't cross loops, so the subagent watcher
+        polls this :class:`threading.Event`, which :py:meth:`cancel` sets.
+        """
+        self._cancel_events.append(event)
+
+    def unregister_cancel_event(self, event: threading.Event) -> None:
+        try:
+            self._cancel_events.remove(event)
         except ValueError:
             pass
 
@@ -82,6 +105,10 @@ class Executor:
         for proc in list(self._pool):
             _tree_kill(proc)
         self._pool.clear()
+        # Trip every registered subagent cancel token so its watcher (on
+        # another event loop) wakes and unwinds the subagent.
+        for event in list(self._cancel_events):
+            event.set()
 
     async def dispatch_all(
         self,
@@ -111,7 +138,7 @@ class Executor:
             )
             try:
                 result = await asyncio.to_thread(
-                    dispatch, name, args, store=self.store, executor=self
+                    dispatch, name, args, store=self.store, executor=self, slot=self.slot
                 )
             except Exception as exc:  # pragma: no cover - dispatch itself catches
                 logger.exception("dispatch raised for {}", name)

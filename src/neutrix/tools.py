@@ -5,11 +5,14 @@ a confirmation prompt that the TUI surfaces to the user.
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
 import json
 import os
 import subprocess
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,7 +22,18 @@ from loguru import logger
 from neutrix.store import ChatStore
 
 if TYPE_CHECKING:
+    from neutrix.config import Slot
     from neutrix.executor import Executor
+
+# v0.10.0 recursion backstop. A contextvar (NOT threading.local): the subagent
+# dispatches its own tools via ``asyncio.to_thread``, which copies the current
+# context across the thread boundary, so this flag propagates into any nested
+# ``Agent`` dispatch even though it runs on a different thread. Schema-scoping
+# (the subagent never sees ``Agent``) is primary; this catches the rare model
+# that calls an unlisted tool.
+_inside_subagent: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "neutrix_inside_subagent", default=False
+)
 
 # Status names the LLM may pass to TaskUpdate. Matches Claude Code's
 # `TaskUpdateStatusSchema().or(z.literal("deleted"))` shape — "deleted"
@@ -332,6 +346,91 @@ def _task_list(*, store: ChatStore | None = None) -> str:
     return json.dumps(items)
 
 
+_AGENT_DESCRIPTION = """\
+Dispatch a fresh-context sub-agent to complete one self-contained task and return its result.
+
+The sub-agent runs with its own conversation and tools, works the task to completion, and returns ONLY its final answer — so your own context grows by just that answer, not by all the intermediate work. Use this to delegate focused, context-heavy sub-tasks (read and summarize many files, explore a part of the codebase, draft something from gathered material) without inflating this conversation.
+
+## When to use
+- A sub-task needs to read/inspect a lot of material but you only need the conclusion.
+- Exploratory work whose intermediate steps don't need to live in this conversation.
+
+## When NOT to use
+- A single quick tool call you can make yourself.
+- Work that needs your full conversation context to make sense.
+
+Notes: the sub-agent cannot ask you questions (it runs unattended) and cannot itself dispatch sub-agents (single level). Only `general-purpose` is available.
+"""
+
+
+def _agent(
+    description: str,
+    prompt: str,
+    subagent_type: str = "general-purpose",
+    *,
+    executor: Executor | None = None,
+    slot: Slot | None = None,
+) -> str:
+    """Dispatch a subagent and return its final text (v0.10.0).
+
+    Sync (runs in the executor's worker thread); drives the async subagent
+    via ``asyncio.run`` on this thread's own event loop. Builds a fresh LLM
+    from the parent ``slot`` to avoid sharing the parent's loop-bound client.
+    """
+    if _inside_subagent.get():
+        return (
+            "ERROR: Agent cannot be called from inside a sub-agent "
+            "(sub-agents are single-level — complete the task with your own tools)"
+        )
+    if subagent_type != "general-purpose":
+        return (
+            f"ERROR: unknown subagent_type {subagent_type!r}; "
+            "only 'general-purpose' is supported"
+        )
+    if not prompt:
+        return "ERROR: prompt is required"
+    if slot is None:
+        return "ERROR: Agent is unavailable (no slot wired to the executor)"
+
+    from neutrix.llm import CANCELLED_TOOL_RESULT, OpenAIChatLLM
+    from neutrix.subagent import run_subagent
+
+    llm = OpenAIChatLLM(slot)
+    cancel_event = threading.Event()
+    if executor is not None:
+        executor.register_cancel_event(cancel_event)
+    token = _inside_subagent.set(True)
+    try:
+        result = asyncio.run(
+            run_subagent(
+                user_prompt=prompt,
+                slot=slot,
+                llm=llm,
+                tool_names=subagent_tool_names(),
+                cancel_event=cancel_event,
+            )
+        )
+    finally:
+        _inside_subagent.reset(token)
+        if executor is not None:
+            executor.unregister_cancel_event(cancel_event)
+
+    if result.cancelled:
+        return CANCELLED_TOOL_RESULT
+    if result.error:
+        return f"[subagent error: {result.error}]"
+    return result.final_text
+
+
+def subagent_tool_names() -> frozenset[str]:
+    """The tool allowlist a subagent gets: every builtin except ``Agent``.
+
+    Omitting ``Agent`` from what the subagent's LLM can see makes recursion
+    structurally impossible (v0.10.0 split #3).
+    """
+    return frozenset(BUILTIN_TOOLS) - {"Agent"}
+
+
 # ----- registry ---------------------------------------------------------------
 
 
@@ -452,11 +551,46 @@ BUILTIN_TOOLS: dict[str, Tool] = {
         },
         func=_task_list,
     ),
+    "Agent": Tool(
+        name="Agent",
+        description=_AGENT_DESCRIPTION,
+        parameters={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A short (3-5 word) description of the task",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "The task for the sub-agent to perform",
+                },
+                "subagent_type": {
+                    "type": "string",
+                    "description": (
+                        "The type of sub-agent (only 'general-purpose' is supported)"
+                    ),
+                    "default": "general-purpose",
+                },
+            },
+            "required": ["description", "prompt"],
+        },
+        func=_agent,
+    ),
 }
 
 
-def get_schemas() -> list[dict[str, Any]]:
-    return [t.schema() for t in BUILTIN_TOOLS.values()]
+def get_schemas(names: Collection[str] | None = None) -> list[dict[str, Any]]:
+    """Return tool schemas, optionally scoped to ``names``.
+
+    ``names=None`` (the default) returns every builtin — the main chat's
+    behavior. A subagent passes an allowlist that omits ``Agent`` so it
+    never sees the tool that would spawn another (v0.10.0 split #3).
+    Unknown names in the set are ignored.
+    """
+    if names is None:
+        return [t.schema() for t in BUILTIN_TOOLS.values()]
+    return [t.schema() for name, t in BUILTIN_TOOLS.items() if name in names]
 
 
 def dispatch(
@@ -465,6 +599,7 @@ def dispatch(
     *,
     store: ChatStore | None = None,
     executor: Executor | None = None,
+    slot: Slot | None = None,
 ) -> str:
     """Look up ``name`` in the registry and call it with parsed JSON args.
 
@@ -495,6 +630,8 @@ def dispatch(
             args.setdefault("store", store)
         if "executor" in signature.parameters:
             args.setdefault("executor", executor)
+        if "slot" in signature.parameters:
+            args.setdefault("slot", slot)
     try:
         return tool.func(**args)
     except TypeError as e:

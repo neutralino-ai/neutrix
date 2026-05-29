@@ -4,6 +4,34 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v0.10.0] — 2026-05-29
+
+### Added
+- **Subagent framework — the `Agent` tool.** The LLM can now dispatch a
+  fresh-context worker — `Agent(description, prompt, subagent_type="general-purpose")`
+  — that runs its own LLM/tool loop to completion and returns only its final
+  text, so the controller's context grows by one `tool_result` instead of by
+  the whole sub-task (the structural answer to context-explode). New
+  `src/neutrix/subagent.py` (`run_subagent` + `SubagentResult`) reuses
+  `ContextManager` for the loop; the worker gets its own `ChatStore`,
+  `Executor`, and a tool allowlist that omits `Agent` (recursion is
+  structurally impossible, with a `contextvar` backstop). Runs to completion
+  behind the parent's heartbeat; final text capped at 100k chars; bounded by a
+  25-round runaway cap. Esc stops the worker's burn via a cross-loop
+  `threading.Event`; the `[cancelled by user]` marker reaches the parent
+  through the existing v0.9.3 cancel path. First release on the march to v1.0.
+  (12 split-point decisions, all autonomous under a delegating `/goal` —
+  see [docs/splits/v0.10.0-subagent.html](docs/splits/v0.10.0-subagent.html).)
+
+### Changed
+- `ContextManager` gains two opt-in fields used by subagents (both default to
+  the prior main-chat behavior): `tool_names` (scope which tool schemas are
+  advertised) and `max_rounds` (cap the drive loop). `Executor` carries the
+  active `slot` and registers cross-loop cancel tokens; `get_schemas()` and
+  `dispatch()` accept an optional tool-name scope / `slot`.
+
+See [docs/PRDs/v0.10.0-subagent.md](docs/PRDs/v0.10.0-subagent.md).
+
 ## [v0.9.8] — 2026-05-28
 
 ### Changed

@@ -190,6 +190,14 @@ class ContextManager:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     use_tools: bool = True
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # v0.10.0 subagent support. ``tool_names`` (None = all builtins) scopes
+    # which tool schemas ``_call_llm`` advertises — a subagent omits ``Agent``
+    # so recursion is structurally impossible. ``max_rounds`` (None =
+    # unbounded) caps the ``_drive`` LLM-round loop so an unattended subagent
+    # cannot run away. Both default to the pre-v0.10.0 behavior for the main
+    # chat, which passes neither.
+    tool_names: frozenset[str] | None = None
+    max_rounds: int | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     cancel_reason: CancelReason = field(default="user", init=False)
@@ -206,8 +214,11 @@ class ContextManager:
             for msg in self.messages:
                 self.store.append_message(_record_from_openai(msg))
         # Executor sees the store too — Task* tools dispatched on a
-        # background thread need it.
+        # background thread need it. It also carries the slot so the
+        # dispatch layer can forward it to tools that declare it (v0.10.0
+        # ``Agent`` builds a subagent LLM from the parent slot).
         self.executor.store = self.store
+        self.executor.slot = self.slot
 
     # ------------------------------------------------------------------ queries
 
@@ -457,6 +468,7 @@ class ContextManager:
         awaiting :py:meth:`_handle_user_message` returns normally
         rather than propagating the cancellation up to the UI.
         """
+        rounds = 0
         try:
             while True:
                 self.state = State.AWAITING_LLM
@@ -490,9 +502,22 @@ class ContextManager:
                     return
 
                 self._append_assistant_message(assistant_msg)
+                rounds += 1
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 if not tool_calls:
+                    return
+
+                # Runaway guard (v0.10.0): an unattended subagent caps its
+                # LLM rounds. On the cap we stop BEFORE dispatching this
+                # round's tools, leaving the last assistant message with
+                # unanswered tool_calls — run_subagent reads that as
+                # "hit the limit before finishing". None = unbounded (the
+                # main chat), so behavior there is unchanged.
+                if self.max_rounds is not None and rounds >= self.max_rounds:
+                    logger.warning(
+                        "drive loop hit max_rounds={} — stopping", self.max_rounds
+                    )
                     return
 
                 self.state = State.AWAITING_EXECUTOR
@@ -577,7 +602,7 @@ class ContextManager:
 
     async def _call_llm(self) -> dict[str, Any]:
         """Make one LLM round; return the assistant message dict."""
-        tools = get_schemas() if self.effective_tools_enabled() else None
+        tools = get_schemas(self.tool_names) if self.effective_tools_enabled() else None
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
         async for event in self.llm.stream_response(
             model=self.slot.model,

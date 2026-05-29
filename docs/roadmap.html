@@ -258,8 +258,7 @@
     </small>
   </span>
   <span class="badges">
-    <span class="badge p0">P0</span>
-    <span class="badge inflight">awaiting accept</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 
@@ -286,8 +285,7 @@
     </small>
   </span>
   <span class="badges">
-    <span class="badge p0">P0</span>
-    <span class="badge inflight">awaiting accept</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 
@@ -296,18 +294,19 @@
   <span class="theme">
     Subagent framework (<code>Agent</code> tool)
     <small>
-      User-reported urgent for v1.0 (context-explode structural fix).
-      CC analog: the <code>Agent</code> tool that spawns a fresh-context
-      worker, runs it to completion, returns the final assistant text.
-      Each subagent owns its own <code>ContextManager</code>; the
-      parent's context grows by one tool-result line, not by the
-      subagent's full transcript. Visible in the parent transcript
-      as a folded <code>[subagent]</code> block; cancellable via Esc.
+      Context-explode structural fix. <code>Agent(description, prompt)</code>
+      spawns a fresh-context worker that reuses <code>ContextManager</code>,
+      runs to completion, and returns only its final text — the parent's
+      context grows by one tool-result, not the worker's transcript. Worker
+      tools omit <code>Agent</code> (no recursion); 100k result cap; 25-round
+      runaway cap; Esc stops the burn via a cross-loop <code>threading.Event</code>
+      (cancel reaches the parent through the v0.9.3 path). Renders as a normal
+      tool result — the dedicated folded block moves to v0.10.2 (split #5).
+      Implemented + tested (suite 248). (<a href="splits/v0.10.0-subagent.html">12 split-point decisions</a>.)
     </small>
   </span>
   <span class="badges">
-    <span class="badge p0">P0</span>
-    <span class="badge planned">skeleton</span>
+    <span class="badge shipped">shipped</span>
   </span>
 </div>
 

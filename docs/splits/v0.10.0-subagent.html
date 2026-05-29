@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>v0.10.0 splits — subagent framework (Agent tool)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --fg: #1a1a1a; --muted: #6a6a6a; --dim: #9a9a9a; --bg: #fafaf7;
+    --card: #ffffff; --border: #e3e3dc; --accent: #b14a00;
+    --open: #b14a00; --decided: #2f7d32;
+  }
+  html { background: var(--bg); }
+  body {
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg); max-width: 920px; margin: 0 auto; padding: 32px 24px 80px;
+  }
+  h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); margin: 0 0 8px; font-size: 14px; }
+  .note { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 32px 0 12px; font-weight: 600;
+  }
+  .split {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 16px 18px; margin: 0 0 14px;
+  }
+  .split.flag { border-color: var(--accent); border-width: 2px; }
+  .split .head {
+    display: grid; grid-template-columns: 36px 1fr auto; gap: 12px;
+    align-items: baseline; margin-bottom: 10px;
+  }
+  .split .num { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .split .name { font-weight: 600; color: var(--fg); }
+  .badge {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 3px 8px; border-radius: 3px; font-weight: 600; white-space: nowrap;
+  }
+  .badge.open    { color: var(--open);    background: #fbeada; }
+  .badge.decided { color: var(--decided); background: #e8f3e9; }
+  .split dl { display: grid; grid-template-columns: 130px 1fr; gap: 4px 16px; margin: 0; font-size: 14px; }
+  .split dt {
+    color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.06em; padding-top: 5px;
+  }
+  .split dd { margin: 0 0 8px; color: var(--fg); }
+  .split dd ul { margin: 4px 0; padding-left: 20px; }
+  .split dd li { margin-bottom: 2px; }
+  .split .decision { color: var(--decided); }
+  .split .recommend { color: var(--accent); }
+  .quote { color: var(--muted); font-style: italic; }
+  code, .cite {
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    background: #f1f0eb; padding: 1px 4px; border-radius: 3px;
+  }
+  footer {
+    color: var(--dim); font-size: 12px; margin-top: 48px;
+    border-top: 1px solid var(--border); padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>v0.10.0 splits — subagent framework (Agent tool)</h1>
+<p class="tagline">
+  An <code>Agent</code> tool that spawns a fresh-context worker (its own
+  <code>ContextManager</code> + message list + tool set), runs the LLM/tool
+  loop to completion, and returns only the final text — so the parent's
+  context grows by one <code>tool_result</code> instead of by the whole
+  sub-task. The structural answer to context-explode.
+</p>
+<p class="note">
+  Per <code>.claude/rules/prd-compare-with-claude.md</code>, this is the
+  durable record of the split discussion that precedes the PRD. CC source
+  under <code>/datafs/users/dingxf/anthropic/cc2/src</code>.
+  <strong>Authored and decided autonomously under a <code>/goal</code> that
+  delegated all human options ("you make decisions for me, including whether
+  or not to push").</strong> Every Decision below is the agent's own call,
+  recorded for later audit. Labels: Follow CC / Alternative / User-directed /
+  No CC analog.
+</p>
+
+<h2>CC survey — what Claude Code does (one block)</h2>
+<div class="split">
+  <div class="head"><span class="num">★</span><span class="name">CC Agent/Task dispatch, summarized</span><span class="badge decided">survey</span></div>
+  <dl>
+    <dt>Schema</dt>
+    <dd>
+      <code>Agent(description, prompt, subagent_type?, model?, run_in_background?,
+      name?, team_name?, mode?, isolation?, cwd?)</code> — a wide schema that
+      also covers background/teammate/worktree spawning.
+      <code>tools/AgentTool/AgentTool.tsx:82-138</code>.
+    </dd>
+    <dt>Isolation</dt>
+    <dd>
+      <code>createSubagentContext()</code> — fresh messages / readFileState /
+      AbortController (a <em>child</em> linked to the parent), inherits tools /
+      model / system prompt; opt-in flags re-share state for interactive
+      agents. <code>utils/forkedAgent.ts:253-330</code>.
+    </dd>
+    <dt>Allowlist</dt>
+    <dd>
+      <code>filterToolsForAgent()</code> blocks <code>Agent</code> itself
+      (recursion), <code>ExitPlanMode</code>, <code>AskUserQuestion</code>,
+      <code>TaskOutput</code>, etc.; async agents get a strict whitelist.
+      <code>tools/AgentTool/agentToolUtils.ts:70-116</code>.
+    </dd>
+    <dt>Return</dt>
+    <dd>
+      Structured <code>AgentToolResult</code> — <strong>text content only</strong>
+      from the last assistant message, plus token/tool-use/duration metrics;
+      capped at <code>maxResultSizeChars = 100_000</code>.
+      <code>agentToolUtils.ts:227-357</code>, <code>AgentTool.tsx:229</code>.
+    </dd>
+    <dt>Progress</dt>
+    <dd>
+      Sync agents stream <code>onProgress</code> per message to the parent UI
+      (folded inline); async agents return a launch stub and are polled.
+      <code>AgentTool.tsx:1084-1122</code>.
+    </dd>
+    <dt>Cancel</dt>
+    <dd>
+      AbortController chain — sync agents share the parent's controller (ESC
+      aborts both); async agents get an isolated one (survive parent ESC).
+      <code>AgentTool.tsx:1127-1220</code>.
+    </dd>
+    <dt>Concurrency</dt>
+    <dd>
+      No multi-spawn API; the model emits several <code>Agent</code> tool_use
+      blocks in one message and the orchestrator runs them in parallel.
+      <code>tools/AgentTool/prompt.ts:248,271</code>.
+    </dd>
+    <dt>Errors / turns</dt>
+    <dd>
+      <code>maxTurns</code> per agent type; on limit the loop exits and
+      finalizes a partial result; on error, partial text is recovered if any
+      assistant messages exist, else re-thrown. <code>runAgent.ts:756,773</code>.
+    </dd>
+  </dl>
+</div>
+
+<h2>Split points</h2>
+
+<div class="split">
+  <div class="head"><span class="num">1.</span><span class="name">Tool schema — how wide</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>10-field schema (description, prompt, subagent_type, model, run_in_background, name, team_name, mode, isolation, cwd). <code>AgentTool.tsx:82-138</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Mirror CC's full schema (carries fields for features we don't ship).</li>
+        <li>Minimal CC-shaped core: <code>description</code>, <code>prompt</code>, <code>subagent_type="general-purpose"</code>.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Minimal CC-shaped core — the three fields that map onto v0.10.0 scope; <code>model</code>/<code>run_in_background</code>/<code>isolation</code>/teammate fields are non-goals (YAGNI).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — minimal CC-shaped core.</strong> <code>Agent(description: str, prompt: str, subagent_type: str = "general-purpose")</code>. Same field names/semantics as CC's first three; the rest are deliberately omitted as out-of-scope. <code>subagent_type</code> is accepted but only <code>general-purpose</code> is valid in v0.10.0 (others → error), so the field is forward-compatible without shipping specialization.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">2.</span><span class="name">Execution model — own ContextManager vs bespoke loop</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>A forked <em>context</em> drives the same query engine the parent uses; not a separate loop implementation. <code>forkedAgent.ts</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Spin up a full <code>ContextManager</code> instance per subagent (reuse cancel/round/tool-dispatch).</li>
+        <li>Write a thin standalone LLM/tool loop in <code>subagent.py</code> (no CM).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Reuse <code>ContextManager</code> (DRY/SOLID): the LLM round, tool dispatch, cancel-and-wait, and tool-round-boundary logic already live there and are tested. A bespoke loop would duplicate that surface and drift.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC (semantics) — reuse <code>ContextManager</code>.</strong> <code>run_subagent()</code> builds a fresh <code>ContextManager</code> with its own <code>ChatStore</code>, the subagent system prompt, the filtered tool set, and the <em>parent's</em> <code>llm</code>/<code>executor</code>; submits the user prompt; drives the existing round loop until IDLE with a final assistant text + no pending tool calls; returns that text. No new loop is written.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">3.</span><span class="name">Tool allowlist — what the subagent may call</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Inherits parent tools minus a disallow-set; <code>Agent</code> itself is blocked (no recursion). <code>agentToolUtils.ts:70-116</code>, recursion guard <code>AgentTool.tsx:332</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Inherit the full parent tool set minus <code>Agent</code>.</li>
+        <li>Hand-pick a read-only subset (Read/Grep/Glob/…).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Inherit parent tools minus <code>Agent</code> — matches CC, keeps the worker capable, and the single removal enforces the single-level non-goal.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC, with a runtime backstop.</strong> The subagent's <code>ContextManager</code> gets a <code>tool_names</code> allowlist = parent builtin tools minus <code>Agent</code>; <code>_call_llm</code> advertises only those schemas, so the subagent never <em>sees</em> the tool that spawns another (recursion structurally impossible). Belt-and-suspenders for the rare model that calls an unlisted tool: a <code>threading.local</code> "inside a subagent" flag set across <code>run_subagent</code> and checked at the top of the <code>Agent</code> tool func — if already inside, return an <code>ERROR:</code> string (~5 lines, closes the single-level non-goal even if scoping is bypassed).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">4.</span><span class="name">Return packaging + size cap</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Final assistant text only, capped at <code>100_000</code> chars; metrics travel out-of-band, not in the tool_result text. <code>agentToolUtils.ts:229,276</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Return final text only (PRD), uncapped.</li>
+        <li>Return final text only, capped to protect the parent's context (the whole point of subagents).</li>
+        <li>Return text + structured metrics inline.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Final text only, <strong>capped</strong>. An uncapped return defeats the context-budget goal if the subagent's answer is huge; metrics belong in the (separate) render summary, not the LLM-visible result.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC.</strong> <code>SubagentResult(final_text, turn_count, cancelled, error)</code> is the internal struct; the <code>tool_result</code> content the parent LLM sees is <code>final_text</code> only, truncated to <code>SUBAGENT_MAX_RESULT_CHARS = 100_000</code> with a <code>"…[truncated]"</code> suffix when exceeded. <code>turn_count</code>/<code>chars</code> feed the render summary (split #5), not the LLM.</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">5.</span><span class="name">Rendering at v0.10.0 — before v0.10.2's Ctrl+E fold exists</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Folds the subagent's messages inline, default-collapsed, with a summary line and an expand affordance. <code>AgentTool.tsx:1084-1122</code>.</dd>
+    <dt>The constraint</dt>
+    <dd>
+      The PRD wants a default-folded block with <code>Ctrl+E</code> expand "per
+      visibility parity" — but that fold machinery is <strong>v0.10.2</strong>,
+      which ships <em>after</em> this release (strict numeric tag order, so
+      v0.10.0's tag must precede v0.10.2's). The fold widget does not exist yet.
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Print the subagent's full transcript inline, unfolded (noisy; the opposite of the context-saving intent visually).</li>
+        <li>Print a one-line forward summary now; retrofit the <code>Ctrl+E</code> fold/expand when v0.10.2 lands.</li>
+        <li>Build a throwaway minimal fold now, replaced at v0.10.2.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">One-line forward summary now (the v0.9.6 <code>/compact</code> / v0.9.7 <code>/rewind</code> notice pattern), fold retrofit at v0.10.2. Smallest correct surface; no throwaway widget.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — defer ALL bespoke subagent rendering to v0.10.2 (refined post-advisor).</strong> In v0.10.0 the <code>Agent</code> tool's final text is returned as the <code>tool_result</code> and renders through the <em>existing</em> tool-result path (foldable like any tool result) — <strong>zero</strong> <code>terminal_chat.py</code> changes this release. The dedicated folded block with turn count / <code>Ctrl+E</code> is v0.10.2 (visibility parity), which owns the fold machinery and will extend <code>run_subagent</code>'s return shape as needed. The originally-planned <code>↳ subagent — N turns</code> notice is dropped from v0.10.0 because turn-count is not carried on the append-only tool-result path and plumbing it now is throwaway. See split #12 for why the full per-round transcript is <em>not</em> retained.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">6.</span><span class="name">Live progress vs batch while the subagent runs</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Sync agents stream progress live per message. <code>AgentTool.tsx:1111</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Stream the subagent's rounds into the parent transcript live.</li>
+        <li>Show only a "working" liveness indicator while it runs; print the summary on completion.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Liveness indicator only. Live streaming needs the v0.10.1 streaming path and the v0.10.2 fold to not be a wall of text; both ship later. The PRD already lists "streaming subagent output" as a non-goal.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC intent, deferred mechanism.</strong> While the subagent runs, the parent's existing v0.9.8 heartbeat shows liveness (state stays <code>AWAITING_EXECUTOR</code> during the tool call, which already drives the dot). No live sub-transcript in v0.10.0. The summary notice (split #5) is the only new print. Matches the PRD non-goal "streaming subagent output to the parent."</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">7.</span><span class="name">Cancellation — Esc during a subagent run</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Sync agent shares the parent AbortController; ESC aborts the child; the tool call ends. <code>AgentTool.tsx:1127</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Esc cancels the whole parent turn (subagent dies with it, no result).</li>
+        <li>Esc cancels only the subagent; the parent receives <code>[cancelled by user]</code> as the tool_result and continues under cancel-as-steer (v0.9.3).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Cancel-the-subagent-then-steer — matches the PRD Goal #4 and reuses the shipped v0.9.3 cancel-as-steer semantics, so a runaway subagent is interruptible without losing the parent turn.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC + reuse v0.9.3 (data flow corrected post-advisor).</strong> Because tool dispatch runs in a worker thread (<code>asyncio.to_thread</code>) with the subagent on its <em>own</em> event loop, an <code>asyncio.Event</code> can't cross loops — the token is a <strong><code>threading.Event</code></strong> registered with the <em>parent</em> <code>Executor</code>. On Esc, <code>_do_cancel</code> calls <code>executor.cancel()</code> (which sets the event) <em>and</em> cancels the parent drive task — so the parent's <code>await to_thread(...)</code> raises <code>CancelledError</code> and the Agent future is abandoned. <strong>The <code>[cancelled by user]</code> the parent LLM sees does NOT come from the Agent return</strong> — it comes from <code>_do_cancel</code> appending <code>[interrupted by user]</code> + <code>_ensure_tool_result_pairing</code> synthesizing the tool_result at next send (v0.9.3, free). The watcher's <em>only</em> job is to stop the subagent's token/subprocess burn: it polls the <code>threading.Event</code> and calls <code>subagent_cm.cancel()</code>. <code>run_subagent</code> detects cancel via the event after <code>handle_event</code> returns (the subagent CM swallows <code>CancelledError</code> internally), and returns <code>SubagentResult(cancelled=True)</code> — meaningful only on the non-Esc path; on Esc its return is discarded with the abandoned future. No parent-side cancelled-delivery plumbing is built (it would be dead code).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">8.</span><span class="name">Runaway guard — max turns</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Per-agent <code>maxTurns</code>; on limit the loop exits and finalizes a partial result. <code>runAgent.ts:756,773</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>No cap — trust the model to finish (a tool-loop bug burns tokens unboundedly).</li>
+        <li>A default max-turns cap; on hit, stop and return the best final text + a note.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">A cap. A subagent is unattended-by-the-user delegation; an uncapped tool loop is the exact runaway the feature must not introduce. CC caps; we should too.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC.</strong> <code>SUBAGENT_MAX_TURNS = 25</code> LLM rounds (a turn = one assistant message, whether text or tool_calls). On reaching it, stop the loop, take the last assistant text (or a <code>"[subagent hit the {N}-turn limit before finishing]"</code> note if none), and return it. Logged via <code>loguru</code> at <code>warning</code>.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">9.</span><span class="name">Error handling inside the subagent</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Recover a partial text result if any assistant messages exist, else re-throw. <code>AgentTool.tsx:1220-1234</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Let the exception propagate and fail the parent turn.</li>
+        <li>Catch, return <code>SubagentResult(error=...)</code>, surface as a tool_result so the parent LLM can react.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Catch and surface. A subagent failure is data for the parent LLM ("the worker errored, try another approach"), not a reason to crash the parent turn.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC.</strong> <code>run_subagent</code> wraps the loop; on exception it returns <code>SubagentResult(error=str(exc), final_text=&lt;best-so-far or ""&gt;)</code>. The <code>Agent</code> tool maps a non-null <code>error</code> to a <code>tool_result</code> of <code>[subagent error: {error}]</code> (plus any partial text). The parent turn continues.</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">10.</span><span class="name">General-purpose subagent system prompt</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Each built-in agent type has its own <code>getSystemPrompt()</code>; general-purpose is the catch-all. <code>loadAgentsDir.ts</code>.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Reuse the parent's full system prompt verbatim.</li>
+        <li>A dedicated, shorter general-purpose worker prompt.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">A dedicated worker prompt. The parent prompt is full of UI/REPL framing irrelevant to a headless worker; a focused prompt that states "your final message IS the return value — return raw findings, no preamble" gets cleaner results (CC tells subagents exactly this).</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Follow CC (semantics).</strong> A module-level <code>SUBAGENT_SYSTEM_PROMPT</code> constant in <code>subagent.py</code>: general-purpose worker, has tools, runs to completion, and is told its final assistant message is consumed verbatim as the tool result (so: return the answer/data directly, no "I'll now…" preamble, no questions back to the user — it cannot ask).</dd>
+  </dl>
+</div>
+
+<div class="split">
+  <div class="head"><span class="num">11.</span><span class="name">Which model/slot the subagent uses</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>CC behavior</dt>
+    <dd>Inherits the parent model unless a <code>model</code> override is given. <code>AgentTool.tsx</code> schema.</dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>Reuse the parent's active slot/LLM.</li>
+        <li>Accept a per-call model override (a "fast" slot for cheap delegation).</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">Reuse the parent's active slot. The <code>model</code> override is a CC field we dropped in split #1 (YAGNI); a fast-slot delegation is a clean v1.x follow-up once subagents earn their keep.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative — reuse parent slot.</strong> <code>run_subagent</code> receives the parent's <code>llm</code> instance; the subagent's <code>ContextManager</code> drives the same active slot. No model selection in v0.10.0. (Recorded as a v1.x idea: a <code>subagent_slot</code> config for cheap delegation.)</dd>
+  </dl>
+</div>
+
+<div class="split flag">
+  <div class="head"><span class="num">12.</span><span class="name">Does the subagent's per-round transcript survive the call?</span><span class="badge decided">decided</span></div>
+  <dl>
+    <dt>The catch</dt>
+    <dd>
+      <code>run_subagent</code> builds a local <code>ChatStore</code> and discards
+      it — only <code>final_text</code> escapes. So a later release
+      <strong>cannot</strong> fold "the full subagent transcript" unless v0.10.0
+      persists it now. (Surfaced by the advisor: silently assuming retention
+      while building discard is the trap.)
+    </dd>
+    <dt>Alternatives</dt>
+    <dd>
+      <ul>
+        <li>(a) Persist the subagent's messages now (side-band, e.g. on the tool result's <code>MessageRecord.extra</code>) so v0.10.2 can fold the real transcript.</li>
+        <li>(b) Retain nothing; v0.10.2 folds final-text (+ metrics it re-derives); full per-round transcript deferred to v1.x.</li>
+      </ul>
+    </dd>
+    <dt class="recommend">Recommendation</dt>
+    <dd class="recommend">(b) — YAGNI. Side-band transcript persistence is speculative plumbing for a fold that doesn't exist yet; the final text is the contract that matters. v0.10.2 can re-shape <code>run_subagent</code>'s return when it actually builds the fold.</dd>
+    <dt class="decision">Decision</dt>
+    <dd class="decision"><strong>Alternative (b) — retain nothing in v0.10.0.</strong> The subagent's <code>ChatStore</code> is local and discarded; only <code>final_text</code> (capped, split #4) is returned. Goal #3 is downgraded accordingly: v0.10.0 renders the result as a normal tool result; v0.10.2 owns rich subagent rendering and will extend the return shape if it needs turn-by-turn data; full transcript retention is a v1.x decision.</dd>
+  </dl>
+</div>
+
+<footer>
+  v0.10.0 subagent framework · 12 split points, all decided autonomously under
+  a delegating <code>/goal</code> · first release on the march to v1.0 ·
+  numeric tag order (v0.10.0 → v0.10.5) per the ascending-tag rule ·
+  split #5 carries an accepted rework into v0.10.2.
+</footer>
+
+</body>
+</html>

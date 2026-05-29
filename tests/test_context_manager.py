@@ -484,3 +484,85 @@ def test_build_task_reminder_emitted_when_both_thresholds_met():
     assert reminder["role"] == "user"
     assert "#1. [in_progress] first" in reminder["content"]
     assert "#2. [pending] second" in reminder["content"]
+
+
+# ---- v0.10.0 subagent support: max_rounds + tool_names --------------------
+
+
+@pytest.mark.asyncio
+async def test_max_rounds_none_is_unbounded(monkeypatch):
+    """Default max_rounds=None keeps the pre-v0.10.0 multi-round behavior."""
+    monkeypatch.setattr(
+        "neutrix.executor.dispatch",
+        lambda name, arguments, **_: f"ran {name}",
+    )
+    llm = FakeLLM(
+        [
+            [_assistant_tool("echo", "{}", call_id="c1")],
+            [_assistant_tool("echo", "{}", call_id="c2")],
+            [_assistant_text("done")],
+        ]
+    )
+    ctx = _make_ctx(llm, use_tools=True)
+    assert ctx.max_rounds is None
+    await ctx.handle_event(UserMessageEvent("go"))
+    assert ctx.state == State.IDLE
+    # Three LLM rounds ran to a natural finish — nothing was capped.
+    assert len(llm.calls) == 3
+    assert ctx.messages[-1]["content"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_max_rounds_caps_drive(monkeypatch):
+    """max_rounds stops the loop before dispatching the capped round's tools."""
+    dispatched: list[str] = []
+
+    def _spy_dispatch(name, arguments, **_):
+        dispatched.append(name)
+        return f"ran {name}"
+
+    monkeypatch.setattr("neutrix.executor.dispatch", _spy_dispatch)
+    # LLM would keep calling tools forever; the cap must stop it.
+    llm = FakeLLM(
+        [
+            [_assistant_tool("echo", "{}", call_id="c1")],
+            [_assistant_tool("echo", "{}", call_id="c2")],
+            [_assistant_tool("echo", "{}", call_id="c3")],
+        ]
+    )
+    ctx = _make_ctx(llm, use_tools=True)
+    ctx.max_rounds = 2
+    await ctx.handle_event(UserMessageEvent("loop"))
+    assert ctx.state == State.IDLE
+    # Exactly two LLM rounds; the second round's tools were NOT dispatched.
+    assert len(llm.calls) == 2
+    assert dispatched == ["echo"]  # only round 1's tool ran
+    # The kept tail ends on an assistant with unanswered tool_calls.
+    assert ctx.messages[-1]["role"] == "assistant"
+    assert ctx.messages[-1].get("tool_calls")
+
+
+@pytest.mark.asyncio
+async def test_tool_names_scopes_schemas():
+    """tool_names narrows the schema list _call_llm advertises to the LLM."""
+    llm = FakeLLM([[_assistant_text("hi")]])
+    ctx = _make_ctx(llm, use_tools=True)
+    ctx.tool_names = frozenset({"read_file"})
+    await ctx.handle_event(UserMessageEvent("hello"))
+    tools = llm.calls[0]["tools"]
+    assert tools is not None
+    names = {t["function"]["name"] for t in tools}
+    assert names == {"read_file"}
+
+
+@pytest.mark.asyncio
+async def test_tool_names_none_advertises_all():
+    """Default tool_names=None advertises every builtin (unchanged)."""
+    from neutrix.tools import BUILTIN_TOOLS
+
+    llm = FakeLLM([[_assistant_text("hi")]])
+    ctx = _make_ctx(llm, use_tools=True)
+    assert ctx.tool_names is None
+    await ctx.handle_event(UserMessageEvent("hello"))
+    tools = llm.calls[0]["tools"]
+    assert {t["function"]["name"] for t in tools} == set(BUILTIN_TOOLS)
