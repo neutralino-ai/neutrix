@@ -79,6 +79,24 @@ process failure even if the code works.
 Design and implementation follow **SOLID** and **YAGNI** —
 keep abstractions earned by use, keep features earned by the PRD.
 
+## Living documents — keep `docs/roadmap.html` up to date (required workflow)
+
+`docs/roadmap.html` is the project's single user-visible living document: the
+roadmap (where the project is going) and — as the v2 surface settles — the
+current architecture and the per-feature design decisions. **Keeping it current
+is a required workflow step, not optional housekeeping:**
+
+- **On PRD acceptance** (Phase 1, step 7): add or revise the release's roadmap
+  entry.
+- **On ship** (Phase 3, step 12): flip the entry to shipped, and if the release
+  changed a subsystem's design or added / removed / deferred a capability, update
+  the architecture / design-decision sections to match.
+- **Never let it contradict reality** — a reversed or descoped decision is
+  corrected in the same change that makes it true.
+
+A shipped release whose design isn't reflected in `docs/roadmap.html` is an
+incomplete release.
+
 ## Notes on autonomous mode
 
 If the user has set a `/goal` and walked away (e.g. an unattended

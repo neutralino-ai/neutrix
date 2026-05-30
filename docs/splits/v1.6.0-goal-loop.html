@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.6.0 splits — native /goal autonomous loop</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.6.0 splits — native <code>/goal</code> autonomous loop</h1>
+<p class="tagline">Set a goal once; the agent keeps working it across turns without re-prompting, until it declares done or a step cap hits. The practical-autonomy headline for unattended OMILREC runs.</p>
+<p class="note"><strong>CC survey:</strong> CC ends a turn when the model emits no more <code>tool_use</code> (<code>query.ts:1062</code>); a <strong>Stop hook</strong> can block turn-end and re-inject a continue-reason as a message (<code>stopHooks.ts:268-280</code>, re-entry <code>query.ts:1278-1306</code>); a token-budget "continue" nudge is the closest built-in auto-continue (<code>query.ts:1308-1355</code>); bounded by <code>maxTurns</code> (<code>query.ts:1704-1712</code>); Esc aborts via the abort signal. <strong>neutrix has no hooks (cut from v2)</strong>, so <code>/goal</code> must self-contain the continue + done-detection. It reuses neutrix's own pieces: the <code>_worker_loop</code> turn boundary, the v0.9.3 cancel-as-steer, and the v0.8 system-reminder injection.</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Where the loop lives</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>In the query loop itself (the Stop hook fires at turn-end inside the generator).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — in the chat <code>_worker_loop</code>, not the ContextManager.</strong> The CM stays a pure single-turn driver (run one turn → IDLE); the worker owns the "wait for input vs auto-continue" decision. After <code>handle_event</code> returns, if a goal is active + not done + under the cap, the worker enqueues the next continuation instead of blocking on input. Keeps the CM's single-mutator + single-turn contract intact (the v3 headless loop reuses the CM, not this chat-side policy).</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">How "done" is detected</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>A user-defined Stop hook decides; no built-in self-check.</dd>
+<dt>Options</dt><dd>(a) <strong>sentinel</strong> — the model ends its reply with a marker (<code>GOAL DONE</code>); (b) a dedicated <code>CompleteGoal</code> tool; (c) reuse the <strong>Advisor</strong> to judge completion each turn; (d) no detect (run to the cap).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — (a) a distinctive sentinel + the step cap as the hard guarantee.</strong> Each continuation prompt instructs: keep working, and when the goal is <em>fully</em> achieved end your reply with a final line <code>&lt;&lt;GOAL_COMPLETE&gt;&gt;</code> (a distinctive token, not prose). The loop checks ONLY the committed assistant text (never tool results) and only its FINAL non-empty line — so an instruction-echo, or the token inside a code block / quote, can't false-trigger. <strong>The 25-step cap (#4), not the sentinel, is the hard termination guarantee</strong> — the sentinel is the soft early-exit. No new tool, no per-turn extra LLM call (rules out (b) a tool and (c) the Advisor, which judges the task list not goal-exit and would double LLM cost every turn; a <code>CompleteGoal</code> tool is a clean later hardening if the sentinel proves flaky).</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">3.</span><span class="name">The continuation injection</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Injects the hook's reason / token-budget nudge as a message, then loops.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC (neutrix-shaped) — a labelled <code>&lt;system-reminder&gt;</code> turn, not a fake user message.</strong> Reuse the v0.8 system-reminder injection: between turns the worker drives a CM turn seeded with <code>&lt;system-reminder&gt;Continue toward the active goal: &lt;goal&gt;. When fully done, end your reply with a final line &lt;&lt;GOAL_COMPLETE&gt;&gt;.&lt;/system-reminder&gt;</code>. It renders with the reminder prefix (visibility-parity holds — it's not a typed user turn), and the model sees it as the latest input and continues. (Mechanism added: the CM gains a "run a turn from an injected reminder, no new user text" entry, mirroring <code>inject_advisor_message</code> — single-mutator preserved.)</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Step cap + graceful stop</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd><code>maxTurns</code> → yields <code>max_turns_reached</code> and returns.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC.</strong> A goal runs at most <code>GOAL_MAX_STEPS</code> auto-continuations (default 25, matching the subagent cap). On hit: stop the loop, clear the goal, print a notice (<code>↯ goal paused after N steps — say "/goal &lt;text&gt;" to resume or refine</code>). Not a crash; the conversation stays usable.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">5.</span><span class="name">Interrupt + user-steer during the loop</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Esc cancels the current turn AND clears the goal</strong> (an explicit human stop ends the autonomous run — the v0.9.3 cancel path, plus clear the goal so it doesn't immediately resume). <strong>A typed message during the loop steers:</strong> it's the user taking back control — the goal is cleared and the message handled as a normal turn (the user can re-set a goal after). <strong><code>/goal</code> commands</strong> (#7) manage it explicitly. Rationale: the goal is a "walk-away" convenience; any human touch (Esc or typing) reasserts manual control — never fight the user for the loop.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">6.</span><span class="name">Resumability across <code>--continue</code> (v1.5.2)</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — in-memory only for v1.6; NOT persisted.</strong> The active goal + step count live on <code>TerminalChat</code>; a killed/resumed session restores the conversation (v1.5.2) but <strong>not</strong> a running goal — resuming into an autonomous loop unattended is surprising and risky. The user re-issues <code>/goal</code> if they want to continue. (Persisting the goal is a clean later add if real use wants it; YAGNI now.)</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">7.</span><span class="name">Command surface</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>No CC analog (neutrix command) — mirror the harness <code>/goal</code> the user already knows:</strong> <code>/goal &lt;text&gt;</code> sets/replaces the goal and immediately starts the loop; <code>/goal</code> (bare) shows the active goal + step count; <code>/goal clear</code> stops + clears it. A status-bar line shows <code>◎ goal · step N/25</code> while active (reuses the v1.5.0 live region). Slash-command, parsed chat-side like <code>/allow</code>.</dd></dl></div>
+
+<footer>v1.6.0 native /goal loop · 7 split points, all decided · loop in the chat <code>_worker_loop</code> (CM stays single-turn) · done = <code>&lt;&lt;GOAL_COMPLETE&gt;&gt;</code> sentinel (soft) + 25-step cap (hard guarantee) · continue via a labelled <code>&lt;system-reminder&gt;</code> turn · Esc / typing reasserts manual control · in-memory (not resumed) · <code>/goal &lt;text&gt;</code> · <code>/goal</code> · <code>/goal clear</code>.</footer>
+</body></html>

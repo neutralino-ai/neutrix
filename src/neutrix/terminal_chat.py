@@ -48,6 +48,7 @@ from neutrix.context_files import expand_at_mentions
 from neutrix.context_manager import (
     ADVISOR_TAG_CLOSE,
     ADVISOR_TAG_OPEN,
+    GOAL_DONE_SENTINEL,
     ClearEvent,
     ContextManager,
     ReplaceHistoryEvent,
@@ -56,6 +57,7 @@ from neutrix.context_manager import (
     UserMessageEvent,
     format_reminder_notice,
     is_advisor_message,
+    is_goal_reminder,
     is_task_reminder,
 )
 from neutrix.session_store import SessionWriter, list_sessions, new_session_id
@@ -159,6 +161,12 @@ def format_duration_short(seconds: float) -> str:
 # v1.5.0: only surface "last token Ns ago" once the gap exceeds this floor, so a
 # steadily-streaming response doesn't flicker a 0-1s age on every tick.
 PROGRESS_AGE_FLOOR_S = 3.0
+
+# v1.6.0 native /goal autonomous loop: max auto-continuations before a graceful
+# pause (the hard termination guarantee; the <<GOAL_COMPLETE>> sentinel is the soft
+# early-exit). _GOAL_KICK unblocks the idle worker the moment a goal is set.
+GOAL_MAX_STEPS = 25
+_GOAL_KICK = object()
 
 
 STREAM_PREVIEW_LINES = 8
@@ -887,6 +895,10 @@ class TerminalChat:
         # hot-reloaded by a background poll on the dir signature.
         self._skills = discover_skills(os.getcwd())
         self._skills_sig = skills_signature(os.getcwd())
+        # v1.6.0 /goal autonomous loop state (in-memory; not resumed across sessions).
+        self._goal: str | None = None
+        self._goal_step: int = 0
+        self._goal_interrupt: bool = False
         # v1.5.0 status bar: the turn-end Advisor runs while the CM is IDLE, so
         # a chat-side flag drives its indicator.
         self._advisor_busy: bool = False
@@ -958,45 +970,61 @@ class TerminalChat:
                 await self._run_command(text)
                 continue
             assert self._input_queue is not None
+            if self._goal is not None:
+                # v1.6.0: a typed message during a /goal run = the user taking
+                # over; the goal loop releases on its next check.
+                self._goal_interrupt = True
             self.store.enqueue_user(text)
             await self._input_queue.put(text)
 
     async def _worker_loop(self) -> None:
         assert self._input_queue is not None
         while True:
-            text = await self._input_queue.get()
-            self.store.dequeue_user()
-            # v1.2.0: inline @path file-mentions into the turn (raw text stayed
-            # in the queue panel; the expanded text becomes the user message).
-            text = expand_at_mentions(text, os.getcwd())
-            self._busy = True
-            self._invalidate_app()
-            try:
-                await self.ctx.handle_event(UserMessageEvent(text))
-            except Exception as exc:
-                logger.exception("terminal chat worker failed")
-                await self.view.print_notice(str(exc), style="bold red")
-            finally:
-                self._busy = False
-                self._invalidate_app()
+            item = await self._input_queue.get()
+            if item is _GOAL_KICK:
+                # v1.6.0: a /goal kick only unblocks this loop so the goal driver
+                # below runs; it is not a user turn.
                 self._input_queue.task_done()
-            # v1.5.2: snapshot the task list to the session log per turn (last
-            # snapshot wins on resume).
-            if self._session_writer is not None:
-                self._session_writer.append_tasks(self.store.tasks)
-            # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
-            # turns (the user keeps typing into the queue meanwhile). v1.5.0:
-            # flag it so the status bar shows "Advisor · Ns" during the window.
-            self.advisor.note_turn()
-            self._advisor_busy = True
-            self._advisor_started_at = time.monotonic()
+            else:
+                await self._process_user_turn(item)
+            # v1.6.0: drive the active goal across turns until done / cap / interrupt.
+            if self._goal is not None:
+                await self._run_goal_continuations()
+
+    async def _process_user_turn(self, text: str) -> None:
+        assert self._input_queue is not None
+        self.store.dequeue_user()
+        # v1.2.0: inline @path file-mentions into the turn (raw text stayed
+        # in the queue panel; the expanded text becomes the user message).
+        text = expand_at_mentions(text, os.getcwd())
+        self._busy = True
+        self._invalidate_app()
+        try:
+            await self.ctx.handle_event(UserMessageEvent(text))
+        except Exception as exc:
+            logger.exception("terminal chat worker failed")
+            await self.view.print_notice(str(exc), style="bold red")
+        finally:
+            self._busy = False
             self._invalidate_app()
-            try:
-                await self._maybe_run_advisor()
-            finally:
-                self._advisor_busy = False
-                self._advisor_started_at = None
-                self._invalidate_app()
+            self._input_queue.task_done()
+        # v1.5.2: snapshot the task list to the session log per turn (last
+        # snapshot wins on resume).
+        if self._session_writer is not None:
+            self._session_writer.append_tasks(self.store.tasks)
+        # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
+        # turns (the user keeps typing into the queue meanwhile). v1.5.0:
+        # flag it so the status bar shows "Advisor · Ns" during the window.
+        self.advisor.note_turn()
+        self._advisor_busy = True
+        self._advisor_started_at = time.monotonic()
+        self._invalidate_app()
+        try:
+            await self._maybe_run_advisor()
+        finally:
+            self._advisor_busy = False
+            self._advisor_started_at = None
+            self._invalidate_app()
 
     def _tool_status(self) -> str:
         if not self.ctx.use_tools:
@@ -1048,9 +1076,13 @@ class TerminalChat:
         # assistant text, shown ONLY in this live region (committed text goes to
         # scrollback via _render_record — strictly disjoint channels).
         preview = _stream_preview(self.store.pending_assistant_text)
+        # v1.6.0: show the active /goal + step count in the live region.
+        goal_line = (
+            f"◎ goal · step {self._goal_step}/{GOAL_MAX_STEPS}" if self._goal else None
+        )
         if (
             not heartbeat and not tasks and not queued
-            and quit_hint is None and not preview
+            and quit_hint is None and not preview and goal_line is None
         ):
             return ""
         try:
@@ -1065,6 +1097,8 @@ class TerminalChat:
                 lines.append(heartbeat_text)
             if preview:
                 lines.append(preview)
+            if goal_line is not None:
+                lines.append(goal_line)
             for _style, text in format_task_panel(tasks):
                 lines.append(text.rstrip("\n"))
             for q in queued:
@@ -1076,6 +1110,8 @@ class TerminalChat:
         fragments: list[tuple[str, str]] = list(heartbeat)
         if preview:
             fragments.append(("fg:ansibrightblack italic", f"{preview}\n"))
+        if goal_line is not None:
+            fragments.append(("fg:ansicyan", f"{goal_line}\n"))
         fragments.extend(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
@@ -1250,6 +1286,11 @@ class TerminalChat:
         if role == "user" and isinstance(content, str) and is_task_reminder(content):
             await self.view.print_notice(format_reminder_notice(self.store.tasks), style="dim")
             return
+        if role == "user" and isinstance(content, str) and is_goal_reminder(content):
+            # v1.6.0: fold the per-step /goal continuation reminder to a one-line
+            # notice (visibility-parity — the full text is in the LLM payload).
+            await self.view.print_notice("◎ goal: continue", style="dim")
+            return
         if role == "user" and is_advisor_message(content):
             # v0.10.4: a judged Advisor suggestion — rendered expanded (it
             # carries advice, not state echo), distinct from the folded reminder.
@@ -1332,8 +1373,15 @@ class TerminalChat:
         False). The renderer paints the ``[interrupted by user]`` user
         message as soon as the CM appends it to the store, so the
         affordance is visible without a separate dim notice.
+
+        v1.6.0: an explicit human stop also ends any active /goal run — the goal
+        loop sees ``_goal is None`` right after its in-flight turn unwinds.
         """
-        return self.ctx.cancel()
+        had_goal = self._goal is not None
+        self._goal = None
+        self._goal_step = 0
+        self._goal_interrupt = False
+        return self.ctx.cancel() or had_goal
 
     # --------------------------------------------------------------- advisor
 
@@ -1491,6 +1539,100 @@ class TerminalChat:
             await self.view.print_notice(
                 "permissions: allow-all — every tool runs, no safety checks", style="yellow"
             )
+
+    async def _cmd_goal(self, args: list[str]) -> None:
+        """`/goal <text>` set + start · `/goal` show · `/goal clear` stop (v1.6.0).
+
+        The agent works the goal autonomously across turns until it ends a reply with
+        the ``<<GOAL_COMPLETE>>`` sentinel or the ``GOAL_MAX_STEPS`` cap is hit. Esc or
+        any typed message reasserts manual control.
+        """
+        if not args:
+            if self._goal:
+                await self.view.print_notice(
+                    f"◎ active goal (step {self._goal_step}/{GOAL_MAX_STEPS}): {self._goal}",
+                    style="cyan",
+                )
+            else:
+                await self.view.print_notice(
+                    "no active goal — /goal <text> to set one", style="dim"
+                )
+            return
+        if args[0].lower() == "clear":
+            if self._goal is not None:
+                await self._clear_goal("◎ goal cleared")
+            else:
+                await self.view.print_notice("no active goal", style="dim")
+            return
+        self._goal = " ".join(args).strip()
+        self._goal_step = 0
+        self._goal_interrupt = False
+        await self.view.print_notice(
+            f"◎ goal set — working autonomously (Esc or a message stops): {self._goal}",
+            style="cyan",
+        )
+        # Unblock the worker so the goal driver starts even when idle.
+        assert self._input_queue is not None
+        await self._input_queue.put(_GOAL_KICK)
+
+    async def _run_goal_continuations(self) -> None:
+        """Drive the active goal turn-by-turn until done / cap / interrupt (v1.6.0).
+
+        The ``<<GOAL_COMPLETE>>`` sentinel is the soft early-exit; ``GOAL_MAX_STEPS``
+        is the hard guarantee the loop terminates. Esc clears ``_goal`` mid-turn
+        (seen here right after the turn); a typed message sets ``_goal_interrupt``.
+        """
+        while self._goal is not None:
+            if self._goal_interrupt:
+                await self._clear_goal("◎ goal released — you took over")
+                return
+            if self._goal_step >= GOAL_MAX_STEPS:
+                await self._clear_goal(
+                    f"↯ goal paused after {GOAL_MAX_STEPS} steps — /goal <text> to resume or refine"
+                )
+                return
+            self._busy = True
+            self._invalidate_app()
+            try:
+                await self.ctx.continue_goal(self._goal)
+            except Exception as exc:
+                logger.exception("goal continuation failed")
+                await self.view.print_notice(str(exc), style="bold red")
+                await self._clear_goal(None)
+                return
+            finally:
+                self._busy = False
+                self._invalidate_app()
+            if self._goal is None:  # Esc during the turn cleared the goal
+                return
+            self._goal_step += 1
+            if self._goal_completed():
+                await self._clear_goal("✓ goal complete")
+                return
+
+    async def _clear_goal(self, notice: str | None) -> None:
+        self._goal = None
+        self._goal_step = 0
+        self._goal_interrupt = False
+        if notice is not None:
+            await self.view.print_notice(notice, style="cyan")
+
+    def _goal_completed(self) -> bool:
+        """True iff the last committed assistant text ends with the goal sentinel.
+
+        Checks only assistant content (never tool results) and only the final
+        non-empty line — so an instruction echo, or the token inside a code block,
+        does not false-trigger.
+        """
+        for msg in reversed(self.ctx.messages):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                return False
+            last_line = content.strip().splitlines()[-1].strip()
+            return last_line.casefold() == GOAL_DONE_SENTINEL.casefold()
+        return False
 
     async def _cmd_init(self, args: list[str]) -> None:
         """v1.2.0: drive the agent to survey the repo and write a CLAUDE.md."""

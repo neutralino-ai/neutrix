@@ -4,6 +4,25 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.6.0] — 2026-05-31
+
+### Added
+- **Native `/goal` autonomous loop** — set an objective once and the agent keeps
+  taking turns toward it without re-prompting (the practical-autonomy feature for
+  unattended OMILREC runs): `/goal <text>` sets + starts, `/goal` shows progress,
+  `/goal clear` stops. The agent works autonomously until it ends a reply with the
+  `<<GOAL_COMPLETE>>` sentinel (soft exit) or hits the `GOAL_MAX_STEPS` = 25 cap (the
+  hard termination guarantee — a graceful pause, not a crash). **Esc or any typed
+  message reasserts manual control** (clears the goal). A `◎ goal · step N/25` line
+  shows in the live region; each continuation is a folded `<system-reminder>` turn
+  (visibility-parity — the full text is in the LLM payload).
+  - The loop lives in the chat worker; the `ContextManager` stays a pure single-turn
+    driver (new `continue_goal`, mirroring `inject_advisor_message`'s single-mutator
+    discipline). In-memory only — a resumed session does not auto-restart a goal.
+
+See [docs/PRDs/v1.6.0-goal-loop.md](docs/PRDs/v1.6.0-goal-loop.md)
+and [docs/splits/v1.6.0-goal-loop.html](docs/splits/v1.6.0-goal-loop.html).
+
 ## [v1.5.4] — 2026-05-30
 
 ### Removed

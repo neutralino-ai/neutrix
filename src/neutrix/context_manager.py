@@ -91,6 +91,12 @@ TURNS_BETWEEN_REMINDERS = 10
 TASK_REMINDER_TAG_OPEN = "<system-reminder>"
 TASK_REMINDER_TAG_CLOSE = "</system-reminder>"
 TASK_REMINDER_MARKER = "Here are the existing tasks:"
+
+# v1.6.0 native /goal loop. The continuation reminder reuses the <system-reminder>
+# tag but carries this distinct marker; the sentinel is the model's soft "done"
+# signal (the chat-side step cap is the hard termination guarantee).
+GOAL_REMINDER_MARKER = "Continue toward the active goal:"
+GOAL_DONE_SENTINEL = "<<GOAL_COMPLETE>>"
 TASK_MANAGEMENT_TOOLS = frozenset({"TaskCreate", "TaskUpdate"})
 
 LLM_ERROR_PREFIX = "[LLM error: "
@@ -522,6 +528,28 @@ class ContextManager:
         content = f"{ADVISOR_TAG_OPEN}{text}{ADVISOR_TAG_CLOSE}"
         self.messages.append({"role": "user", "content": content})
         self.store.append_message(MessageRecord(role="user", content=content))
+
+    async def continue_goal(self, goal_text: str) -> None:
+        """Run one autonomous /goal continuation turn (v1.6.0).
+
+        Appends a labelled ``<system-reminder>`` continuation (single-mutator,
+        mirroring :py:meth:`inject_advisor_message`) and drives a full turn. The
+        chat-side goal loop owns the sentinel / step-cap / interrupt policy and
+        calls this only while IDLE.
+        """
+        reminder = (
+            f"{TASK_REMINDER_TAG_OPEN}\n{GOAL_REMINDER_MARKER} {goal_text}\n"
+            "Work autonomously; do NOT ask the user. When the goal is FULLY "
+            f"achieved, end your reply with a final line {GOAL_DONE_SENTINEL}\n"
+            f"{TASK_REMINDER_TAG_CLOSE}"
+        )
+        self.messages.append({"role": "user", "content": reminder})
+        self.store.append_message(MessageRecord(role="user", content=reminder))
+        self._drive_task = asyncio.current_task()
+        try:
+            await self._drive()
+        finally:
+            self._drive_task = None
 
     # -------------------------------------------------- internal handlers
 
@@ -993,6 +1021,15 @@ def is_task_reminder(content: Any) -> bool:
     if not content.startswith(TASK_REMINDER_TAG_OPEN):
         return False
     return TASK_REMINDER_MARKER in content
+
+
+def is_goal_reminder(content: Any) -> bool:
+    """Whether ``content`` is a v1.6.0 /goal autonomous-continuation reminder."""
+    return (
+        isinstance(content, str)
+        and content.startswith(TASK_REMINDER_TAG_OPEN)
+        and GOAL_REMINDER_MARKER in content
+    )
 
 
 def is_advisor_message(content: Any) -> bool:
