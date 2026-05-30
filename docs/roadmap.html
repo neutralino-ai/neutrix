@@ -433,22 +433,20 @@
   </span>
 </div>
 
-<h2>v2 — toward complete Claude Code parity</h2>
+<h2>v2 — a practical coding agent (built for the OMILREC speedup)</h2>
 <p class="note" style="color:var(--dim);font-size:13px;margin:0 0 14px;">
-  A band of minor releases (numbers settle per release) building to a
-  <strong>v2.0.0 CC-parity lock</strong>, mirroring how v0.10.x built to v1.0.0.
-  Goal: a product that can completely replace Claude Code for coding. Lead with
-  real coding tools; replace the crude tool set with CC-shaped ones; full parity
-  incl. MCP (user-directed).
-  <br><strong>Core principle: <code>.claude/</code>-compatible.</strong> "If it
-  replaces Claude Code it must be compatible with it." neutrix auto-discovers CC's
-  config — <code>CLAUDE.md</code>, <code>.claude/skills</code>·<code>commands</code>·<code>agents</code>,
-  <code>.claude/settings.json</code> (hooks + permissions) — and auto-writes
-  CC-shaped files — per-session usage JSONL to <code>~/.claude/projects/…</code>
-  (so ccusage runs on neutrix), permission updates to
-  <code>.claude/settings.local.json</code>. Drop neutrix into a CC project and it
-  inherits the config. Caveat: co-exist safely — additive writes, never clobber
-  CC's files.
+  A band of minor releases building to a <strong>v2.0.0 lock</strong>, mirroring how
+  v0.10.x built to v1.0.0. <strong>Goal (user-directed 2026-05-30): a practical,
+  reliable terminal coding agent for real work — fast and autonomous enough to speed up
+  OMILREC — not a complete Claude&nbsp;Code clone.</strong> "Keep it simple, otherwise we
+  never ship." Parity features that don't serve that are cut (see Descoped below).
+  <br><strong>Core principle: <code>.claude/</code>-compatible (read-only).</strong>
+  neutrix auto-<strong>discovers</strong> CC's config — <code>CLAUDE.md</code>,
+  <code>.claude/skills</code>·<code>commands</code>·<code>agents</code>,
+  <code>.claude/settings.json</code> (permissions) — so it drops into a CC project and
+  inherits the config. It <strong>never writes into <code>~/.claude</code></strong>
+  (user-directed): neutrix-owned state (session logs, …) lives under
+  <code>~/.cache/neutrix/</code>; ccusage-compatible JSONL emission is opt-in (v1.8.0).
 </p>
 
 <div class="entry">
@@ -626,25 +624,48 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.6.0</span>
+  <span class="ver"><a href="PRDs/v1.5.3-permission-executor-only.md">v1.5.3</a></span>
   <span class="theme">
-    Hooks
+    Permission as an Executor-only safety layer
     <small>
-      A <code>settings.json</code> hook system (PreToolUse / PostToolUse / Stop /
-      SessionStart) — block a tool, inject context, gate stop. <code>/goal</code>
-      can be reframed on the Stop hook.
+      Removes the v1.4.8 interactive permission prompt that parked the turn (every
+      <code>auto</code>-flagged destructive Bash awaited a human up to 300&nbsp;s). The
+      Executor is now a deterministic safety layer: <code>decide()</code> returns
+      <code>allow</code>/<code>deny</code> only, a detected-dangerous action is
+      <strong>denied directly</strong> (returns a <code>[denied]</code> tool_result and
+      the round continues — the LLM adapts), and the ContextManager + Advisor carry zero
+      permission semantics ("like an industrial agent" — user-directed). The
+      <code>needs_user_input</code> channel survives only for the AskUserQuestion tool;
+      <code>/allow</code> stays as the explicit bypass.
+      (<a href="splits/v1.5.3-permission-executor-only.html">6 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.6.0</span>
+  <span class="theme">
+    <code>/goal</code> — autonomous multi-step loop
+    <small>
+      The practical-autonomy headline: a neutrix-native <code>/goal</code> so the agent
+      grinds a multi-step objective ("optimize this until the benchmark passes") across
+      turns without re-prompting — the core feature for unattended OMILREC speedup runs.
+      Stop-condition + step cap; resumable (v1.5.2). Split off from the v1.5.2 bundle.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
 </div>
 
 <div class="entry">
   <span class="ver">v1.7.0</span>
   <span class="theme">
-    MCP
+    Parallel tools + background Bash
     <small>
-      Load external <code>mcp__server__tool</code> tools from configured MCP
-      servers, namespaced and permission-gated.
+      Run a round's multiple <code>tool_use</code> blocks concurrently
+      (<code>asyncio.gather</code>, ordered results) instead of sequentially — direct
+      wall-clock speedup on multi-file work; the heartbeat beats the in-flight set in
+      unison. Plus background <code>Bash</code> (<code>run_in_background</code>) + a poll.
     </small>
   </span>
   <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
@@ -655,136 +676,71 @@
   <span class="theme">
     Usage, cost &amp; timing
     <small>
-      Capture the API <code>usage</code> (cache read / miss / output; cache-write
-      where the gateway exposes it); per-message tokens + running cumulative;
-      wall time, active time (wall − idle), and cost via LiteLLM's pricing JSON
-      (which also auto-populates <code>max_context_tokens</code>); <code>/cost</code>
-      + a live status-line readout; optional ccusage-compatible JSONL emission.
+      Capture API <code>usage</code> (cache read / miss / output), per-message tokens +
+      running total, wall + active time, and cost via LiteLLM's pricing JSON (its
+      <em>data</em>, not the dep) — builds on the v1.5.2 per-turn
+      <code>llm_ms</code>/<code>tool_ms</code>. <code>/cost</code> + a status-line
+      readout. Matters for budgeting long autonomous runs. Optional
+      ccusage-compatible JSONL emission stays opt-in.
     </small>
   </span>
   <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.9.0</span>
-  <span class="theme">
-    Parallel tools + synchronized heartbeat
-    <small>
-      Run a round's multiple <code>tool_use</code> blocks concurrently
-      (<code>asyncio.gather</code>, ordered results) instead of sequentially; the
-      heartbeat beats the in-flight parallel set in unison. Plus background
-      <code>Bash</code> (<code>run_in_background</code>) + a Monitor-style poll.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.10.0</span>
-  <span class="theme">
-    Web fetch + search tools
-    <small>
-      <code>WebFetch</code> (URL → markdown → query) and <code>WebSearch</code>
-      so the agent can look up docs/APIs mid-task. (Promoted from stretch — needed
-      for a complete replacement.)
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.11.0</span>
-  <span class="theme">
-    Multimodal input
-    <small>
-      Paste/attach images, and <code>Read</code> images / PDFs / notebooks into
-      context via the provider's multimodal API. (Deferred in v1.1.0; promoted.)
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.12.0</span>
-  <span class="theme">
-    LSP — code intelligence
-    <small>
-      Go-to-definition, find-references, hover, symbols via a language server —
-      refactoring confidence beyond text search.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.13.0</span>
-  <span class="theme">
-    Anthropic-native backend + thinking display
-    <small>
-      A second <code>ChatLLM</code> backend talking Anthropic's API directly
-      (alongside the OpenAI-compat one, selectable per slot): native prompt-cache
-      control, server tools (web/computer-use), the thinking-budget API + an
-      extended-thinking/reasoning display. Closes the closeable part of
-      "model parity" (raw model quality stays whatever model you point at).
-    </small>
-  </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.14.0</span>
-  <span class="theme">
-    Sandbox — filesystem / network restrictions
-    <small>
-      Allow/deny lists for paths + network hosts on <code>Bash</code> (CC's
-      sandbox model), with an explicit override. Pairs with v1.4.0 permissions.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.15.0</span>
-  <span class="theme">
-    Cross-session memory
-    <small>
-      Consolidate durable memory across sessions (CC's auto-memory / dream): the
-      Advisor (v0.10.4) extended from in-session judgment to persistent
-      <code>.claude/</code>-stored memory.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.16.0</span>
-  <span class="theme">
-    Background &amp; scheduled agents (long-tail)
-    <small>
-      Background <code>Bash</code> + Monitor (folded from v1.9.0), plus scheduled
-      / remote / multi-agent surfaces (cron, remote triggers, teammates) for full
-      coverage of CC's agent-trigger tools. Niche; last before the lock.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
 </div>
 
 <div class="entry">
   <span class="ver">v2.0.0</span>
   <span class="theme">
-    Claude Code parity lock
+    Lock — a practical, reliable terminal coding agent
     <small>
-      Seal the v2 surface: a TUI coding agent at functional parity with Claude
-      Code across the whole closeable surface — tools, project context, skills,
-      permissions, AskUserQuestion, goal, hooks, MCP, web, multimodal, LSP, Anthropic-native
-      backend + thinking, sandbox, cost, parallel, cross-session memory — all
-      <code>.claude/</code>-compatible. SemVer re-locked for the 2.x line.
-      <strong>Out of scope by nature (not a release):</strong> the model's raw
-      quality (= whatever model the slot points at) and non-TUI surfaces (IDE
-      extensions / desktop / web — a separate product track if ever wanted).
+      Seal the v2 surface: a dependable TUI coding agent that is genuinely <strong>handy
+      and practical for real work — concretely, fast and autonomous enough to speed up
+      OMILREC</strong>. Solid CC-shaped tools, project context, skills/commands, a
+      non-blocking Executor safety layer, resume, autonomous <code>/goal</code>, parallel
+      tools, and cost/timing. SemVer re-locked for 2.x. <strong>Deliberately descoped
+      from full Claude-Code parity</strong> (user-directed 2026-05-30, "keep it simple,
+      otherwise we never ship") — see Descoped below.
     </small>
   </span>
   <span class="badges"><span class="badge p1">P1</span><span class="badge planned">target</span></span>
+</div>
+
+<h2>Descoped from the v2 path</h2>
+<p class="note">
+  User-directed 2026-05-30: <em>"keep it simple, otherwise we never ship; neutrix needs
+  to be practical for the OMILREC speedup."</em> The goal is a practical tool, not a
+  Claude&nbsp;Code clone — so these leave the v2 lock and reopen only if real OMILREC work
+  demands them.
+</p>
+<div class="entry">
+  <span class="ver">cut</span>
+  <span class="theme">
+    Parity features removed from v2
+    <small>
+      <strong>Hooks</strong> (settings.json PreToolUse/PostToolUse/Stop) ·
+      <strong>MCP</strong> (external <code>mcp__</code> tools) ·
+      <strong>Multimodal input</strong> (image/PDF/notebook) ·
+      <strong>Anthropic-native backend + thinking display</strong> ·
+      <strong>Sandbox</strong> (filesystem/network restrictions) ·
+      <strong>Cross-session memory</strong> ·
+      <strong>Background / scheduled / remote agents</strong> (cron, remote triggers,
+      teammates). The OpenAI-compatible client already spans providers;
+      <code>.claude/</code> discovery (read-only) stays.
+    </small>
+  </span>
+  <span class="badges"><span class="badge planned">cut</span></span>
+</div>
+<div class="entry">
+  <span class="ver">defer</span>
+  <span class="theme">
+    Useful but not blocking the lock — reopen on demand
+    <small>
+      <strong>Web fetch / search</strong> (doc lookup mid-task) ·
+      <strong>LSP</strong> (go-to-def / find-refs — real value for C++/Python
+      navigation, but heavy; reopen if navigation becomes the bottleneck). Pulled into
+      the v2 path only if OMILREC use shows they're needed.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">deferred</span></span>
 </div>
 
 <h2>v3 — vision</h2>

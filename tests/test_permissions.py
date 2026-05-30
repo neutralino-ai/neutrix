@@ -23,7 +23,8 @@ def test_auto_default_allows_normal_ops():
     assert decide("Bash", _args(command="ls -la && pytest")) == "allow"
 
 
-def test_auto_blocks_dangerous_bash():
+def test_auto_denies_dangerous_bash():
+    # v1.5.3: the safety layer denies dangerous actions directly (was "ask").
     for cmd in (
         "rm -rf build",
         "git push --force origin main",
@@ -32,7 +33,7 @@ def test_auto_blocks_dangerous_bash():
         "sudo rm /etc/hosts",
         "git reset --hard HEAD~3",
     ):
-        assert decide("Bash", _args(command=cmd)) == "ask", cmd
+        assert decide("Bash", _args(command=cmd)) == "deny", cmd
 
 
 def test_explicit_allow_overrides_auto_danger():
@@ -66,9 +67,10 @@ def test_deny_wins_over_allow_and_ask():
     assert decide("Write", _args(path="x"), policy=pol) == "deny"
 
 
-def test_ask_rule_returns_ask():
+def test_ask_rule_now_denies():
+    # v1.5.3: neutrix never prompts — a settings `ask` rule resolves to deny.
     pol = PermissionPolicy(ask=("Bash",))
-    assert decide("Bash", _args(command="ls"), policy=pol) == "ask"
+    assert decide("Bash", _args(command="ls"), policy=pol) == "deny"
 
 
 def test_load_policy_merges_settings(tmp_path: Path):

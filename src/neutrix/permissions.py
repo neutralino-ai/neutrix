@@ -1,22 +1,26 @@
-"""Tool permissions (v1.4.0). `.claude/`-compatible.
+"""Tool permissions — an Executor-only safety layer (v1.5.3). `.claude/`-compatible.
 
 A `PermissionPolicy` (allow / deny / ask rule lists) is loaded from
-`.claude/settings.json` + `.claude/settings.local.json` (+ user `~/.claude`),
-the same shape Claude Code uses (`permissions.allow/deny/ask`, rules like
+`.claude/settings.json` + `.claude/settings.local.json` (+ user `~/.claude`), the
+same shape Claude Code uses (`permissions.allow/deny/ask`, rules like
 `"Bash(git *)"`, `"Write"`, `"Read(~/.ssh/*)"`). `decide()` is consulted by the
-`Executor` before each tool call.
+`Executor` before each tool call, and the Executor resolves the verdict on its own
+— the ContextManager and Advisor never see permission.
 
-Two modes (user-directed, 2026-05-29: "allow all or auto, by default auto"):
-- **`auto`** (default) — allow normal operations, but **block clearly
-  destructive Bash** (`rm -rf`, force-push, `dd`, fork-bombs, `curl|sh`, …) with
-  a notice telling the user/model how to proceed. neutrix has no interactive
-  approve-dialog yet, so "auto" guards by a deterministic danger heuristic
-  rather than prompting.
+**Industrial safety layer (user-directed, 2026-05-30: "if it detect dangerous
+action, deny directly … don't ask user question. let's be like industrial
+agent").** neutrix never prompts for permission. `decide()` returns only
+`"allow"` | `"deny"`:
+
+- **`auto`** (default) — allow normal operations, but **deny clearly destructive
+  Bash** (`rm -rf`, force-push, `dd`, fork-bombs, `curl|sh`, …) outright: the
+  Executor returns a denied tool_result and the round continues (the model
+  adapts). A deterministic danger heuristic, not a sandbox.
 - **`allow-all`** — no checks; every tool runs (escape hatch, `/allow`).
 
-Deny rules always win; an explicit `allow` rule overrides the auto danger
-heuristic; `ask` rules (and auto-flagged danger) → **block-with-notice**
-(the interactive approval dialog is deferred). No plan mode (user-directed).
+Deny rules always win; an explicit `allow` rule overrides the danger heuristic;
+the danger heuristic and any settings `ask` rule both resolve to **deny** (neutrix
+has no interactive approval — that's deliberate). No plan mode (user-directed).
 """
 from __future__ import annotations
 
@@ -26,8 +30,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from neutrix.prompts import Answer, Option, Question, QuestionSpec
 
 # The argument a `Tool(pattern)` rule matches against, per tool.
 _PRIMARY_ARG = {
@@ -134,12 +136,13 @@ def decide(
     mode: str = "auto",
     policy: PermissionPolicy | None = None,
 ) -> str:
-    """Return ``"allow"`` | ``"deny"`` | ``"ask"`` for a tool call.
+    """Return ``"allow"`` | ``"deny"`` for a tool call (v1.5.3: no interactive ask).
 
     ``allow-all``/``bypass`` → allow everything. Otherwise: deny rules win, then
     explicit allow rules (which override the auto danger heuristic), then — in
-    ``auto`` mode — destructive Bash is flagged ``ask``, then ask rules; default
-    is allow.
+    ``auto`` mode — destructive Bash is **denied** by the safety layer, and any
+    settings ``ask`` rule is also **denied** (neutrix never prompts); default is
+    allow.
     """
     if mode in ("allow-all", "bypass"):
         return "allow"
@@ -149,75 +152,20 @@ def decide(
     if any(_matches(r, tool_name, args_json) for r in policy.allow):
         return "allow"
     if mode == "auto" and _is_dangerous(tool_name, args_json):
-        return "ask"
+        return "deny"
     if any(_matches(r, tool_name, args_json) for r in policy.ask):
-        return "ask"
+        return "deny"
     return "allow"
 
 
-def block_reason(tool_name: str, verdict: str, mode: str = "default") -> str:
-    if verdict == "ask":
-        return f"[blocked: {tool_name} needs user approval — not run]"
-    return f"[blocked: {tool_name} denied by permission rules]"
+def block_reason(tool_name: str, args_json: str = "") -> str:
+    """Message for a denied tool — distinguishes the auto safety layer from a deny rule.
 
-
-# ----- interactive `ask` prompt (v1.4.8) --------------------------------------
-# When an interactive `ask_user` port exists, the `ask` verdict becomes a real
-# yes/always/no prompt routed through the shared QuestionSpec channel.
-
-USER_DENIED = "[blocked: user denied this call]"
-
-
-def permission_question(tool_name: str, args_json: str, verdict: str) -> QuestionSpec:
-    """Build the yes/always/no :class:`QuestionSpec` for an ``ask`` verdict."""
-    summary = _primary_value(tool_name, args_json).strip()
-    detail = f": {summary}" if summary else ""
-    if len(detail) > 80:
-        detail = detail[:77] + "…"
-    return QuestionSpec(
-        questions=(
-            Question(
-                question=f"Allow {tool_name}{detail}?",
-                header="Permission",
-                options=(
-                    Option("Yes", "run this call once", value="yes"),
-                    Option("Always", f"run and always allow {tool_name} like this",
-                           value="always"),
-                    Option("No", "block this call", value="no"),
-                ),
-                multi_select=False,
-            ),
-        )
-    )
-
-
-def verdict_from_answer(answer: Answer) -> str:
-    """Map the answer to a permission ``ask`` prompt → ``yes`` | ``always`` |
-    ``no``. Free-text / empty answers fail closed to ``no``."""
-    if not answer.per_question:
-        return "no"
-    qa = answer.per_question[0]
-    if qa.is_other or not qa.values:
-        return "no"
-    return qa.values[0]
-
-
-def apply_always_rule(
-    policy: PermissionPolicy, tool_name: str, args_json: str = "{}"
-) -> PermissionPolicy:
-    """Return a new policy with an ``allow`` rule for "always allow this".
-
-    Bash is scoped to the command's first token (``Bash(git *)``) rather than
-    granting all shell — the user approved *this kind* of command, not every
-    command. Other tools get a bare tool-name allow.
+    Both forms contain "denied" so the model reads it as a hard refusal and adapts.
     """
-    rule = tool_name
-    if tool_name == "Bash":
-        cmd = _primary_value("Bash", args_json).strip().split()
-        if cmd:
-            rule = f"Bash({cmd[0]} *)"
-    if rule in policy.allow:
-        return policy
-    return PermissionPolicy(
-        allow=(*policy.allow, rule), deny=policy.deny, ask=policy.ask
-    )
+    if _is_dangerous(tool_name, args_json):
+        return (
+            f"[denied by safety layer: {tool_name} looks destructive — not run. "
+            "Use a non-destructive approach, or the user can /allow to override.]"
+        )
+    return f"[denied by permission rules: {tool_name} not run]"

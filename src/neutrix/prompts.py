@@ -1,9 +1,10 @@
-"""Interactive user prompts (v1.4.8): AskUserQuestion + permission ask.
+"""Interactive user prompts (v1.4.8): the AskUserQuestion tool.
 
-A :class:`QuestionSpec` (1..N questions, each with 2..M options) is the shared
-currency for both the ``AskUserQuestion`` tool and the permission ``ask`` prompt.
-An async ``ask_user`` port (injected into the :class:`~neutrix.executor.Executor`,
-the shape of Claude Code's ``canUseTool``) takes a ``QuestionSpec`` and returns an
+A :class:`QuestionSpec` (1..N questions, each with 2..M options) is the currency
+for the ``AskUserQuestion`` tool (as of v1.5.3 permission no longer uses it — it
+is denied directly inside the Executor). An async ``ask_user`` port (held by the
+:class:`~neutrix.context_manager.ContextManager`, the shape of CC's ``canUseTool``)
+takes a ``QuestionSpec`` and returns an
 :class:`Answer`. This module is pure data + parse/render/format; the event-loop
 plumbing (the Future the input loop resolves) lives in ``terminal_chat`` and the
 dispatch interception lives in ``executor`` — see

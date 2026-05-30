@@ -4,6 +4,35 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.5.3] — 2026-05-30
+
+### Changed
+- **Permission is now an Executor-only safety layer that denies dangerous actions
+  directly — it never prompts.** v1.4.8 had made the permission `ask` verdict an
+  interactive prompt routed up to the `ContextManager`, so every `auto`-flagged
+  destructive Bash (`rm -rf`, `git reset --hard`, force-push, …) parked the turn
+  awaiting a human (bounded to 300 s by v1.5.1, but still blocking). Now `decide()`
+  returns `allow`/`deny` only; a detected-dangerous action is **denied directly**
+  (the Executor returns a `[denied by safety layer: …]` tool_result and the round
+  continues — the model adapts). The `ContextManager` and Advisor carry **zero**
+  permission semantics — "like an industrial agent" (user-directed).
+  - A `.claude/settings.json` **`ask` rule now resolves to `deny`** (it prompted in
+    Claude Code; neutrix never prompts). `deny`/`allow` rules and `/allow`
+    (allow-all bypass) are unchanged.
+  - Removed the now-dead interactive-permission code (`permission_question`,
+    `verdict_from_answer`, `apply_always_rule`, `USER_DENIED`); the
+    `needs_user_input` channel now serves only the `AskUserQuestion` tool.
+    Net −87 lines.
+- **v2 goal reframed** (user-directed): from "complete Claude Code parity" to **a
+  practical, reliable terminal coding agent — fast and autonomous enough to speed
+  up OMILREC**. Cut from the v2 path: hooks, MCP, multimodal, an Anthropic-native
+  backend, sandbox, cross-session memory, background/scheduled agents. Deferred:
+  web fetch/search, LSP. Lean path: `/goal` → parallel tools → cost/timing → the
+  v2.0.0 lock. Adds `docs/PRDs/README.md` (PRD index + V2 goal).
+
+See [docs/PRDs/v1.5.3-permission-executor-only.md](docs/PRDs/v1.5.3-permission-executor-only.md)
+and [docs/splits/v1.5.3-permission-executor-only.html](docs/splits/v1.5.3-permission-executor-only.html).
+
 ## [v1.5.2] — 2026-05-29
 
 ### Added

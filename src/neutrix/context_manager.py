@@ -237,7 +237,8 @@ class ContextManager:
     # v1.4.8 interactive port (CC's `canUseTool` role). Injected by the UI
     # (TerminalChat); the CM is the ONLY layer that holds it, so the Executor
     # stays a pure event leaf. None everywhere non-interactive (tests, piped
-    # stdin, inside a subagent) → AskUserQuestion / permission `ask` degrade.
+    # stdin, inside a subagent) → AskUserQuestion degrades; permission is denied
+    # directly in the Executor, never via this port.
     ask_user: AskUserPort | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
@@ -841,7 +842,7 @@ class ContextManager:
 
         The executor is a bidirectional async generator (v1.4.8): it yields
         ``tool_started`` / ``tool_finished`` like before, and — for the
-        interactive AskUserQuestion tool or a permission ``ask`` verdict — a
+        interactive AskUserQuestion tool (permission is denied in the Executor) — a
         ``needs_user_input`` event. The CM is the ONLY layer that holds the
         ``ask_user`` port: it resolves the prompt (via the UI) and feeds the
         :class:`~neutrix.prompts.Answer` back in with ``gen.asend(answer)``

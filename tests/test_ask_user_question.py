@@ -1,9 +1,10 @@
-"""v1.4.8 — bidirectional dispatch protocol for AskUserQuestion + permission ask.
+"""v1.4.8 / v1.5.3 — bidirectional dispatch protocol for AskUserQuestion.
 
 The Executor is a pure event leaf: it *yields* ``needs_user_input`` and receives
 the answer via ``gen.asend(answer)``; it never calls the UI. The ContextManager
-owns the ``ask_user`` port and drives the generator. These tests exercise both
-layers.
+owns the ``ask_user`` port and drives the generator. As of v1.5.3 only the
+AskUserQuestion tool uses this channel — permission is denied directly inside the
+Executor and never yields ``needs_user_input``. These tests exercise both layers.
 """
 from __future__ import annotations
 
@@ -146,66 +147,51 @@ async def test_ask_user_question_never_hits_thread(monkeypatch):
     assert "LEAKED" not in _fin(events).data["content"]
 
 
-# ---- Executor protocol: permission `ask` ---------------------------------
+# ---- Executor protocol: permission is a direct deny (v1.5.3) --------------
 
 
 @pytest.mark.asyncio
-async def test_permission_ask_yes_runs_without_rule(monkeypatch):
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: f"ran {name}")
+async def test_dangerous_bash_denied_directly_no_prompt(monkeypatch):
+    # The safety layer denies dangerous actions outright — it NEVER yields
+    # needs_user_input, and the tool does not run.
+    monkeypatch.setattr("neutrix.executor.dispatch", lambda *a, **k: "RAN DANGEROUS")
+    ex = Executor()  # auto mode
+    gen = ex.dispatch_all([{"id": "1", "name": "Bash", "arguments": _args(command="rm -rf build")}])
+    events, saw_input, send = [], False, None
+    while True:
+        try:
+            ev = await gen.asend(send)
+        except StopAsyncIteration:
+            break
+        send = None
+        if ev.kind == "needs_user_input":
+            saw_input = True
+        events.append(ev)
+    fin = _fin(events)
+    assert not saw_input  # no prompt, no park
+    assert fin.data["ok"] is False and "denied" in fin.data["content"]
+    assert "RAN DANGEROUS" not in fin.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_settings_ask_rule_denied_directly(monkeypatch):
+    # A settings `ask` rule resolves to deny — neutrix never prompts.
+    monkeypatch.setattr("neutrix.executor.dispatch", lambda *a, **k: "ran")
     ex = Executor()
     ex.policy = PermissionPolicy(ask=("Write",))
-    events = await _drive(
-        ex, [{"id": "1", "name": "Write", "arguments": _args(path="a")}],
-        responder=_responder("yes"),
-    )
-    assert _fin(events).data["content"] == "ran Write"
-    assert ex.policy.allow == ()
-
-
-@pytest.mark.asyncio
-async def test_permission_ask_always_runs_and_adds_rule(monkeypatch):
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: f"ran {name}")
-    ex = Executor()
-    ex.policy = PermissionPolicy(ask=("Write",))
-    events = await _drive(
-        ex, [{"id": "1", "name": "Write", "arguments": _args(path="a")}],
-        responder=_responder("always"),
-    )
-    assert _fin(events).data["content"] == "ran Write"
-    assert "Write" in ex.policy.allow
-
-
-@pytest.mark.asyncio
-async def test_permission_ask_always_scopes_bash_to_first_token(monkeypatch):
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: "ran")
-    ex = Executor()  # auto mode: `rm -rf` is dangerous → ask
-    await _drive(
-        ex, [{"id": "1", "name": "Bash", "arguments": _args(command="rm -rf build")}],
-        responder=_responder("always"),
-    )
-    assert "Bash(rm *)" in ex.policy.allow
-
-
-@pytest.mark.asyncio
-async def test_permission_ask_no_blocks(monkeypatch):
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: "ran")
-    ex = Executor()
-    ex.policy = PermissionPolicy(ask=("Write",))
-    fin = _fin(await _drive(
-        ex, [{"id": "1", "name": "Write", "arguments": _args(path="a")}],
-        responder=_responder("no"),
-    ))
+    events = await _drive(ex, [{"id": "1", "name": "Write", "arguments": _args(path="a")}])
+    fin = _fin(events)
     assert fin.data["ok"] is False and "denied" in fin.data["content"]
 
 
 @pytest.mark.asyncio
-async def test_permission_ask_no_consumer_blocks_with_notice(monkeypatch):
-    # v1.4.0 behavior preserved when there is no interactive consumer.
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: "ran")
+async def test_deny_rule_denied_directly(monkeypatch):
+    monkeypatch.setattr("neutrix.executor.dispatch", lambda *a, **k: "ran")
     ex = Executor()
-    ex.policy = PermissionPolicy(ask=("Write",))
-    fin = _fin(await _drive(ex, [{"id": "1", "name": "Write", "arguments": _args(path="a")}]))
-    assert fin.data["ok"] is False and "approval" in fin.data["content"]
+    ex.policy = PermissionPolicy(deny=("Bash(rm *)",))
+    events = await _drive(ex, [{"id": "1", "name": "Bash", "arguments": _args(command="rm x")}])
+    fin = _fin(events)
+    assert fin.data["ok"] is False and "denied" in fin.data["content"]
 
 
 # ---- ContextManager drive (the real .asend() consumer) -------------------
@@ -239,19 +225,15 @@ async def test_cm_dispatch_no_port_not_available():
 
 
 @pytest.mark.asyncio
-async def test_cm_dispatch_permission_always_updates_policy(monkeypatch):
-    monkeypatch.setattr("neutrix.executor.dispatch", lambda name, *a, **k: f"ran {name}")
-    ctx = _bare_ctx()
-    ctx.executor.policy = PermissionPolicy(ask=("Write",))
-
-    async def port(spec):
-        return _responder("always")(spec)
-
-    ctx.ask_user = port
-    await ctx._dispatch_tools([{"id": "1", "name": "Write", "arguments": _args(path="a")}])
-    assert "Write" in ctx.executor.policy.allow
+async def test_cm_dispatch_dangerous_denied_without_port(monkeypatch):
+    # The CM never sees permission: a dangerous Bash is denied by the Executor
+    # even though ask_user is None, and the round completes (no park).
+    monkeypatch.setattr("neutrix.executor.dispatch", lambda *a, **k: "RAN")
+    ctx = _bare_ctx()  # ask_user is None
+    await ctx._dispatch_tools([{"id": "1", "name": "Bash", "arguments": _args(command="rm -rf x")}])
     tool_msgs = [m for m in ctx.messages if m.get("role") == "tool"]
-    assert tool_msgs[-1]["content"] == "ran Write"
+    assert tool_msgs and "denied" in tool_msgs[-1]["content"]
+    assert "RAN" not in tool_msgs[-1]["content"]
 
 
 def test_ask_user_question_excluded_from_subagents():

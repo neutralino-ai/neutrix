@@ -167,9 +167,9 @@ def format_duration_short(seconds: float) -> str:
 # steadily-streaming response doesn't flicker a 0-1s age on every tick.
 PROGRESS_AGE_FLOOR_S = 3.0
 
-# v1.5.1: an interactive prompt (AskUserQuestion / permission-ask) waits at most
-# this long for an answer, then falls back to the safe non-interactive path so an
-# unanswered prompt can never park the turn forever (the v1.4.8 regression).
+# v1.5.1: an interactive AskUserQuestion prompt waits at most this long for an
+# answer, then falls back to the safe non-interactive path so an unanswered prompt
+# can never park the turn forever (the v1.4.8 regression).
 PROMPT_TIMEOUT_S = 300.0
 
 
@@ -968,7 +968,7 @@ class TerminalChat:
                 await self.view.print_notice("\nquit")
                 return
 
-            # v1.4.8: a pending AskUserQuestion / permission prompt claims input.
+            # v1.4.8: a pending AskUserQuestion prompt claims input.
             # Empty input is ignored (the question stays pending → re-prompt);
             # any non-empty line resolves the Future the worker task awaits.
             pending = self._pending_answer
@@ -1384,10 +1384,10 @@ class TerminalChat:
         v1.5.1: the wait is BOUNDED by ``PROMPT_TIMEOUT_S`` and returns ``None``
         on timeout — an unanswered prompt must never park the turn forever (the
         v1.4.8 regression). ``None`` routes to the Executor's "no interactive
-        consumer" branch: permission-``ask`` falls back to block-with-notice
-        (turn continues), AskUserQuestion returns the not-available result. Esc
-        still raises ``CancelledError`` (a real cancel), unwinding the turn; the
-        ``finally`` clears the pending state on every exit.
+        consumer" branch, where AskUserQuestion returns the not-available result.
+        (Permission no longer uses this port — v1.5.3 denies directly inside the
+        Executor.) Esc still raises ``CancelledError`` (a real cancel), unwinding
+        the turn; the ``finally`` clears the pending state on every exit.
         """
         from neutrix.prompts import QuestionAnswer
 

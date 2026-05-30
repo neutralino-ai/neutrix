@@ -39,3 +39,5 @@ sessions/
 # .claude/rules/ stays tracked — it's the project's shared workflow rules.
 .claude/settings.json
 .claude/settings.local.json
+.claude/*.lock
+.claude/wf-*.js

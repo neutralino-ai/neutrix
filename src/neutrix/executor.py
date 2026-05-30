@@ -29,13 +29,9 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from neutrix.permissions import (
-    USER_DENIED,
     PermissionPolicy,
-    apply_always_rule,
     block_reason,
     decide,
-    permission_question,
-    verdict_from_answer,
 )
 from neutrix.prompts import (
     ASK_NOT_AVAILABLE,
@@ -164,35 +160,18 @@ class Executor:
                 "tool_started",
                 {"tool_call_id": tcid, "tool_name": name, "args": args},
             )
-            # v1.4.0/v1.4.8 permission gate before any side effect. `ask` is a
-            # real yes/always/no prompt when the consumer can answer (a
-            # `needs_user_input` event the CM drives via `.asend()`), else
-            # block-with-notice. The Executor builds the request and interprets
-            # the reply but NEVER touches the UI — it only yields/receives on
-            # its channel, keeping UI→CM→Executor layering intact.
-            verdict = decide(name, args, mode=self.permission_mode, policy=self.policy)
-            if verdict == "deny":
-                yield _finished(tcid, name, block_reason(name, "deny"), ok=False)
+            # v1.5.3 permission safety layer (Executor-only): a dangerous/denied
+            # action is denied DIRECTLY — a denied tool_result, and the round
+            # continues (the model adapts). No interactive prompt, no
+            # `needs_user_input` for permission; the CM and Advisor never see it.
+            if decide(name, args, mode=self.permission_mode, policy=self.policy) == "deny":
+                yield _finished(tcid, name, block_reason(name, args), ok=False)
                 continue
-            if verdict == "ask":
-                answer = yield _needs_input(permission_question(name, args, verdict))
-                if answer is None:  # no interactive consumer → v1.4.0 block-notice
-                    yield _finished(
-                        tcid, name, block_reason(name, "ask", self.permission_mode),
-                        ok=False,
-                    )
-                    continue
-                decision = verdict_from_answer(answer)
-                if decision == "no":
-                    yield _finished(tcid, name, USER_DENIED, ok=False)
-                    continue
-                if decision == "always":
-                    self.policy = apply_always_rule(self.policy, name, args)
-                # yes / always → fall through and run the tool
 
-            # v1.4.8: AskUserQuestion is interactive — round-trip through the
-            # `needs_user_input` channel, never to_thread. A ``None`` reply means
-            # no interactive consumer (inside a subagent / headless).
+            # v1.4.8: AskUserQuestion is the agent's own interactive tool — it
+            # round-trips through the `needs_user_input` channel, never to_thread.
+            # A ``None`` reply means no interactive consumer (subagent / headless).
+            # Permission never uses this channel.
             if name == "AskUserQuestion":
                 try:
                     spec = parse_question_spec(args)

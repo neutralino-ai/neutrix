@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.5.3 splits — permission is an Executor-only safety layer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .badge.flag{color:var(--flag);background:#fbeada;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}.split .decision.flag{color:var(--flag);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.5.3 splits — permission is an Executor-only safety layer</h1>
+<p class="tagline">Remove the interactive permission prompt that parks the turn. The Executor is a deterministic safety layer: a dangerous action is <strong>denied directly</strong> (returns a "denied" tool_result) — never asked. The ContextManager and Advisor never see permission.</p>
+<p class="note"><strong>Why now (urgent):</strong> v1.4.8 turned the permission <code>ask</code> verdict into an interactive prompt routed <em>up</em> to the CM — every <code>auto</code>-flagged destructive Bash (<code>rm -rf</code>, <code>git reset --hard</code>, force-push…) parked the turn awaiting a human (bounded to 300&nbsp;s by v1.5.1, still blocking). User-directed: "drop the permission part… permission should be in executor part. controller, advisor does not need to know it"; and "if it detect dangerous action, deny directly. return tool_result denied… don't ask user question. let's be like industrial agent." <br>
+<strong>CC survey:</strong> CC's main loop (<code>queryLoop</code>, <code>query.ts:241</code>) is permission-agnostic (zero permission imports); <code>canUseTool</code> runs in the tool-execution layer (<code>toolHooks.ts:361</code>). neutrix Follows CC on the agnostic loop; it User-directed-<em>diverges</em> on the prompt — CC asks interactively, neutrix denies directly (industrial: no human in the loop).</p>
+
+<h2>Split points</h2>
+
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">Where the permission decision lives</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd><code>canUseTool</code> is called from the tool-execution layer (<code>toolHooks.ts:361</code>), never from <code>queryLoop</code>. The loop is permission-agnostic.</dd>
+<dt>neutrix now</dt><dd><code>decide()</code> already runs inside <code>Executor.dispatch_all</code> (<code>executor.py:173</code>) — good — but the <code>ask</code> branch then yields <code>needs_user_input</code>, which the <strong>CM</strong> drives (<code>context_manager.py:864-868</code>), dragging permission into the loop.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow CC + User-directed.</strong> Permission is decided AND fully resolved inside the Executor. The CM holds no permission semantics; <code>decide()</code>/policy/mode stay on the <code>Executor</code> where they already live.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name">The interactive <code>ask</code> prompt — remove it entirely</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd><code>ask</code> shows an approval dialog; the tool's execution awaits the human's answer (resolved Promise), then runs or refuses.</dd>
+<dt>neutrix now</dt><dd><code>ask</code> → <code>yield _needs_input(permission_question(...))</code> (<code>executor.py:178</code>) → CM awaits <code>ask_user</code> up to <code>PROMPT_TIMEOUT_S</code>&nbsp;=&nbsp;300&nbsp;s. This park is the bug.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>User-directed different — delete the <code>ask</code> verdict and its prompt.</strong> "don't ask user question. let's be like industrial agent." The entire <code>ask</code> branch in <code>dispatch_all</code> (<code>executor.py:177-191</code>) is removed; <code>decide()</code> returns only <code>allow</code>/<code>deny</code>. No permission path ever yields <code>needs_user_input</code>, so the loop never parks on a permission verdict.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">3.</span><span class="name">What <code>auto</code> does with a detected-dangerous action</span><span class="badge decided">decided</span></div>
+<dl><dt>The fork</dt><dd>Once it no longer prompts: (a) run routine, block only catastrophic; (b) run everything; (c) block-with-notice "pending approval"; (d) <strong>deny directly</strong>.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>User-directed different — (d) deny directly.</strong> "if it detect dangerous action, deny directly. return tool_result denied." The danger heuristic (and any settings <code>ask</code> rule) resolves to <code>deny</code>: the Executor returns a <code>role:tool</code> "[denied …]" result and the round continues — the LLM sees the denial and adapts. Deterministic safety, no human gate, no hang. <strong>Trade accepted:</strong> a routine <code>rm -rf build</code> is denied (not run) under <code>auto</code>; <code>/allow</code> (allow-all) or an explicit <code>.claude/settings.json</code> <code>allow</code> rule is the deliberate escape hatch. Explicit <code>allow</code> still overrides the heuristic; <code>allow-all</code> still bypasses everything.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">4.</span><span class="name">The CM <code>ask_user</code> port / <code>needs_user_input</code> channel</span><span class="badge flag">decided + flag</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>Keep the port — for AskUserQuestion ONLY.</strong> The v1.4.8 <code>needs_user_input</code> handler + <code>ask_user</code> port stay, but after this release only the agent-initiated <code>AskUserQuestion</code> <em>tool</em> uses them (a question the agent chooses to ask, not an automatic gate). Permission stops using the channel; the <code>PROMPT_TIMEOUT_S</code> bound stays for the tool.</dd>
+<dt class="decision flag">Open flag</dt><dd class="decision flag">"no ask user / industrial agent" is scoped here to <strong>permission</strong>. The <code>AskUserQuestion</code> tool (v1.4.8, the agent's own clarifying-question tool) is kept. If the industrial-agent intent is that neutrix should never ask the user <em>anything</em>, retiring that tool is a clean separate follow-up (v1.5.4) — say the word and it's a one-PRD change.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">5.</span><span class="name">Advisor permission-awareness</span><span class="badge decided">decided</span></div>
+<dl><dt>neutrix now</dt><dd><code>advisor.py</code> has zero permission references; its Task-tool changes apply via <code>tools.dispatch(store=…)</code>, which <em>bypasses</em> <code>Executor.dispatch_all</code> and <code>decide()</code>. Already permission-agnostic.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>No change — preserve the invariant.</strong> "advisor does not need to know it" already holds; this release keeps it true (the Advisor never gains a permission path).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">6.</span><span class="name">The now-dead interactive-permission code</span><span class="badge decided">decided</span></div>
+<dl><dt>Affected</dt><dd><code>permission_question</code>, <code>verdict_from_answer</code>, <code>apply_always_rule</code>, <code>USER_DENIED</code> (<code>permissions.py:164-223</code>) + their imports in <code>executor.py</code> — all only reachable from the removed <code>ask</code>-prompt branch; also the runtime "Always allow this command" path.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — delete (YAGNI).</strong> Dead after #2/#3. Static <code>allow</code>/<code>deny</code> rules in <code>.claude/settings.json</code> still work (<code>load_policy</code> unchanged) and <code>/allow</code> stays — only the interactive "Always" button goes, which was only reachable through the removed prompt.</dd></dl></div>
+
+<footer>v1.5.3 permission-executor-only · 6 split points, all decided (1 carries an open flag on the AskUserQuestion tool) · revert the v1.4.8 permission-ask-via-CM coupling ·
+<code>decide()</code> → <code>allow</code>/<code>deny</code> only; dangerous → <strong>deny directly</strong> (returns a denied tool_result), never parks · CM &amp; Advisor permission-agnostic (Follow CC's agnostic loop) ·
+<code>needs_user_input</code> becomes AskUserQuestion-only · delete the dead interactive-permission code.</footer>
+</body></html>
