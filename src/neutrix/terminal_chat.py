@@ -58,13 +58,6 @@ from neutrix.context_manager import (
     is_advisor_message,
     is_task_reminder,
 )
-from neutrix.prompts import (
-    Answer,
-    Question,
-    QuestionSpec,
-    parse_answer_line,
-    render_question,
-)
 from neutrix.session_store import SessionWriter, list_sessions, new_session_id
 from neutrix.skills import discover_skills, render_skill, skills_signature
 from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
@@ -166,11 +159,6 @@ def format_duration_short(seconds: float) -> str:
 # v1.5.0: only surface "last token Ns ago" once the gap exceeds this floor, so a
 # steadily-streaming response doesn't flicker a 0-1s age on every tick.
 PROGRESS_AGE_FLOOR_S = 3.0
-
-# v1.5.1: an interactive AskUserQuestion prompt waits at most this long for an
-# answer, then falls back to the safe non-interactive path so an unanswered prompt
-# can never park the turn forever (the v1.4.8 regression).
-PROMPT_TIMEOUT_S = 300.0
 
 
 STREAM_PREVIEW_LINES = 8
@@ -899,11 +887,6 @@ class TerminalChat:
         # hot-reloaded by a background poll on the dir signature.
         self._skills = discover_skills(os.getcwd())
         self._skills_sig = skills_signature(os.getcwd())
-        # v1.4.8 interactive prompt state. When a question is pending, the input
-        # loop resolves `_pending_answer` (cross-task, same loop) instead of
-        # enqueuing a new user message. The 4-state ContextManager is unchanged.
-        self._pending_question: Question | None = None
-        self._pending_answer: asyncio.Future[str] | None = None
         # v1.5.0 status bar: the turn-end Advisor runs while the CM is IDLE, so
         # a chat-side flag drives its indicator.
         self._advisor_busy: bool = False
@@ -967,15 +950,6 @@ class TerminalChat:
             except KeyboardInterrupt:
                 await self.view.print_notice("\nquit")
                 return
-
-            # v1.4.8: a pending AskUserQuestion prompt claims input.
-            # Empty input is ignored (the question stays pending → re-prompt);
-            # any non-empty line resolves the Future the worker task awaits.
-            pending = self._pending_answer
-            if pending is not None and not pending.done():
-                if text.strip():
-                    pending.set_result(text)
-                continue
 
             text = text.strip()
             if not text:
@@ -1074,16 +1048,9 @@ class TerminalChat:
         # assistant text, shown ONLY in this live region (committed text goes to
         # scrollback via _render_record — strictly disjoint channels).
         preview = _stream_preview(self.store.pending_assistant_text)
-        # v1.4.8: while a question is pending, a one-line "answering" indicator
-        # (state, not an idle affordance) — clears the moment it is answered.
-        pending_q = self._pending_question
-        answering = (
-            f"▶ answer needed: {pending_q.header} — type a number, or Esc to skip"
-            if pending_q is not None else None
-        )
         if (
             not heartbeat and not tasks and not queued
-            and quit_hint is None and not preview and answering is None
+            and quit_hint is None and not preview
         ):
             return ""
         try:
@@ -1098,8 +1065,6 @@ class TerminalChat:
                 lines.append(heartbeat_text)
             if preview:
                 lines.append(preview)
-            if answering is not None:
-                lines.append(answering)
             for _style, text in format_task_panel(tasks):
                 lines.append(text.rstrip("\n"))
             for q in queued:
@@ -1111,8 +1076,6 @@ class TerminalChat:
         fragments: list[tuple[str, str]] = list(heartbeat)
         if preview:
             fragments.append(("fg:ansibrightblack italic", f"{preview}\n"))
-        if answering is not None:
-            fragments.append(("fg:ansiyellow bold reverse", f"{answering}\n"))
         fragments.extend(format_task_panel(tasks))
         for q in queued:
             fragments.append(("fg:ansibrightblack", f"{QUEUED_PREFIX}{q.text}\n"))
@@ -1371,57 +1334,6 @@ class TerminalChat:
         affordance is visible without a separate dim notice.
         """
         return self.ctx.cancel()
-
-    async def _ask_user(self, spec: QuestionSpec) -> Answer | None:
-        """Interactive ``ask_user`` port (wired into ``ctx.ask_user``).
-
-        Runs inside the worker task (the turn). For each question: print the
-        numbered block to scrollback, set ``_pending_question`` + a fresh Future
-        BEFORE the print's await (so a keystroke during the await routes to the
-        Future, not the message queue), then await the Future the input loop
-        resolves.
-
-        v1.5.1: the wait is BOUNDED by ``PROMPT_TIMEOUT_S`` and returns ``None``
-        on timeout — an unanswered prompt must never park the turn forever (the
-        v1.4.8 regression). ``None`` routes to the Executor's "no interactive
-        consumer" branch, where AskUserQuestion returns the not-available result.
-        (Permission no longer uses this port — v1.5.3 denies directly inside the
-        Executor.) Esc still raises ``CancelledError`` (a real cancel), unwinding
-        the turn; the ``finally`` clears the pending state on every exit.
-        """
-        from neutrix.prompts import QuestionAnswer
-
-        answers: list[QuestionAnswer] = []
-        total = len(spec.questions)
-        try:
-            for idx, question in enumerate(spec.questions):
-                loop = asyncio.get_running_loop()
-                while True:
-                    self._pending_question = question
-                    self._pending_answer = loop.create_future()
-                    await self.view.print_system(render_question(question, idx, total))
-                    self._invalidate_app()
-                    try:
-                        line = await asyncio.wait_for(
-                            self._pending_answer, PROMPT_TIMEOUT_S
-                        )
-                    except TimeoutError:
-                        await self.view.print_notice(
-                            f"no answer in {int(PROMPT_TIMEOUT_S)}s — continuing "
-                            "without it (the call was not approved)",
-                            style="yellow",
-                        )
-                        return None  # → safe fallback; finally clears state
-                    qa = parse_answer_line(line, question)
-                    if qa is None:  # empty — re-prompt (defensive; input loop skips empties)
-                        continue
-                    answers.append(qa)
-                    break
-        finally:
-            self._pending_question = None
-            self._pending_answer = None
-            self._invalidate_app()
-        return Answer(per_question=tuple(answers))
 
     # --------------------------------------------------------------- advisor
 

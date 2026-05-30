@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.5.4 splits — retire AskUserQuestion (defer to v3)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.5.4 splits — retire AskUserQuestion (defer to v3)</h1>
+<p class="tagline">Remove the v1.4.8 AskUserQuestion tool and its entire interactive-input apparatus from v2. The concept defers to v3 (interactive human-feedback fits the RL-environment vision).</p>
+<p class="note"><strong>Why (user-directed 2026-05-30):</strong> "it's not stable. remove the askuser from all and defer to v3. v2 shall not take 'askuser'. so remove ask user tool etc." The asking machinery has been a recurring instability source — the v1.4.8 park-forever regression and the v1.5.1 prompt-hang both lived in the interactive-prompt path. An industrial agent does not pause for the human. <br>
+<strong>CC survey:</strong> CC keeps an AskUserQuestion-style interactive tool (`canUseTool`/AskUserQuestion). neutrix <strong>diverges (User-directed different)</strong> — it removes its own. After v1.5.3 nothing else uses the channel (permission was already decoupled), so this is a clean excision, not a refactor-with-a-replacement.</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Scope of removal — the tool only, or the whole apparatus</span><span class="badge decided">decided</span></div>
+<dl><dt>The fork</dt><dd>(a) drop just the tool registration (leave the channel/ports dormant); (b) remove the entire apparatus.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>User-directed — (b) remove ALL.</strong> "remove the askuser from all … remove ask user tool etc." Gone: the <code>AskUserQuestion</code> tool + <code>_ask_user_question</code> backstop (<code>tools.py</code>); the whole <code>prompts.py</code> module; the Executor's AskUserQuestion branch + <code>_needs_input</code>/<code>needs_user_input</code> event; the CM <code>ask_user</code> port + <code>AskUserPort</code> import + the <code>needs_user_input</code> handler; <code>terminal_chat._ask_user</code> + <code>PROMPT_TIMEOUT_S</code> + the pending-answer Future machinery + the "answer needed" indicator; the <code>cli.py</code> wiring.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">2.</span><span class="name"><code>dispatch_all</code> — keep the bidirectional generator, or revert to plain</span><span class="badge decided">decided</span></div>
+<dl><dt>Now</dt><dd>v1.4.8 made <code>Executor.dispatch_all</code> a <em>bidirectional</em> async generator (<code>answer = yield …</code>; CM drives it with <code>gen.asend()</code>). AskUserQuestion was its only input consumer (permission stopped using it in v1.5.3).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — revert to a plain event-emitting async generator.</strong> With no input consumer, <code>dispatch_all</code> goes back to plain <code>yield ToolEvent(...)</code> and the CM's <code>_dispatch_tools</code> back to a plain <code>async for event in gen</code> (no <code>asend</code>/send loop, no <code>aclose</code>-on-park). Simpler and removes the class of "parked at a yield" bugs. (Keeping the scaffold "for v3" is YAGNI — v3 will design its own RL feedback channel.)</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name"><code>prompts.py</code> — delete the module or keep the data types</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Alternative — delete the module.</strong> <code>Option/Question/QuestionSpec/Answer/QuestionAnswer</code>, the parse/render helpers, <code>ASK_NOT_AVAILABLE</code>, and <code>AskUserPort</code> are used <em>only</em> by AskUserQuestion (permission's use went in v1.5.3). Nothing else imports them → delete <code>src/neutrix/prompts.py</code> and <code>tests/test_prompts.py</code>.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">The subagent tool set</span><span class="badge decided">decided</span></div>
+<dl><dt>Now</dt><dd><code>subagent_tool_names()</code> = <code>BUILTIN_TOOLS − {Agent, AskUserQuestion}</code> (v1.4.8 split #7 kept a humanless subagent from deadlocking on a question).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow — mechanical.</strong> With the tool gone it's simply <code>BUILTIN_TOOLS − {Agent}</code>; the deadlock guard is moot (no question tool exists).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">5.</span><span class="name">Deferring the concept to v3</span><span class="badge decided">decided</span></div>
+<dl><dt class="decision">Decision</dt><dd class="decision"><strong>No CC analog (a deferral) — record it on the v3 line.</strong> The roadmap's v3 (RL-environment) section gains a note: interactive human-feedback / ask-the-user belongs to v3, where a tunable, seedable env can model human input as part of the loop — not v2. v2 ships with <strong>no</strong> human-in-the-loop tool; the agent always proceeds autonomously (degrading exactly as headless runs already did).</dd></dl></div>
+
+<footer>v1.5.4 retire-ask-user · 5 split points, all decided · removes the v1.4.8 AskUserQuestion tool + the entire interactive-input apparatus (tool, <code>prompts.py</code>, the bidirectional generator, the CM <code>ask_user</code> port, <code>terminal_chat._ask_user</code>) · <code>dispatch_all</code> reverts to a plain async generator · concept deferred to v3. User-directed: "v2 shall not take askuser."</footer>
+</body></html>

@@ -644,6 +644,25 @@
 </div>
 
 <div class="entry">
+  <span class="ver"><a href="PRDs/v1.5.4-retire-ask-user.md">v1.5.4</a></span>
+  <span class="theme">
+    Retire AskUserQuestion (defer to v3)
+    <small>
+      Removes the v1.4.8 AskUserQuestion tool and its entire interactive-input
+      apparatus (the tool, <code>prompts.py</code>, the bidirectional
+      <code>dispatch_all</code> generator, the CM <code>ask_user</code> port,
+      <code>terminal_chat._ask_user</code>). v2 has no human-in-the-loop tool — the
+      agent always proceeds autonomously. A recurring instability source (the v1.4.8
+      park regression, the v1.5.1 hang) and a net deletion; <code>dispatch_all</code>
+      reverts to a plain async generator. The concept defers to v3 (interactive
+      feedback fits the RL-env). User-directed: "v2 shall not take askuser."
+      (<a href="splits/v1.5.4-retire-ask-user.html">5 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.6.0</span>
   <span class="theme">
     <code>/goal</code> — autonomous multi-step loop
@@ -755,6 +774,9 @@
       the TUI — the v0.10.3 store-purity + FakeView swap-test are the groundwork
       — with the system prompt a first-class, externally-injected parameter.
       Captured now so v2 architecture choices keep the loop cleanly headless.
+      Interactive human-feedback — the retired v1.5.4 AskUserQuestion — belongs here
+      too: modelling human input in a seedable loop is an RL-env concern, not a v2
+      feature.
     </small>
   </span>
   <span class="badges"><span class="badge p3">P3</span><span class="badge planned">vision</span></span>

@@ -33,11 +33,6 @@ from neutrix.permissions import (
     block_reason,
     decide,
 )
-from neutrix.prompts import (
-    ASK_NOT_AVAILABLE,
-    format_answers_result,
-    parse_question_spec,
-)
 from neutrix.store import ChatStore
 from neutrix.tools import dispatch
 
@@ -162,27 +157,10 @@ class Executor:
             )
             # v1.5.3 permission safety layer (Executor-only): a dangerous/denied
             # action is denied DIRECTLY — a denied tool_result, and the round
-            # continues (the model adapts). No interactive prompt, no
-            # `needs_user_input` for permission; the CM and Advisor never see it.
+            # continues (the model adapts). No prompt, no human in the loop; the
+            # CM and Advisor never see permission.
             if decide(name, args, mode=self.permission_mode, policy=self.policy) == "deny":
                 yield _finished(tcid, name, block_reason(name, args), ok=False)
-                continue
-
-            # v1.4.8: AskUserQuestion is the agent's own interactive tool — it
-            # round-trips through the `needs_user_input` channel, never to_thread.
-            # A ``None`` reply means no interactive consumer (subagent / headless).
-            # Permission never uses this channel.
-            if name == "AskUserQuestion":
-                try:
-                    spec = parse_question_spec(args)
-                except ValueError as exc:
-                    yield _finished(tcid, name, f"ERROR: {exc}", ok=False)
-                    continue
-                answer = yield _needs_input(spec)
-                if answer is None:
-                    yield _finished(tcid, name, ASK_NOT_AVAILABLE, ok=False)
-                    continue
-                yield _finished(tcid, name, format_answers_result(answer), ok=True)
                 continue
 
             try:
@@ -202,17 +180,6 @@ def _finished(tcid: str, name: str, content: str, *, ok: bool) -> ToolEvent:
         "tool_finished",
         {"tool_call_id": tcid, "tool_name": name, "content": content, "ok": ok},
     )
-
-
-def _needs_input(spec: Any) -> ToolEvent:
-    """Build a ``needs_user_input`` request event (v1.4.8).
-
-    Yielded by :py:meth:`Executor.dispatch_all`; the consumer (ContextManager)
-    drives it with ``gen.asend(answer)`` — passing an
-    :class:`~neutrix.prompts.Answer` if it has an interactive port, or ``None``
-    if not. The Executor never holds the port, so it never calls the UI.
-    """
-    return ToolEvent("needs_user_input", {"spec": spec})
 
 
 def _tree_kill(proc: subprocess.Popen, grace_seconds: float = 0.2) -> None:

@@ -4,6 +4,30 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.5.4] — 2026-05-30
+
+### Removed
+- **AskUserQuestion is retired** (user-directed: "v2 shall not take askuser"; the
+  concept defers to v3, where interactive human-feedback fits the RL-environment
+  vision). Removed the v1.4.8 tool and its **entire interactive-input apparatus**:
+  the `AskUserQuestion` tool, `src/neutrix/prompts.py`, the Executor's question
+  branch + the `needs_user_input` event, the `ContextManager` `ask_user` port, and
+  `terminal_chat._ask_user` (with `PROMPT_TIMEOUT_S`, the pending-answer machinery,
+  and the "answer needed" indicator). **v2 has no human-in-the-loop tool** — the
+  agent always proceeds autonomously (as headless/subagent runs already did).
+
+### Changed
+- **`Executor.dispatch_all` is now a plain async generator** (was bidirectional,
+  v1.4.8). With no input consumer it only yields `tool_started`/`tool_finished`,
+  and the `ContextManager` drives it with a plain `async for` — removing the
+  "parked at a yield" bug class behind the v1.4.8 park regression and the v1.5.1
+  hang.
+- `subagent_tool_names()` is now `BUILTIN_TOOLS − {Agent}` (the
+  AskUserQuestion-deadlock guard is moot with no question tool).
+
+See [docs/PRDs/v1.5.4-retire-ask-user.md](docs/PRDs/v1.5.4-retire-ask-user.md)
+and [docs/splits/v1.5.4-retire-ask-user.html](docs/splits/v1.5.4-retire-ask-user.html).
+
 ## [v1.5.3] — 2026-05-30
 
 ### Changed

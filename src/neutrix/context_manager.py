@@ -61,12 +61,9 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from loguru import logger
-
-if TYPE_CHECKING:
-    from neutrix.prompts import AskUserPort
 
 from neutrix.compaction import (
     CompactionOutcome,
@@ -234,12 +231,6 @@ class ContextManager:
     # chat, which passes neither.
     tool_names: frozenset[str] | None = None
     max_rounds: int | None = None
-    # v1.4.8 interactive port (CC's `canUseTool` role). Injected by the UI
-    # (TerminalChat); the CM is the ONLY layer that holds it, so the Executor
-    # stays a pure event leaf. None everywhere non-interactive (tests, piped
-    # stdin, inside a subagent) → AskUserQuestion degrades; permission is denied
-    # directly in the Executor, never via this port.
-    ask_user: AskUserPort | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     # v1.5.0: wall-clock start of the current busy phase (this LLM round / this
@@ -838,36 +829,19 @@ class ContextManager:
         return assistant_msg
 
     async def _dispatch_tools(self, tool_calls: list[dict[str, str]]) -> None:
-        """Drive the executor's event stream and apply each event to messages.
+        """Drive the executor's tool-event stream and apply each event to messages.
 
-        The executor is a bidirectional async generator (v1.4.8): it yields
-        ``tool_started`` / ``tool_finished`` like before, and — for the
-        interactive AskUserQuestion tool (permission is denied in the Executor) — a
-        ``needs_user_input`` event. The CM is the ONLY layer that holds the
-        ``ask_user`` port: it resolves the prompt (via the UI) and feeds the
-        :class:`~neutrix.prompts.Answer` back in with ``gen.asend(answer)``
-        (``None`` when there is no interactive consumer). The Executor never
-        calls the UI; it only yields and receives on its own channel, so
-        UI→CM→Executor layering holds. Sequential — results append in order.
+        The executor (v1.5.4: a plain async generator) yields ``tool_started`` /
+        ``tool_finished``; the CM appends each settled tool result in order. On
+        CANCELLING it stops — ``executor.cancel()`` has already tree-killed
+        subprocesses — and the ``finally`` closes the generator.
         """
         gen = self.executor.dispatch_all(tool_calls)
-        send: Any = None
         try:
-            while True:
-                try:
-                    event = await gen.asend(send)
-                except StopAsyncIteration:
-                    return
-                send = None
+            async for event in gen:
                 if not isinstance(event, ToolEvent):  # pragma: no cover - defensive
                     continue
                 data = event.data
-                if event.kind == "needs_user_input":
-                    # Relay to the human (CM owns the port); the answer (or None
-                    # when non-interactive) is sent back on the next asend.
-                    spec = data.get("spec")
-                    send = await self.ask_user(spec) if self.ask_user is not None else None
-                    continue
                 if event.kind == "tool_started":
                     self.store.add_pending_tool_call(
                         str(data.get("tool_name") or ""),
@@ -893,15 +867,8 @@ class ContextManager:
                         )
                     )
                 if self.state == State.CANCELLING:
-                    # Stop processing further events; abandoning the
-                    # generator is OK because executor.cancel() already
-                    # tree-killed subprocesses.
                     return
         finally:
-            # Close the suspended generator (e.g. cancel mid-prompt left it
-            # parked at a `needs_user_input` yield) so it unwinds cleanly.
-            # Best-effort: a re-delivered CancelledError (BaseException) still
-            # propagates; only mundane cleanup errors are swallowed.
             try:
                 await gen.aclose()
             except Exception:

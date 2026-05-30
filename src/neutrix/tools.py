@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from neutrix.prompts import ASK_NOT_AVAILABLE
 from neutrix.store import ChatStore
 
 if TYPE_CHECKING:
@@ -611,27 +610,12 @@ def _agent(
     return result.final_text
 
 
-def _ask_user_question(**_kwargs: Any) -> str:
-    """Backstop for ``AskUserQuestion`` (v1.4.8).
-
-    Normally intercepted in :py:meth:`Executor.dispatch_all` and routed to the
-    async ``ask_user`` port — never reaches in-thread dispatch. Reaching here
-    means no port (a direct ``dispatch()`` call, or a misconfigured harness), so
-    there is no human to answer.
-    """
-    return ASK_NOT_AVAILABLE
-
-
 def subagent_tool_names() -> frozenset[str]:
-    """The tool allowlist a subagent gets: every builtin except ``Agent`` and
-    ``AskUserQuestion``.
+    """The tool allowlist a subagent gets: every builtin except ``Agent``.
 
-    Omitting ``Agent`` makes recursion structurally impossible (v0.10.0 split
-    #3); omitting ``AskUserQuestion`` (v1.4.8 split #7) keeps a subagent — which
-    has no terminal of its own — from blocking forever on a human who can't see
-    its prompt.
+    Omitting ``Agent`` makes recursion structurally impossible (v0.10.0 split #3).
     """
-    return frozenset(BUILTIN_TOOLS) - {"Agent", "AskUserQuestion"}
+    return frozenset(BUILTIN_TOOLS) - {"Agent"}
 
 
 # ----- registry ---------------------------------------------------------------
@@ -862,69 +846,6 @@ BUILTIN_TOOLS: dict[str, Tool] = {
             "required": ["description", "prompt"],
         },
         func=_agent,
-    ),
-    "AskUserQuestion": Tool(
-        name="AskUserQuestion",
-        description=(
-            "Ask the user a structured question and PAUSE until they answer. "
-            "Use when a decision is genuinely the user's to make and you cannot "
-            "resolve it from the request, the code, or sensible defaults — not "
-            "for choices with an obvious default. 1-4 questions; each has 2-4 "
-            "options with a label and a description; set multiSelect to allow "
-            "multiple choices. The user can always type their own free-text "
-            "answer instead of picking an option."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "questions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 4,
-                    "description": "1-4 questions to ask the user.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "question": {
-                                "type": "string",
-                                "description": "The complete question, ending with '?'.",
-                            },
-                            "header": {
-                                "type": "string",
-                                "description": "Very short label (≤12 chars).",
-                            },
-                            "multiSelect": {
-                                "type": "boolean",
-                                "description": "Allow selecting multiple options.",
-                                "default": False,
-                            },
-                            "options": {
-                                "type": "array",
-                                "minItems": 2,
-                                "maxItems": 4,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": {
-                                            "type": "string",
-                                            "description": "Concise choice (1-5 words).",
-                                        },
-                                        "description": {
-                                            "type": "string",
-                                            "description": "What this choice means.",
-                                        },
-                                    },
-                                    "required": ["label"],
-                                },
-                            },
-                        },
-                        "required": ["question", "header", "options"],
-                    },
-                },
-            },
-            "required": ["questions"],
-        },
-        func=_ask_user_question,
     ),
 }
 

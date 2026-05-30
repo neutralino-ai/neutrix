@@ -189,10 +189,6 @@ def main(argv: list[str] | None = None) -> int:
     # v1.5.2: on resume, append to the resumed session file (skip its records).
     if resume_session_id is not None:
         chat._resume_session_id = resume_session_id
-    # v1.4.8: give the ContextManager the interactive port so AskUserQuestion and
-    # the permission `ask` verdict can reach the human. The CM is the only layer
-    # that holds it (the Executor stays a pure event leaf); None everywhere else.
-    ctx.ask_user = chat._ask_user
     chat.run()
     return 0
 

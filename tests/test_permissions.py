@@ -114,3 +114,15 @@ async def test_executor_deny_rule_blocks(monkeypatch):
     events = await _dispatch(ex, [{"id": "1", "name": "Bash", "arguments": _args(command="rm x")}])
     fin = next(e for e in events if e.kind == "tool_finished")
     assert fin.data["ok"] is False and "denied" in fin.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_executor_auto_denies_dangerous_bash(monkeypatch):
+    # The safety layer denies an auto-flagged destructive command directly — the
+    # tool never runs, and (v1.5.4) there is no interactive prompt at all.
+    monkeypatch.setattr("neutrix.executor.dispatch", lambda *a, **k: "RAN")
+    ex = Executor()  # auto mode
+    events = await _dispatch(ex, [{"id": "1", "name": "Bash", "arguments": _args(command="rm -rf build")}])
+    fin = next(e for e in events if e.kind == "tool_finished")
+    assert fin.data["ok"] is False and "denied" in fin.data["content"]
+    assert "RAN" not in fin.data["content"]
