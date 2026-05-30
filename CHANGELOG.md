@@ -4,6 +4,37 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.6.1] — 2026-05-31
+
+### Fixed
+- **`anthropic/*` models produced no output (P0 live hotfix).** The IHEP gateway
+  streams the **Anthropic Messages SSE protocol** (`content_block_delta` /
+  `input_json_delta` / `message_delta`) for `anthropic/*` models on the same
+  `/chat/completions` endpoint, but neutrix's inbound parser only read OpenAI
+  `choices[].delta` — so every byte from `claude-opus-4-7` was dropped, leaving an
+  empty turn (and a stall up to the 300 s timeout). The Anthropic event is now
+  parsed off `chunk.model_extra` (text → tokens, `tool_use` → `tool_calls`,
+  `stop_reason` → `finish_reason`), detected per-chunk so an OpenAI backend is
+  never misrouted. No new dependency; cancellation + watchdog unchanged.
+- **An empty assistant turn poisoned the next request on strict backends.** A
+  `{"role":"assistant","content":null}` message with **no `tool_calls`** (left by
+  the bug above, or any no-text/cancelled turn) made `openai/gpt-5.5` and the
+  anthropic gateway return an empty reply with no error (`deepseek/*` tolerated
+  it) — which is why switching away from opus "also stopped working." A new
+  `_ensure_sdk_compliant` outbound umbrella (composing the existing tool-pairing
+  with a new `_repair_empty_assistants`) replaces null/blank no-tool_calls
+  assistant content with a `[no response]` placeholder, **healing already-poisoned
+  sessions** without starting over. (Placeholder, not drop — preserves
+  user↔assistant alternation; pre-translation — only genuine empties are
+  repaired, text-free tool calls are preserved.)
+
+Token-usage capture and full Anthropic `tool_use`-block outbound translation are
+deferred (see PRD non-goals). Diagnosis confirmed live against the gateway and by
+the user.
+
+See [docs/PRDs/v1.6.1-anthropic-stream.md](docs/PRDs/v1.6.1-anthropic-stream.md)
+and [docs/splits/v1.6.1-anthropic-stream.html](docs/splits/v1.6.1-anthropic-stream.html).
+
 ## [v1.6.0] — 2026-05-31
 
 ### Added

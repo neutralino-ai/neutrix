@@ -39,6 +39,37 @@ from neutrix.config import Slot
 INTERRUPTED_BY_USER_MARKER = "[interrupted by user]"
 CANCELLED_TOOL_RESULT = "[cancelled by user]"
 MISSING_TOOL_RESULT = "[tool result missing]"
+# v1.6.1: placeholder for an empty assistant turn (null/blank content AND no
+# tool_calls) on outbound. Such a turn — left by a dropped or no-text response
+# (e.g. the pre-v1.6.1 anthropic-SSE bug) — makes strict backends
+# (``openai/gpt-5.5``, the IHEP anthropic gateway) return an EMPTY reply with no
+# error; ``deepseek/*`` tolerates it. Repaired to a placeholder rather than
+# dropped, to preserve user↔assistant alternation (a drop creates consecutive
+# user turns that strict backends reject).
+EMPTY_ASSISTANT_PLACEHOLDER = "[no response]"
+
+# v1.6.1: Anthropic Messages SSE — stop_reason → OpenAI finish_reason, and the
+# event ``type``s we parse off ``chunk.model_extra`` (see
+# :py:meth:`OpenAIChatLLM._anthropic_event`).
+_ANTHROPIC_STOP_REASON = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "max_tokens": "length",
+    "tool_use": "tool_calls",
+    "pause_turn": "stop",
+    "refusal": "stop",
+}
+_ANTHROPIC_EVENT_TYPES = frozenset(
+    {
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+        "ping",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -164,6 +195,71 @@ def _ensure_tool_result_pairing(
     )
 
 
+def _repair_empty_assistants(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return a new list where every *empty assistant turn* gets a placeholder.
+
+    An assistant message whose content is null/blank/whitespace AND which has
+    **no** ``tool_calls`` is an empty turn — a dropped or no-text response.
+    Sent verbatim it makes strict backends (``openai/gpt-5.5``, the IHEP
+    anthropic gateway) return an EMPTY reply with no error (``deepseek/*``
+    tolerates it), and a single such turn anywhere in history poisons the whole
+    request. We replace the content with
+    :data:`EMPTY_ASSISTANT_PLACEHOLDER` so the turn is API-valid everywhere
+    while keeping role alternation intact (a drop would leave consecutive user
+    turns that strict backends also reject).
+
+    A null-content assistant *with* ``tool_calls`` is the normal text-free
+    tool-call shape — left untouched. Pure transform on a copy — does NOT
+    mutate ``messages`` (the ContextManager-as-sole-mutator rule). Runs on
+    outbound so it heals histories already carrying such turns, not just
+    prevents new ones.
+    """
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") == "assistant"
+            and not msg.get("tool_calls")
+        ):
+            content = msg.get("content")
+            if not (isinstance(content, str) and content.strip()):
+                patched = dict(msg)
+                patched["content"] = EMPTY_ASSISTANT_PLACEHOLDER
+                out.append(patched)
+                continue
+        out.append(msg)
+    return out
+
+
+def _ensure_sdk_compliant(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The outbound payload-compliance layer — every transform that makes the
+    message list valid for the API lives here, in one named seam. Pure
+    (operates on copies; does not mutate ``messages``).
+
+    Composes, in order:
+
+    1. :func:`_ensure_tool_result_pairing` — dedup duplicate tool results and
+       synthesize a result for any orphan ``tool_call``.
+    2. :func:`_repair_empty_assistants` — replace an empty assistant turn
+       (null/blank content AND no ``tool_calls``) with a placeholder so a
+       strict backend doesn't choke on the empty block.
+
+    Runs **before** :py:meth:`OpenAIChatLLM._outbound_prompt` so both steps see
+    the canonical OpenAI-shaped message (the empty-block repair can tell a
+    genuine empty turn from a text-free tool call by its ``tool_calls`` — a
+    distinction the anthropic-gateway translation erases). New API-validity
+    repairs belong here, beside the tool-pairing fix — the single seam the
+    streaming send routes through.
+    """
+    out = _ensure_tool_result_pairing(messages)
+    out = _repair_empty_assistants(out)
+    return out
+
+
 class OpenAIChatLLM:
     """Non-streaming OpenAI Chat Completions adapter.
 
@@ -205,8 +301,8 @@ class OpenAIChatLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[LLMEvent]:
-        paired = _ensure_tool_result_pairing(messages)
-        outbound_messages, system_text = self._outbound_prompt(paired)
+        compliant = _ensure_sdk_compliant(messages)
+        outbound_messages, system_text = self._outbound_prompt(compliant)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": outbound_messages,
@@ -227,6 +323,19 @@ class OpenAIChatLLM:
             async for chunk in stream:
                 choice = self._first_choice(chunk)
                 if choice is None:
+                    # v1.6.1: the IHEP gateway streams Anthropic Messages SSE for
+                    # anthropic/* models — there is no OpenAI ``choices``; the raw
+                    # event survives in ``chunk.model_extra``. Fold its text /
+                    # tool_use / stop_reason onto the SAME accumulators.
+                    event = self._anthropic_event(chunk)
+                    if event is not None:
+                        text, a_reason = self._apply_anthropic_event(
+                            event, content_parts, tool_calls_by_index
+                        )
+                        if a_reason is not None:
+                            finish_reason = a_reason
+                        if text:
+                            yield LLMEvent("token", text)
                     continue
                 reason = self._read(choice, "finish_reason")
                 if reason is not None:
@@ -322,6 +431,81 @@ class OpenAIChatLLM:
         if not accumulator:
             return []
         return [accumulator[index] for index in sorted(accumulator)]
+
+    def _anthropic_event(self, chunk: Any) -> dict[str, Any] | None:
+        """Return the Anthropic Messages SSE event carried on ``chunk``, or None.
+
+        The ``AsyncOpenAI`` SDK cannot map Anthropic events to ``choices`` (so
+        :py:meth:`_first_choice` is None) but stashes the raw event dict in
+        ``chunk.model_extra`` (pydantic extra-allow). Some gateways stream plain
+        dict chunks instead, so we also accept a bare dict. A chunk counts as
+        Anthropic only when that extra carries a known Anthropic event ``type``
+        — so an OpenAI usage-only final chunk (empty ``choices``, no Anthropic
+        ``type``) is never misrouted here.
+        """
+        extra = getattr(chunk, "model_extra", None)
+        if extra is None and isinstance(chunk, dict):
+            extra = chunk
+        if not isinstance(extra, dict):
+            return None
+        etype = extra.get("type")
+        if isinstance(etype, str) and etype in _ANTHROPIC_EVENT_TYPES:
+            return extra
+        return None
+
+    def _apply_anthropic_event(
+        self,
+        event: dict[str, Any],
+        content_parts: list[str],
+        tool_calls_by_index: dict[int, dict[str, Any]],
+    ) -> tuple[str | None, str | None]:
+        """Fold one Anthropic Messages event onto the streaming accumulators.
+
+        Returns ``(text_to_yield, finish_reason)``: ``text_to_yield`` is a text
+        delta to surface as a ``token`` event (or None); ``finish_reason`` is
+        the mapped OpenAI reason once ``message_delta`` carries a stop_reason
+        (or None). Accumulates into the SAME ``content_parts`` /
+        ``tool_calls_by_index`` as the OpenAI branch, so
+        :py:meth:`_finalize_tool_calls` and the terminal assembly are
+        unchanged. A block's ``delta.type`` (``text_delta`` vs
+        ``input_json_delta``) is authoritative; ``thinking_delta`` and other
+        block kinds are ignored (thinking display is a non-goal).
+        """
+        etype = event.get("type")
+        if etype == "content_block_start":
+            index = int(self._read(event, "index", 0) or 0)
+            block = self._read(event, "content_block", {}) or {}
+            if self._read(block, "type") == "tool_use":
+                tool_calls_by_index[index] = {
+                    "id": str(self._read(block, "id", "") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(self._read(block, "name", "") or ""),
+                        "arguments": "",
+                    },
+                }
+            return None, None
+        if etype == "content_block_delta":
+            index = int(self._read(event, "index", 0) or 0)
+            delta = self._read(event, "delta", {}) or {}
+            dtype = self._read(delta, "type")
+            if dtype == "text_delta":
+                text = self._read(delta, "text")
+                if isinstance(text, str) and text:
+                    content_parts.append(text)
+                    return text, None
+            elif dtype == "input_json_delta":
+                partial = self._read(delta, "partial_json")
+                call = tool_calls_by_index.get(index)
+                if call is not None and isinstance(partial, str) and partial:
+                    call["function"]["arguments"] += partial
+            return None, None
+        if etype == "message_delta":
+            delta = self._read(event, "delta", {}) or {}
+            stop = self._read(delta, "stop_reason")
+            if isinstance(stop, str) and stop:
+                return None, _ANTHROPIC_STOP_REASON.get(stop, "stop")
+        return None, None
 
     def _first_choice(self, completion: Any) -> Any | None:
         choices = self._read(completion, "choices", []) or []

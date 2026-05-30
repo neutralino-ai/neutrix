@@ -10,11 +10,14 @@ import pytest
 from neutrix.config import Slot
 from neutrix.llm import (
     CANCELLED_TOOL_RESULT,
+    EMPTY_ASSISTANT_PLACEHOLDER,
     INTERRUPTED_BY_USER_MARKER,
     MISSING_TOOL_RESULT,
     LLMResponse,
     OpenAIChatLLM,
+    _ensure_sdk_compliant,
     _ensure_tool_result_pairing,
+    _repair_empty_assistants,
 )
 
 
@@ -472,3 +475,221 @@ async def test_stop_closes_active_stream():
     # so the generator finishes normally (no CancelledError needed here).
     await asyncio.wait_for(task, timeout=0.5)
     assert llm._active_stream is None
+
+
+# ---- v1.6.1 Bug #1: Anthropic Messages SSE inbound parse -------------------
+
+
+def _anthropic_chunk(event: dict[str, Any]) -> SimpleNamespace:
+    """A chunk as the AsyncOpenAI SDK yields it for an Anthropic SSE event:
+    no usable ``choices``; the raw event in ``model_extra``."""
+    return SimpleNamespace(choices=None, model_extra=event)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sse_text_streaming():
+    """anthropic/* text arrives as content_block_delta/text_delta off model_extra."""
+    completions = FakeCompletions(
+        [
+            _anthropic_chunk({"type": "message_start", "message": {"usage": {"input_tokens": 5}}}),
+            _anthropic_chunk(
+                {"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "text", "text": ""}}
+            ),
+            _anthropic_chunk({"type": "ping"}),
+            _anthropic_chunk(
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "hel"}}
+            ),
+            _anthropic_chunk(
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "lo"}}
+            ),
+            _anthropic_chunk({"type": "content_block_stop", "index": 0}),
+            _anthropic_chunk(
+                {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                 "usage": {"output_tokens": 2}}
+            ),
+            _anthropic_chunk({"type": "message_stop"}),
+        ]
+    )
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    ]
+    assert [e.kind for e in events] == ["token", "token", "assistant"]
+    assert [e.data for e in events if e.kind == "token"] == ["hel", "lo"]
+    resp = events[-1].data
+    assert resp.message == {"role": "assistant", "content": "hello"}
+    assert resp.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sse_tool_use_streaming():
+    """tool_use block (content_block_start + input_json_delta) → one tool_call."""
+    completions = FakeCompletions(
+        [
+            _anthropic_chunk({"type": "message_start", "message": {}}),
+            _anthropic_chunk(
+                {"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "text", "text": ""}}
+            ),
+            _anthropic_chunk(
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "Let me check."}}
+            ),
+            _anthropic_chunk({"type": "content_block_stop", "index": 0}),
+            _anthropic_chunk(
+                {"type": "content_block_start", "index": 1,
+                 "content_block": {"type": "tool_use", "id": "toolu_1", "name": "get_weather"}}
+            ),
+            _anthropic_chunk(
+                {"type": "content_block_delta", "index": 1,
+                 "delta": {"type": "input_json_delta", "partial_json": '{"city":'}}
+            ),
+            _anthropic_chunk(
+                {"type": "content_block_delta", "index": 1,
+                 "delta": {"type": "input_json_delta", "partial_json": ' "Paris"}'}}
+            ),
+            _anthropic_chunk({"type": "content_block_stop", "index": 1}),
+            _anthropic_chunk({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+            _anthropic_chunk({"type": "message_stop"}),
+        ]
+    )
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[{"role": "user", "content": "weather in Paris?"}],
+            tools=[{"type": "function", "function": {"name": "get_weather"}}],
+        )
+    ]
+    resp = events[-1].data
+    assert resp.finish_reason == "tool_calls"
+    assert resp.message["content"] == "Let me check."
+    assert resp.message["tool_calls"] == [
+        {
+            "id": "toolu_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+        }
+    ]
+
+
+def test_anthropic_event_detection_is_typed():
+    """A chunk is Anthropic only when model_extra carries a known event type —
+    an OpenAI usage-only chunk (empty choices, no anthropic type) is NOT."""
+    llm = OpenAIChatLLM(_slot())
+    openai_usage = SimpleNamespace(choices=[], model_extra={"usage": {"prompt_tokens": 1}})
+    assert llm._anthropic_event(openai_usage) is None
+    anthropic = SimpleNamespace(
+        choices=None, model_extra={"type": "content_block_delta", "delta": {}}
+    )
+    assert llm._anthropic_event(anthropic) is not None
+
+
+# ---- v1.6.1 Bug #2: empty-assistant repair ---------------------------------
+
+
+def test_repair_empty_assistant_null_no_tools_gets_placeholder():
+    out = _repair_empty_assistants(
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": None}]
+    )
+    assert out[1]["content"] == EMPTY_ASSISTANT_PLACEHOLDER
+
+
+def test_repair_keeps_null_content_with_tool_calls():
+    """A null-content assistant WITH tool_calls is a normal text-free tool call."""
+    msg = {"role": "assistant", "content": None, "tool_calls": [_tool_call("c1")]}
+    out = _repair_empty_assistants([msg])
+    assert out[0]["content"] is None
+    assert out[0]["tool_calls"] == [_tool_call("c1")]
+
+
+def test_repair_empty_string_and_whitespace_get_placeholder():
+    out = _repair_empty_assistants(
+        [{"role": "assistant", "content": ""}, {"role": "assistant", "content": "   "}]
+    )
+    assert out[0]["content"] == EMPTY_ASSISTANT_PLACEHOLDER
+    assert out[1]["content"] == EMPTY_ASSISTANT_PLACEHOLDER
+
+
+def test_repair_keeps_real_content_and_non_assistants():
+    out = _repair_empty_assistants(
+        [
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": ""},
+            {"role": "tool", "tool_call_id": "c1", "content": ""},
+        ]
+    )
+    assert out[0]["content"] == "hello"
+    assert out[1]["content"] == ""  # a user message is never repaired
+    assert out[2]["content"] == ""  # a tool message is never repaired
+
+
+def test_repair_empty_assistants_is_pure():
+    msgs = [{"role": "assistant", "content": None}]
+    snapshot = [dict(m) for m in msgs]
+    out = _repair_empty_assistants(msgs)
+    assert msgs == snapshot  # input unchanged
+    assert out is not msgs
+
+
+@pytest.mark.asyncio
+async def test_repair_empty_assistants_runs_before_outbound_request():
+    """An empty assistant turn is repaired in the outgoing payload."""
+    completions = FakeCompletions([_content_chunk("ok", finish_reason="stop")])
+    llm = OpenAIChatLLM(_slot())
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},  # the poison
+        {"role": "user", "content": "go"},
+    ]
+    _ = [e async for e in llm.stream_response(model="m", messages=messages)]
+    outbound = completions.kwargs["messages"]
+    assistants = [m for m in outbound if m.get("role") == "assistant"]
+    assert assistants[0]["content"] == EMPTY_ASSISTANT_PLACEHOLDER
+
+
+def test_ensure_sdk_compliant_composes_pairing_and_empty_repair():
+    """The umbrella runs BOTH compliance steps: orphan tool_calls get a
+    synthetic result AND a separate empty assistant turn gets the placeholder.
+    A null-content assistant WITH tool_calls is left for pairing (not repaired)."""
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None, "tool_calls": [_tool_call("c1")]},
+        {"role": "user", "content": "next"},
+        {"role": "assistant", "content": None},  # genuine empty turn
+        {"role": "user", "content": "go"},
+    ]
+    out = _ensure_sdk_compliant(messages)
+    # 1. orphan tool_call c1 got a synthetic result (pairing).
+    assert any(
+        m.get("role") == "tool"
+        and m.get("tool_call_id") == "c1"
+        and m["content"] == MISSING_TOOL_RESULT
+        for m in out
+    )
+    # 2. the tool-call assistant keeps content=None (a text-free tool call).
+    tc_assistant = next(m for m in out if m.get("tool_calls"))
+    assert tc_assistant["content"] is None
+    # 3. the genuine empty assistant turn got the placeholder (empty repair).
+    assert any(
+        m.get("role") == "assistant"
+        and not m.get("tool_calls")
+        and m.get("content") == EMPTY_ASSISTANT_PLACEHOLDER
+        for m in out
+    )
+    # purity
+    assert out is not messages

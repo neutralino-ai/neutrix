@@ -681,6 +681,25 @@
 </div>
 
 <div class="entry">
+  <span class="ver"><a href="PRDs/v1.6.1-anthropic-stream.md">v1.6.1</a></span>
+  <span class="theme">
+    Hotfix — <code>anthropic/*</code> streaming + empty-turn poison
+    <small>
+      P0 live fix (user hit it mid-OMILREC). Two linked bugs: (1) the IHEP gateway
+      streams the <strong>Anthropic Messages SSE protocol</strong> for
+      <code>anthropic/*</code> models, but neutrix only parsed OpenAI chunks → opus
+      produced nothing — now parsed off <code>chunk.model_extra</code> (text +
+      tool_use, no new dep); (2) a <code>content:null</code>-no-tool_calls assistant
+      turn poisoned the next request on strict backends (gpt-5.5, the anthropic
+      gateway) → an <code>_ensure_sdk_compliant</code> umbrella (pairing +
+      empty-block repair) heals it. Diagnosis confirmed live + by the user.
+      (<a href="splits/v1.6.1-anthropic-stream.html">8 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
   <span class="ver">v1.7.0</span>
   <span class="theme">
     Parallel tools + background Bash
