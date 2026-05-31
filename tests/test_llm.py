@@ -813,6 +813,34 @@ def test_usage_hit_miss_view():
 
 
 @pytest.mark.asyncio
+async def test_openai_llm_aclose_closes_underlying_client():
+    """v1.7.3: aclose() closes the httpx connection pool (via client.close())."""
+    llm = OpenAIChatLLM(_slot())
+    closed: list[bool] = []
+
+    class _FakeClient:
+        async def close(self) -> None:
+            closed.append(True)
+
+    llm._client = _FakeClient()
+    await llm.aclose()
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_openai_llm_aclose_swallows_client_errors():
+    """v1.7.3: aclose() is best-effort — teardown must never raise."""
+    llm = OpenAIChatLLM(_slot())
+
+    class _BadClient:
+        async def close(self) -> None:
+            raise RuntimeError("boom")
+
+    llm._client = _BadClient()
+    await llm.aclose()  # must not raise
+
+
+@pytest.mark.asyncio
 async def test_openai_usage_captured_onto_llmresponse():
     llm = OpenAIChatLLM(_slot())
     chunks = [

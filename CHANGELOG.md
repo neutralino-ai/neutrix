@@ -4,6 +4,23 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.3] — 2026-05-31
+
+### Fixed
+- **Sub-agent runs no longer print "Event loop is closed" / "Unhandled exception
+  in event loop".** Each `Agent` sub-agent runs on its own `asyncio.run()` loop
+  with its own `AsyncOpenAI` client (`tools.py`) that was never closed — so when
+  the sub-agent's loop closed, the lingering proxied keep-alive connections in
+  httpx's pool tore down on the now-dead loop and raised `RuntimeError: Event loop
+  is closed`. `OpenAIChatLLM` gains an `aclose()` (closes the httpx pool), called
+  in `run_subagent`'s `finally` so the pool closes *inside* the sub-agent's loop
+  before it ends; the main-session client is likewise `aclose`d on shutdown. The
+  error was cosmetic (it fired after the sub-agent returned its result) but noisy
+  and recurred once per sub-agent. Keep-alive is unchanged — closing the pool in
+  the right loop is the fix, not disabling pooling.
+
+See [docs/PRDs/v1.7.3-subagent-cleanup.md](docs/PRDs/v1.7.3-subagent-cleanup.md).
+
 ## [v1.7.2] — 2026-05-31
 
 ### Changed

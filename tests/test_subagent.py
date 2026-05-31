@@ -108,6 +108,50 @@ async def test_subagent_runs_to_completion() -> None:
     assert result.error is None
 
 
+class _AcloseSpyLLM:
+    """A scripted LLM that records aclose() calls — to assert run_subagent closes
+    the sub-agent's client inside its loop (v1.7.3)."""
+
+    def __init__(self, rounds: list[list[LLMEvent]], raise_in_stream: bool = False) -> None:
+        self.rounds = list(rounds)
+        self.aclosed = 0
+        self._raise = raise_in_stream
+
+    def switch(self, slot: Slot) -> None:  # pragma: no cover - unused
+        pass
+
+    def stop(self) -> None:  # pragma: no cover - unused
+        pass
+
+    async def aclose(self) -> None:
+        self.aclosed += 1
+
+    async def stream_response(self, *, model, messages, tools=None):
+        if self._raise:
+            raise RuntimeError("boom")
+        batch = self.rounds.pop(0) if self.rounds else [_text("")]
+        for event in batch:
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_run_subagent_acloses_llm_on_success() -> None:
+    llm = _AcloseSpyLLM([[_text("done")]])
+    await run_subagent(user_prompt="x", slot=_slot(), llm=llm, tool_names=frozenset({"Read"}))
+    assert llm.aclosed == 1  # client closed inside the sub-agent loop
+
+
+@pytest.mark.asyncio
+async def test_run_subagent_acloses_llm_even_when_llm_errors() -> None:
+    """A failing LLM call doesn't skip the aclose: the CM turns the error into an
+    [LLM error] turn and run_subagent returns normally, so its finally still runs
+    aclose. (The CM consumes cancellation internally — v0.9.2 — so a raw
+    CancelledError never reaches this finally; it runs on the normal path.)"""
+    llm = _AcloseSpyLLM([], raise_in_stream=True)
+    await run_subagent(user_prompt="x", slot=_slot(), llm=llm, tool_names=frozenset({"Read"}))
+    assert llm.aclosed == 1
+
+
 @pytest.mark.asyncio
 async def test_subagent_dispatches_tools(monkeypatch) -> None:
     """Subagent calls a tool, gets the result, then finalizes."""

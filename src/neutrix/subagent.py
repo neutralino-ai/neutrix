@@ -120,6 +120,14 @@ async def run_subagent(
                 await watcher
             except asyncio.CancelledError:
                 pass
+        # v1.7.3: close the sub-agent's httpx connection pool INSIDE this loop,
+        # before asyncio.run() returns — otherwise its proxied keep-alive
+        # connections tear down on the now-closed loop afterward, raising
+        # "RuntimeError: Event loop is closed". Guarded so a pool-less fake LLM
+        # (tests) is simply skipped. Best-effort: aclose never raises.
+        aclose = getattr(llm, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     cancelled = cancel_event is not None and cancel_event.is_set()
     final_text = _extract_final_text(cm.messages, max_turns=max_turns)

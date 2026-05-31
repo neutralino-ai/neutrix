@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.7.3 splits — sub-agent HTTP-client cleanup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.7.3 splits — sub-agent HTTP-client cleanup</h1>
+<p class="tagline">Stop the recurring <code>RuntimeError: Event loop is closed</code> ("Unhandled exception in event loop") that fires after each <code>Agent</code> sub-agent finishes.</p>
+<p class="note"><strong>Agent-decided under "decide yourself"</strong> ([[feedback-investigate-decide]]); CC-surveyed (<code>/datafs/users/dingxf/anthropic/cc2/src</code>), advisor-reviewed. <strong>Diagnosis (confirmed):</strong> each sub-agent runs on its own <code>asyncio.run()</code> loop on a worker thread (<code>tools.py › run_subagent dispatch</code>) with its own <code>AsyncOpenAI</code> client (<code>tools.py:641</code>) that is <strong>never closed</strong>. When the sub-agent's loop closes, the lingering proxied keep-alive connections in httpx's pool tear down and schedule their close (<code>loop.call_soon</code>) on the dead loop → the error (the <code>http_proxy.py</code> frames = the user's local proxy). Cosmetic (fires after the result returns) but noisy + recurs per sub-agent. See <code>docs/PRDs/v1.7.3-subagent-cleanup.md</code>.</p>
+
+<h2>Split points</h2>
+
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">Fix shape — match the pool's lifetime to its loop</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>CC (Node/Bun) has <strong>one process-wide event loop</strong>; sub-agents (<code>utils/forkedAgent.ts</code>) are async tasks on it, cancelled via <code>AbortController</code> — they never spin up / tear down their own loop or client. So CC is <strong>structurally immune</strong>; it never closes a loop mid-process.</dd>
+<dt>Options</dt><dd>(a) <strong>re-architect to CC's single-loop model</strong> — run sub-agents as tasks on the main loop; (b) <strong><code>aclose()</code> the sub-agent client inside its own loop</strong> (in <code>run_subagent</code>'s <code>finally</code>); (c) leave it (cosmetic).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>(b) — aclose within the loop.</strong> Add <code>async def aclose(self): await self._client.close()</code> to <code>OpenAIChatLLM</code> and call it in <code>run_subagent</code>'s <code>finally</code>, so the httpx pool closes on the <em>live</em> sub-agent loop before <code>asyncio.run()</code> returns — nothing lingers to tear down on a dead loop. <strong>(a) rejected</strong>: neutrix <em>deliberately</em> isolates sub-agents on their own loop/thread (<code>subagent.py</code>) for clean cancellation; adopting CC's single-loop model would undo that isolation + rework cancellation, for a cosmetic error. Match <em>semantics</em>, not CC's runtime shape ([[prd-compare-with-claude]]). (c) rejected — recurs per sub-agent + leaks teardown.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Keep-alive — keep it or disable it on sub-agent clients</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>CC <strong>embraces</strong> keep-alive: "Bun's fetch shares a keep-alive connection pool globally, so the real API request reuses the warmed connection" (<code>utils/apiPreconnect.ts</code>) — it even pre-warms the handshake. (It does <em>skip</em> the preconnect under a proxy/mTLS, since the SDK's custom dispatcher won't share the global pool — the proxy is the aggravating factor here too.)</dd>
+<dt>Options</dt><dd>(a) <strong>keep</strong> keep-alive; (b) <strong>disable</strong> it on sub-agent clients (<code>httpx.Limits(max_keepalive_connections=0)</code>) so connections close within each request.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>(a) keep keep-alive — Follow CC.</strong> It's a real latency win, and once Split #1's <code>aclose</code> closes the pool inside the loop there's nothing dangling to misfire. Disabling keep-alive (b) is a valid backstop but trades the perf for redundancy with the real fix; not adopted (revisit only if the error survives the <code>aclose</code>).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Main-session client teardown (hygiene)</span><span class="badge decided">decided</span></div>
+<dl><dt>Now</dt><dd>The long-lived main client also lives on a loop (the session's <code>asyncio.run(run_async)</code>) that closes at process exit — so the same cosmetic error can fire <em>once</em> at shutdown.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Also <code>aclose</code> the main client</strong> in <code>terminal_chat.run_async</code>'s <code>finally</code>. Lower stakes (only at exit, not per-sub-agent) but the same one-liner; closes the loop-teardown error end-to-end.</dd></dl></div>
+
+<footer>v1.7.3 · 3 split points, agent-decided under "decide yourself" · add <code>OpenAIChatLLM.aclose()</code> and call it in <code>run_subagent</code>'s finally so the httpx pool closes inside the sub-agent's loop (#1, not CC's single-loop re-architecture); keep keep-alive per CC (#2); also aclose the main client on shutdown (#3). See <code>docs/PRDs/v1.7.3-subagent-cleanup.md</code>.</footer>
+</body></html>

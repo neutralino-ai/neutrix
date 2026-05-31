@@ -982,6 +982,11 @@ class TerminalChat:
             await self._render_new_records()
             self._persist_new_records()
             self._persist_new_usage()
+            # v1.7.3: close the main httpx connection pool before the session loop
+            # ends, so the same proxied-connection teardown doesn't fire at exit.
+            aclose = getattr(self.ctx.llm, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     async def _input_loop(self) -> None:
         while self._running:

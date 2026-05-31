@@ -232,7 +232,7 @@
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.7.3-architecture-doc.md">v1.7.3</a></span>
+  <span class="ver"><a href="PRDs/v1.7.4-architecture-doc.md">v1.7.4</a></span>
   <span class="theme">
     Architecture document (<code>docs/architecture.html</code>)
     <small>
@@ -240,10 +240,30 @@
       (<code>ui ↔ store ↔ CM ↔ {LLM, Executor, Advisor}</code>, hub-and-spoke) + the
       CM state machine + four function walkthroughs (cancel, rewind, save/load,
       goal) with symbol-based citations. Docs-only; updates <code>CLAUDE.md</code>'s
-      "single living document" note. (<a href="PRDs/v1.7.3-architecture-doc.md">PRD</a>.)
+      "single living document" note. (<a href="PRDs/v1.7.4-architecture-doc.md">PRD</a>.)
     </small>
   </span>
   <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.7.3-subagent-cleanup.md">v1.7.3</a></span>
+  <span class="theme">
+    Sub-agent HTTP-client cleanup — no more "Event loop is closed"
+    <small>
+      Each <code>Agent</code> sub-agent runs on its own <code>asyncio.run()</code>
+      loop with its own <code>AsyncOpenAI</code> client that is never closed; when
+      that loop closes, the lingering proxied keep-alive connections tear down on a
+      dead loop → a recurring <code>RuntimeError: Event loop is closed</code>
+      ("Unhandled exception in event loop"). Cosmetic but noisy. Fix: an
+      <code>OpenAIChatLLM.aclose()</code> called inside <code>run_subagent</code>'s
+      <code>finally</code> (close the pool on the live loop) — <strong>not</strong>
+      CC's single-loop re-architecture (keeps neutrix's deliberate cancellation
+      isolation); keep keep-alive (CC embraces it). Also aclose the main client on
+      shutdown. (<a href="splits/v1.7.3-subagent-cleanup.html">3 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">

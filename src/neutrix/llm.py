@@ -540,6 +540,21 @@ class OpenAIChatLLM:
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("OpenAIChatLLM.stop swallowed: {}", exc)
 
+    async def aclose(self) -> None:
+        """Close the underlying httpx connection pool (v1.7.3).
+
+        Critical for sub-agents: each runs on its own ``asyncio.run()`` loop with
+        its own client (``tools.py``); without an explicit close, the pool's
+        proxied keep-alive connections tear down on the *closed* loop afterward →
+        ``RuntimeError: Event loop is closed``. Call inside the owning loop (e.g.
+        ``run_subagent``'s ``finally``) before that loop ends. Best-effort and
+        idempotent — teardown must never raise.
+        """
+        try:
+            await self._client.close()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("OpenAIChatLLM.aclose swallowed: {}", exc)
+
     def _accumulate_tool_calls(
         self,
         accumulator: dict[int, dict[str, Any]],
