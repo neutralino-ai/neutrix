@@ -169,6 +169,72 @@ def test_run_shell_returns_cancelled_marker_when_tree_killed():
     assert result == ["[cancelled by user]"]
 
 
+# ---- v1.6.2 Bash timeout: deadlock-free kill, clamp, partial output -------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: killpg")
+def test_run_shell_timeout_tree_kills_grandchild_and_keeps_partial_output():
+    """v1.6.2 regression for the timeout-path deadlock: a command that times
+    out AND leaves a backgrounded grandchild holding the stdout pipe must NOT
+    block on the post-kill drain (the old ``proc.kill()`` + bare
+    ``communicate()`` waited for the orphaned grandchild's pipe EOF, ~forever).
+    The whole process *group* is tree-killed, the bounded drain returns fast,
+    and the partial stdout printed before the hang is preserved."""
+    result: list[str] = []
+
+    def runner() -> None:
+        # ``echo started`` → partial stdout; ``sleep 30 &`` → a backgrounded
+        # grandchild that inherits the pipe; foreground ``sleep 30`` keeps the
+        # shell alive past the 1 s timeout.
+        result.append(_run_shell("echo started; sleep 30 & sleep 30", timeout=1))
+
+    t = threading.Thread(target=runner, daemon=True)
+    start = time.monotonic()
+    t.start()
+    t.join(timeout=8.0)
+    elapsed = time.monotonic() - start
+
+    assert not t.is_alive(), f"_run_shell deadlocked on timeout ({elapsed:.1f}s)"
+    assert elapsed < 7.0, f"timeout path too slow ({elapsed:.1f}s)"
+    assert result, "runner produced no result"
+    assert result[0].startswith("ERROR: command timed out after 1s")
+    assert "started" in result[0]  # partial stdout preserved
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: killpg")
+def test_run_shell_timeout_clamps_supplied_value_to_max(monkeypatch):
+    """A timeout above the cap is clamped to ``_BASH_MAX_TIMEOUT_S`` and the
+    clamp is noted in the result so the LLM learns the ceiling."""
+    monkeypatch.setattr("neutrix.tools._BASH_MAX_TIMEOUT_S", 1)
+    out = _run_shell("sleep 30", timeout=999)
+    assert "ERROR: command timed out after 1s" in out
+    assert "requested timeout 999s clamped to max 1s" in out
+
+
+def test_run_shell_default_timeout_runs_fast_command():
+    """Omitting ``timeout`` resolves to the (long) default; a fast command
+    still returns its exit_code + stdout unchanged."""
+    out = _run_shell("echo hi")
+    assert "exit_code: 0" in out
+    assert "hi" in out
+
+
+def test_env_int_parses_and_bounds_invariant(monkeypatch):
+    """``_env_int`` returns a positive override or the fallback; the max cap is
+    held >= the default so an env override can't invert the bound."""
+    from neutrix import tools
+
+    monkeypatch.delenv("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", raising=False)
+    assert tools._env_int("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", 120) == 120
+    monkeypatch.setenv("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", "45")
+    assert tools._env_int("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", 120) == 45
+    monkeypatch.setenv("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", "0")  # non-positive → fallback
+    assert tools._env_int("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", 120) == 120
+    monkeypatch.setenv("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", "nope")  # invalid → fallback
+    assert tools._env_int("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", 120) == 120
+    assert tools._BASH_MAX_TIMEOUT_S >= tools._BASH_DEFAULT_TIMEOUT_S
+
+
 def test_register_and_unregister_cancellable_round_trip():
     """Defensive: the executor pool is a plain list; unregister of a
     proc not currently registered is a no-op."""

@@ -45,6 +45,26 @@ _TASK_UPDATE_STATUSES = ("pending", "in_progress", "completed", "deleted")
 _STORE_REQUIRED_TOOLS = frozenset({"TaskCreate", "TaskUpdate", "TaskList"})
 
 
+def _env_int(name: str, fallback: int) -> int:
+    """Positive int from ``os.environ[name]``; ``fallback`` if unset/invalid."""
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return fallback
+    return value if value > 0 else fallback
+
+
+# v1.6.2 Bash tool-execution timeout bounds (seconds). CC exposes a per-call
+# ``timeout`` schema param on Bash (ms, default 120000 / max 600000,
+# env-overridable); we mirror those *semantics* in seconds. ``max`` is held
+# >= ``default`` so an env that only raises the default can't invert the cap
+# (matches CC's ``getMaxBashTimeoutMs``). Read once at import — a CLI's env is
+# fixed for the run.
+_BASH_DEFAULT_TIMEOUT_S = _env_int("NEUTRIX_BASH_DEFAULT_TIMEOUT_S", 120)
+_BASH_MAX_TIMEOUT_S = max(_env_int("NEUTRIX_BASH_MAX_TIMEOUT_S", 600), _BASH_DEFAULT_TIMEOUT_S)
+_BASH_DRAIN_S = 2.0  # bound the post-tree_kill output drain so timeout can't re-block
+
+
 # Tool descriptions sent to the LLM. Lifted verbatim from Claude Code's
 # V2 task tool prompts (cc2/src/tools/{TaskCreateTool,TaskUpdateTool,
 # TaskListTool}/prompt.ts) with the agent-swarm-only sections dropped —
@@ -403,7 +423,7 @@ def _grep_python(
 
 def _run_shell(
     command: str,
-    timeout: int = 30,
+    timeout: int | None = None,
     *,
     executor: Executor | None = None,
 ) -> str:
@@ -416,8 +436,24 @@ def _run_shell(
     ``executor``'s cancellation pool before blocking on
     ``communicate``; unregisters in ``finally`` even on the timeout
     path.
+
+    ``timeout`` (v1.6.2) is the LLM-settable per-call ceiling in
+    seconds: ``None`` → ``_BASH_DEFAULT_TIMEOUT_S``; a supplied value
+    is clamped to ``[1, _BASH_MAX_TIMEOUT_S]`` (a clamp is noted in the
+    result). On timeout the whole process *group* is tree-killed — not
+    just the direct child — and the post-kill output drain is bounded
+    by ``_BASH_DRAIN_S``, so a grandchild that inherited the stdout
+    pipe can no longer block the call forever (the pre-v1.6.2
+    deadlock).
     """
-    logger.info("shell tool: {!r}", command)
+    requested = _BASH_DEFAULT_TIMEOUT_S if timeout is None else timeout
+    effective = min(max(1, requested), _BASH_MAX_TIMEOUT_S)
+    clamp_note = (
+        f"note: requested timeout {requested}s clamped to max {_BASH_MAX_TIMEOUT_S}s"
+        if requested > _BASH_MAX_TIMEOUT_S
+        else None
+    )
+    logger.info("shell tool: {!r} (timeout={}s)", command, effective)
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -432,16 +468,34 @@ def _run_shell(
     timed_out = False
     try:
         try:
-            out, err = proc.communicate(timeout=timeout)
+            out, err = proc.communicate(timeout=effective)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
+            # Tree-kill the whole process group (not just the direct child via
+            # ``proc.kill()``) so a leaked grandchild can't hold the stdout pipe
+            # open, then drain buffered output under a bound so this path can
+            # never re-block — the pre-v1.6.2 deadlock. Lazy import: ``executor``
+            # imports ``dispatch`` from this module at top level, so a top-level
+            # ``_tree_kill`` import here would hit a half-initialised module.
+            from neutrix.executor import _tree_kill
+
+            _tree_kill(proc)
+            try:
+                out, err = proc.communicate(timeout=_BASH_DRAIN_S)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
             timed_out = True
     finally:
         if executor is not None:
             executor.unregister_cancellable(proc)
     if timed_out:
-        return f"ERROR: command timed out after {timeout}s"
+        parts = [f"ERROR: command timed out after {effective}s"]
+        if clamp_note is not None:
+            parts.append(clamp_note)
+        if out:
+            parts.append(f"stdout:\n{out}")
+        if err:
+            parts.append(f"stderr:\n{err}")
+        return "\n".join(parts)
     if (
         executor is not None
         and executor._cancel_requested
@@ -450,6 +504,8 @@ def _run_shell(
     ):
         return "[cancelled by user]"
     parts = [f"exit_code: {proc.returncode}"]
+    if clamp_note is not None:
+        parts.append(clamp_note)
     if out:
         parts.append(f"stdout:\n{out}")
     if err:
@@ -756,8 +812,12 @@ BUILTIN_TOOLS: dict[str, Tool] = {
                 "command": {"type": "string", "description": "Shell command to run."},
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds.",
-                    "default": 30,
+                    "description": (
+                        f"Timeout in seconds (default {_BASH_DEFAULT_TIMEOUT_S}, "
+                        f"max {_BASH_MAX_TIMEOUT_S}). On timeout the command's "
+                        "process tree is killed and partial output returned."
+                    ),
+                    "default": _BASH_DEFAULT_TIMEOUT_S,
                 },
             },
             "required": ["command"],

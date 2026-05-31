@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.6.2 splits — tool_use execution timeout (harden Bash)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split.flag{border-color:var(--accent);border-width:2px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .badge.user{color:var(--alt);background:#f0e9f6;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.6.2 splits — tool_use execution timeout (harden Bash)</h1>
+<p class="tagline"><strong>Not greenfield.</strong> neutrix's <code>Bash</code> tool <em>already</em> exposes a <code>timeout</code> schema parameter (integer seconds, default 30) and enforces it (<code>src/neutrix/tools.py:404-457</code>, <code>:757-761</code>). This release (a) <strong>fixes a latent deadlock in that timeout path</strong>, (b) calibrates the default/cap, and (c) keeps partial output. <strong>Scope is Bash-only, mirroring CC</strong> (user decision, Split #1).</p>
+<p class="note"><strong>The latent bug (likely the "stuck" the user hit):</strong> on timeout, <code>_run_shell</code> calls <code>proc.kill()</code> — SIGKILL to the <em>direct child only</em>, not the process group — then blocks on a bare <code>proc.communicate()</code> with <em>no timeout</em> (<code>tools.py:437-438</code>). If the command spawned a grandchild that inherited the stdout pipe (a backgrounded subprocess, a daemon), that second <code>communicate()</code> can block <strong>forever</strong> even though the timeout "fired". The fix reuses the <code>_tree_kill</code> helper that already exists for the cancel path (<code>executor.py:185-212</code>, <code>killpg</code> SIGTERM→SIGKILL).</p>
+<p class="note"><strong>CC survey (<code>/datafs/users/dingxf/anthropic/cc2/src</code>):</strong> CC's <code>Bash</code> tool exposes an LLM-settable <code>timeout</code> schema param — <code>"Optional timeout in milliseconds (max …)"</code> (<code>tools/BashTool/BashTool.tsx:229</code>); default 120 000 ms / max 600 000 ms, both env-overridable (<code>BASH_DEFAULT_TIMEOUT_MS</code> / <code>BASH_MAX_TIMEOUT_MS</code>, <code>utils/timeouts.ts</code>). Enforcement: <code>setTimeout</code> → SIGTERM → tree-kill SIGKILL after a 5 s grace (<code>utils/ShellCommand.ts:135-140,323-343</code>; ripgrep mirrors this, <code>utils/ripgrep.ts:169-182</code>). On timeout CC <strong>keeps partial output</strong> and prepends <code>"Command timed out after &lt;duration&gt;"</code> to stderr (<code>ShellCommand.ts:323-327</code>). Other tools have <strong>fixed</strong> internal timeouts not exposed in schema — ripgrep 20–60 s, WebFetch 60 s; file tools have none. <strong>There is no global per-tool-call timeout wrapper</strong> — each tool owns its own. CC also auto-backgrounds a Bash command on timeout and exposes <code>run_in_background</code> (<code>BashTool.tsx:241,988-1010</code>).</p>
+<p class="note"><strong>Status:</strong> Split #1 (scope) decided <strong>Bash-only</strong> by the user via AskUserQuestion (2026-05-31). Splits #2–#6, #8 are agent recommendations following from that scope (fix-the-bug / Follow-CC-default / keep-existing); the user saw them in chat and they are ratified at the PRD accept gate. Version <code>v1.6.2</code> (reliability hardening, continues the v1.6.x sub-line, slots before v1.7.0 cost/timing).</p>
+
+<h2>Split points</h2>
+
+<div class="split flag"><div class="head"><span class="num">1.</span><span class="name">Timeout SCOPE — per-call Bash schema param, or a global backstop over ALL tool_use, or both?</span><span class="badge user">user-directed</span></div>
+<dl><dt>The user's Q</dt><dd>"for tool_use, need to add time out … pass it as scheme parameters?" — the core fork.</dd>
+<dt>CC</dt><dd>Per-call schema param on Bash only; fixed internal timeouts on a few others; <strong>no global wrapper</strong> (<code>BashTool.tsx:229</code>).</dd>
+<dt>neutrix today</dt><dd>Bash schema param (default 30 s); Grep-rg fixed 30 s (<code>tools.py:354</code>); pure-compute tools (Glob, Grep-python fallback, Read, Edit, Write) have NO timeout and run in <code>asyncio.to_thread</code> (<code>executor.py:167</code>) — a hung one can't be killed, only abandoned.</dd>
+<dt>Options</dt><dd>(A) <strong>Bash-only harden</strong> — mirror CC, leave pure-compute unprotected; (B) Bash schema param + a global executor backstop wrapping every tool_use; (C) per-tool fixed timeouts everywhere + Bash settable.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>(A) Bash-only — Follow CC, user-directed</strong> (AskUserQuestion, 2026-05-31; the user chose "Bash-only (mirror CC)" over the agent's backstop recommendation (B)). Harden the existing Bash <code>timeout</code> schema param; leave the pure-compute tools unprotected exactly as CC leaves its file tools. Rationale: fits the user's "keep it simple, otherwise we never ship" North Star — the pure-compute hang is judged too rare to engineer a thread-abandonment backstop for. Closes Split #7 as a consequence.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Units — seconds (neutrix today) or milliseconds (CC)?</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>milliseconds (<code>BashTool.tsx:229</code>).</dd>
+<dt>neutrix today</dt><dd>integer <strong>seconds</strong>, <code>"Timeout in seconds."</code> (<code>tools.py:757-761</code>).</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Keep SECONDS</strong> (Alternative — diverge from CC on purpose). neutrix already ships seconds; switching to ms breaks the existing schema and the LLM's habit for zero user benefit, and seconds read better for humans. Update the description to state the new default + cap.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Default timeout — 30 s (today) or 120 s (CC)?</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>120 000 ms = 120 s (<code>utils/timeouts.ts</code>).</dd>
+<dt>neutrix today</dt><dd>30 s (<code>tools.py:406,760</code>).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Raise to 120 s</strong> (Follow CC). 30 s spuriously kills ordinary dev commands — <code>pytest</code>, <code>pip install</code>, a build, a <code>git clone</code> — and the LLM then misreads the timeout as a real failure and thrashes. Calibrate against the slow case, not the fast one ([[feedback_llm_timeout_calibration]]). Env-overridable via <code>NEUTRIX_BASH_DEFAULT_TIMEOUT_S</code>.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Maximum cap — none (today) or 600 s (CC)?</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>600 000 ms = 600 s hard cap, env-overridable (<code>utils/timeouts.ts</code>).</dd>
+<dt>neutrix today</dt><dd><strong>No cap</strong> — the LLM can pass <code>timeout: 999999</code> and the turn hangs ~11 days (only user-cancel or the LLM watchdog saves it).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Cap at 600 s, clamp with a note</strong> (Follow CC). A runaway value is exactly the liveness hole this release closes. Clamp and note <code>"(clamped to 600s)"</code> in the result so the LLM learns the ceiling. Env-overridable via <code>NEUTRIX_BASH_MAX_TIMEOUT_S</code>.</dd></dl></div>
+
+<div class="split flag"><div class="head"><span class="num">5.</span><span class="name">Kill scope on timeout — <code>proc.kill()</code> direct child (today, deadlock-prone) or <code>_tree_kill</code> process-group (CC)?</span><span class="badge decided">decided</span></div>
+<dl><dt>The bug</dt><dd><code>tools.py:437-438</code>: <code>proc.kill()</code> (SIGKILL, direct child only) then a bare <code>proc.communicate()</code> with no timeout — a leaked grandchild holding the stdout pipe blocks it forever.</dd>
+<dt>CC</dt><dd>SIGTERM → tree-kill SIGKILL after 5 s grace (<code>ShellCommand.ts:135-140,323-343</code>).</dd>
+<dt>neutrix asset</dt><dd><code>_tree_kill</code> already exists and is correct (<code>executor.py:185-212</code>: <code>killpg</code> SIGTERM → SIGKILL after 0.2 s grace) — but is wired only to the <em>cancel</em> path. <code>_run_shell</code> already uses <code>start_new_session=True</code>, so the process group is there to kill.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Route the timeout path through <code>_tree_kill</code></strong> (Follow CC semantics; reuse the existing helper). Fixes the grandchild leak AND the latent forever-block — probably the actual "stuck" the user hit. Bound the post-kill output drain with a short timeout so the path can never re-block.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">6.</span><span class="name">Partial output on timeout — discard (today) or keep + notice (CC)?</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Keeps partial stdout/stderr, prepends <code>"Command timed out after &lt;duration&gt;"</code> to stderr (<code>ShellCommand.ts:323-327</code>).</dd>
+<dt>neutrix today</dt><dd>Discards everything, returns only <code>"ERROR: command timed out after {timeout}s"</code> (<code>tools.py:443-444</code>).</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Keep partial output + the timeout notice</strong> (Follow CC). The partial stdout/stderr captured before the kill is often the most diagnostic signal (where did it hang, what was the last line). Keep the <code>ERROR:</code> prefix so the executor's <code>ok=False</code> still propagates (<code>executor.py:173</code>).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">7.</span><span class="name">Non-killable pure-compute (thread) tools — protect them?</span><span class="badge decided">decided</span></div>
+<dl><dt>Hard constraint</dt><dd>Pure-compute tools run in <code>asyncio.to_thread</code> (<code>executor.py:167</code>). <strong>Python threads cannot be force-killed</strong> — a "timeout" can only abandon the wait; the thread keeps running.</dd>
+<dt>CC</dt><dd>No analog — CC's file/glob tools are async Node I/O; it has no thread-pool-blocking failure mode.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Leave unprotected</strong> (Follow CC — consequence of Split #1 = Bash-only). No global backstop, no subprocess-ification. <strong>Accepted risk (documented, not silent):</strong> a pathological regex or a multi-GB <code>rglob</code> can still hang a turn unrecoverably (only user-cancel saves it); the user judged that hang rare enough to skip the abandon-and-report backstop. Reopen if real OMILREC use surfaces such a hang.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">8.</span><span class="name">Auto-background / <code>run_in_background</code> on timeout — add or defer?</span><span class="badge decided">decided</span></div>
+<dl><dt>CC</dt><dd>Auto-backgrounds a long Bash command on timeout instead of killing; exposes a <code>run_in_background</code> schema param that bypasses the timeout (<code>BashTool.tsx:241,988-1010</code>).</dd>
+<dt>neutrix</dt><dd>No background subsystem; background Bash is already <strong>DEFERRED post-v2</strong> per the band scope ([[project_v2_v3_direction]] — "process registry + capture + poll + kill + lifecycle is a subsystem").</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>DEFER</strong> (Alternative — out of scope, already a deferred subsystem). v1.6.2 kills on timeout (with partial output); auto-background/<code>run_in_background</code> reopens only if real OMILREC use demands it, after v2. Keeps "simple, otherwise we never ship."</dd></dl></div>
+
+<footer>v1.6.2 · 8 split points, decided · <strong>scope Bash-only (user-directed, #1)</strong> · neutrix already has a Bash <code>timeout</code> schema param (sec, default 30); this release fixes the timeout-path deadlock (route through <code>_tree_kill</code>, #5), raises default→120 s (#3), caps at 600 s (#4), keeps partial output (#6). Pure-compute tools stay unprotected like CC (#7); background deferred (#8). All confined to <code>_run_shell</code> in <code>tools.py</code> + the Bash schema description. See <code>docs/PRDs/v1.6.2-tool-timeout.md</code>.</footer>
+</body></html>

@@ -4,6 +4,31 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.6.2] — 2026-05-31
+
+### Fixed
+- **`Bash` tool timeout could hang the turn forever (latent deadlock).** On
+  timeout, `_run_shell` killed only the direct child (`proc.kill()`) then blocked
+  on a bare `proc.communicate()` with no timeout — a backgrounded grandchild that
+  inherited the stdout pipe kept that call blocked indefinitely even though the
+  timeout had "fired." The timeout path now tree-kills the whole process group
+  (reusing `_tree_kill`, SIGTERM→SIGKILL) and bounds the post-kill output drain,
+  so it can never re-block. This was the likely cause of a live "tool_use gets
+  stuck, nothing output."
+
+### Changed
+- **`Bash` timeout calibrated, capped, and output-preserving.** Default raised
+  30 s → **120 s** (30 s spuriously killed `pytest` / `pip install` / builds, and
+  the LLM then misread the timeout as a real failure); a runaway LLM-supplied
+  value is **clamped to 600 s** with a note in the result. Both bounds are
+  env-overridable (`NEUTRIX_BASH_DEFAULT_TIMEOUT_S` / `NEUTRIX_BASH_MAX_TIMEOUT_S`).
+  Partial stdout/stderr captured before a timeout is now **returned** (with the
+  `ERROR:` timeout notice) instead of discarded. Scope is Bash-only, mirroring
+  Claude Code (user decision); the pure-compute tools (Glob/Grep-py/Read/Edit/
+  Write) — which run in unkillable threads — stay unprotected.
+
+See [docs/PRDs/v1.6.2-tool-timeout.md](docs/PRDs/v1.6.2-tool-timeout.md).
+
 ## [v1.6.1] — 2026-05-31
 
 ### Fixed
