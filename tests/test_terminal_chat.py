@@ -63,6 +63,15 @@ def _config(tmp_path: Path) -> Config:
             "strong": {"provider": "test", "model": "strong-model"},
         },
         path=tmp_path / "config.yaml",
+        pricing={
+            "currency": "$",
+            "models": {
+                # priced at the real claude-opus-4-7 USD rates (per Mtok)
+                "anthropic/claude-opus-4-7": {
+                    "input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25,
+                },
+            },
+        },
     )
 
 
@@ -994,6 +1003,7 @@ async def test_turn_completion_flush_persists_final_turn_without_render_loop(
     await chat._process_user_turn("hi")  # render watcher is NOT running
 
     led = CostLedger.from_jsonl(chat._session_writer.path)
+    led.price_table = chat.config.price_table()  # from_jsonl rebuilds entries, not the table
     assert len(led.entries) == 1  # only the explicit turn-completion flush could write this
     assert led.entries[0].usage.input == 120
     assert led.cost() is not None
@@ -1003,7 +1013,7 @@ def test_setup_writer_rebuilds_ledger_on_resume(tmp_path: Path) -> None:
     sid = new_session_id()
     seed = SessionWriter(os.getcwd(), sid, home=tmp_path)
     seed.append_usage(
-        model="claude-opus-4-7", usage=Usage(input=1_000_000, output=0), llm_ms=100.0
+        model="anthropic/claude-opus-4-7", usage=Usage(input=1_000_000, output=0), llm_ms=100.0
     )
     ctx = _priced_ctx(FakeLLM())
     chat, _out, _ = _make_chat(ctx, tmp_path, [])
@@ -1011,7 +1021,7 @@ def test_setup_writer_rebuilds_ledger_on_resume(tmp_path: Path) -> None:
     chat._setup_session_writer()
     assert chat._ledger is not None
     assert len(chat._ledger.entries) == 1
-    assert chat._ledger.cost() == 15.0
+    assert chat._ledger.cost() == 5.0  # 1M input * $5/Mtok (real opus-4-7 rate, from _config)
     assert chat._usage_written_count == 1  # won't re-write the loaded entry
     assert chat.ctx.ledger is chat._ledger
 
@@ -1020,13 +1030,15 @@ def test_cost_readout_shows_dollars_and_hides_when_unknown(tmp_path: Path) -> No
     ctx = _priced_ctx(FakeLLM())
     chat, _out, _ = _make_chat(ctx, tmp_path, [])
     chat._ledger = CostLedger()
+    chat._ledger.price_table = chat.config.price_table()
     assert chat._cost_readout() is None  # no usage yet → hidden
-    chat._ledger.record("claude-opus-4-7", Usage(input=12_400, output=3_100), 0, 0)
+    chat._ledger.record("anthropic/claude-opus-4-7", Usage(input=12_400, output=3_100), 0, 0)
     readout = chat._cost_readout()
     assert readout is not None and readout.startswith("$")
-    assert "↑" in readout and "↓" in readout
-    # An unpriced model → cost unknown → readout hidden (Acceptance #6).
+    assert "hit" in readout and "miss" in readout and "out" in readout
+    # An unpriced model → cost unknown → readout hidden.
     chat._ledger = CostLedger()
+    chat._ledger.price_table = chat.config.price_table()
     chat._ledger.record("mystery-model", Usage(input=1000, output=500), 0, 0)
     assert chat._cost_readout() is None
 
@@ -1036,10 +1048,11 @@ async def test_cmd_cost_renders_totals_and_empty(tmp_path: Path) -> None:
     ctx = _priced_ctx(FakeLLM())
     chat, output, _ = _make_chat(ctx, tmp_path, [])
     chat._ledger = CostLedger()
+    chat._ledger.price_table = chat.config.price_table()
     await chat._cmd_cost([])
     assert "no usage recorded" in output.getvalue()
-    chat._ledger.record("claude-opus-4-7", Usage(input=1_000_000, output=0), 1000.0, 0.0)
+    chat._ledger.record("anthropic/claude-opus-4-7", Usage(input=1_000_000, output=0), 1000.0, 0.0)
     await chat._cmd_cost([])
     out = output.getvalue()
-    assert "$15.0000" in out
-    assert "1,000,000 in" in out
+    assert "$5.0000" in out  # 1M input * $5/Mtok
+    assert "1,000,000 miss" in out

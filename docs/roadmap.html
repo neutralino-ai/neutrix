@@ -232,6 +232,41 @@
 </div>
 
 <div class="entry">
+  <span class="ver"><a href="PRDs/v1.7.2-architecture-doc.md">v1.7.2</a></span>
+  <span class="theme">
+    Architecture document (<code>docs/architecture.html</code>)
+    <small>
+      A how-it-works companion to this roadmap: the real component graph
+      (<code>ui ↔ store ↔ CM ↔ {LLM, Executor, Advisor}</code>, hub-and-spoke) + the
+      CM state machine + four function walkthroughs (cancel, rewind, save/load,
+      goal) with symbol-based citations. Docs-only; updates <code>CLAUDE.md</code>'s
+      "single living document" note. (<a href="PRDs/v1.7.2-architecture-doc.md">PRD</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.7.1-cost-fix.md">v1.7.1</a></span>
+  <span class="theme">
+    Config-driven pricing · 3-number cache · first-run bootstrap
+    <small>
+      Fixes from live v1.7.0 use: <strong>prices move into the config YAML</strong>
+      (keyed by model + a <code>currency</code> symbol; <code>pricing.py</code> becomes
+      pure mechanism — no price data or LiteLLM in code; unknown model →
+      <code>(cost unknown)</code>). The cache readout becomes
+      <strong><code>hit · miss · output</code></strong> (3 numbers, one line) on
+      live-verified provider field shapes (catches direct-DeepSeek's
+      <code>prompt_cache_hit_tokens</code>). The broken interactive <code>onboard</code>
+      is <strong>replaced</strong> by a static IHEP-only example config (empty key,
+      frozen USD prices) + a fill-the-key message — no model needed.
+      (<a href="splits/v1.7.1-cost-fix.html">5 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">target</span></span>
+</div>
+
+<div class="entry">
   <span class="ver"><a href="PRDs/v1.7.0-cost-timing.md">v1.7.0</a></span>
   <span class="theme">
     Usage, cost &amp; timing — the last PRD before v2

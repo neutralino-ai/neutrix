@@ -80,25 +80,16 @@ def main(argv: list[str] | None = None) -> int:
 
     fast_slot, strong_slot = resolve_initial_slot(config)
     if fast_slot is None and strong_slot is None:
-        from neutrix.onboard import run_onboarding
-
-        launched = run_onboarding(config)
-        if not launched:
-            print("neutrix: onboarding cancelled.", file=sys.stderr)
-            return 0
-        try:
-            config = load_config()
-        except ConfigError as e:
-            print(f"neutrix: {e}", file=sys.stderr)
-            return 1
-        fast_slot, strong_slot = resolve_initial_slot(config)
-        if fast_slot is None and strong_slot is None:
-            print(
-                "neutrix: no slot is usable after onboarding; check "
-                f"{config.path}.",
-                file=sys.stderr,
-            )
-            return 1
+        # v1.7.1: no interactive onboarding (removed — it was broken). The config
+        # exists but no slot is usable, almost always an empty api_key. Point the
+        # user at the file and exit; the missing-config case above already writes
+        # the template.
+        print(
+            "neutrix: no usable slot — your provider api_key is empty.\n"
+            f"edit {config.path} to add your api_key, then re-run `neutrix`.",
+            file=sys.stderr,
+        )
+        return 1
 
     slot = strong_slot or fast_slot
     assert slot is not None  # for type-checker; guarded above

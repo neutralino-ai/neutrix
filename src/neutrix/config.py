@@ -4,11 +4,13 @@ Single source of truth: ``~/.config/neutrix/config.yaml``. No env vars.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from neutrix.pricing import Price, PriceTable
 
 CONFIG_PATH = Path("~/.config/neutrix/config.yaml").expanduser()
 SLOT_NAMES: tuple[str, ...] = ("fast", "strong")
@@ -29,22 +31,14 @@ PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
 }
 
 DEFAULT_CONFIG = """\
-# neutrix config — paste your API keys, then re-run `neutrix`.
+# neutrix config — paste your IHEP gateway api_key below, then re-run `neutrix`.
 # Two named slots, `fast` and `strong`, point at (provider, model) pairs.
 # Switch between them inside the TUI with /fast and /strong.
 
 providers:
   ihep:
     base_url: https://aiapi.ihep.ac.cn/apiv2/
-    api_key: ""        # paste your IHEP gateway key
-
-  deepseek:
-    base_url: https://api.deepseek.com
-    api_key: ""
-
-  glm:
-    base_url: https://open.bigmodel.cn/api/paas/v4/
-    api_key: ""
+    api_key: ""        # <- paste your IHEP gateway key here, then re-run
 
 fast:
   provider: ihep
@@ -53,6 +47,21 @@ fast:
 strong:
   provider: ihep
   model: anthropic/claude-opus-4-7
+
+# Cost display. `currency` is only a display symbol; the numbers are per MILLION
+# tokens (frozen USD defaults from LiteLLM's public data — edit to match your
+# actual billing, or set `currency: "¥"` and use CNY numbers). A model not
+# listed here renders "(cost unknown)" — tokens still shown.
+pricing:
+  currency: "$"
+  models:
+    anthropic/claude-haiku-4-5:    { input: 1.0,  output: 5.0,  cache_read: 0.10, cache_write: 1.25 }
+    anthropic/claude-opus-4-7:     { input: 5.0,  output: 25.0, cache_read: 0.50, cache_write: 6.25 }
+    anthropic/claude-sonnet-4-6:   { input: 3.0,  output: 15.0, cache_read: 0.30, cache_write: 3.75 }
+    openai/gpt-5.5:                { input: 5.0,  output: 30.0, cache_read: 0.50 }
+    deepseek-ai/deepseek-v4-pro:   { input: 0.28, output: 0.42, cache_read: 0.028 }
+    deepseek-ai/deepseek-v4-flash: { input: 0.28, output: 0.42, cache_read: 0.028 }
+    zhipu/glm-5.1:                 { input: 1.0,  output: 3.20, cache_read: 0.20 }
 """
 
 
@@ -88,6 +97,29 @@ class Config:
     providers: dict[str, dict[str, Any]]
     slots: dict[str, dict[str, Any]]
     path: Path
+    # v1.7.1: the raw ``pricing:`` block (currency + model→rates). Default empty
+    # ⇒ no prices ⇒ "(cost unknown)". Parsed into a PriceTable by price_table().
+    pricing: dict[str, Any] = field(default_factory=dict)
+
+    def price_table(self) -> PriceTable:
+        """Build the :class:`~neutrix.pricing.PriceTable` from the ``pricing:``
+        block (v1.7.1). ``currency`` is a display symbol; ``models`` maps the
+        **exact** slot model string to per-million-token rates. Tolerant of
+        missing / partial / malformed entries (→ 0.0)."""
+        raw = self.pricing or {}
+        currency = str(raw.get("currency") or "$")
+        models_raw = raw.get("models")
+        models: dict[str, Price] = {}
+        if isinstance(models_raw, dict):
+            for name, spec in models_raw.items():
+                spec = spec or {}
+                models[str(name)] = Price(
+                    input=_to_float(spec.get("input")),
+                    output=_to_float(spec.get("output")),
+                    cache_read=_to_float(spec.get("cache_read")),
+                    cache_write=_to_float(spec.get("cache_write")),
+                )
+        return PriceTable(currency=currency, models=models)
 
     def slot(self, name: str) -> Slot:
         if name not in self.slots:
@@ -151,7 +183,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         raise ConfigError(f"{path}: `providers` must be a mapping")
 
     slots = {name: (payload.get(name) or {}) for name in SLOT_NAMES}
-    return Config(providers=providers, slots=slots, path=path)
+    pricing = payload.get("pricing")
+    if not isinstance(pricing, dict):
+        pricing = {}
+    return Config(providers=providers, slots=slots, path=path, pricing=pricing)
 
 
 def save_config(
@@ -174,6 +209,14 @@ def save_config(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return out
+
+
+def _to_float(value: Any) -> float:
+    """Coerce a config price value to float; ``None`` / non-numeric → ``0.0``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _read_llm_timeout(spec: dict[str, Any], *, name: str, path: Path) -> float:

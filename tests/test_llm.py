@@ -771,6 +771,47 @@ def test_usage_normalization_cache_accounting_asymmetry():
     assert an.total == 155
 
 
+def test_usage_from_openai_reads_deepseek_native_cache_fields():
+    """v1.7.1: direct api.deepseek.com reports the hit/miss as ``prompt_cache_hit_tokens``
+    / ``prompt_cache_miss_tokens`` (not the OpenAI-standard ``cached_tokens``,
+    which it leaves 0). The normalizer reads the native fields."""
+    u = _usage_from_openai(
+        {
+            "prompt_tokens": 1517,
+            "completion_tokens": 35,
+            "prompt_cache_hit_tokens": 1408,
+            "prompt_cache_miss_tokens": 109,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
+    )
+    assert u.cache_read == 1408  # hit
+    assert u.input == 109  # miss (native)
+    assert u.output == 35
+    assert u.cache_read + u.input == 1517  # hit + miss == prompt_tokens
+
+
+def test_usage_from_openai_gateway_cache_read_fallback():
+    """IHEP gateway warm call: the hit is in the standard ``cached_tokens`` AND a
+    top-level ``cache_read_tokens``; miss = prompt - hit."""
+    u = _usage_from_openai(
+        {
+            "prompt_tokens": 1517,
+            "completion_tokens": 35,
+            "prompt_tokens_details": {"cached_tokens": 1408},
+            "cache_read_tokens": 1408,
+        }
+    )
+    assert (u.cache_read, u.input, u.output) == (1408, 109, 35)
+
+
+def test_usage_hit_miss_view():
+    """v1.7.1 3-number display view: hit = cache_read; miss = input + cache_write."""
+    u = Usage(input=100, output=50, cache_read=1408, cache_write=10)
+    assert u.hit == 1408
+    assert u.miss == 110  # 100 fresh input + 10 cache-write
+    assert u.hit + u.miss == u.input + u.cache_read + u.cache_write
+
+
 @pytest.mark.asyncio
 async def test_openai_usage_captured_onto_llmresponse():
     llm = OpenAIChatLLM(_slot())

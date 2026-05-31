@@ -35,7 +35,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
 
-from neutrix import pricing, transcript
+from neutrix import transcript
 from neutrix.advisor import Advisor
 from neutrix.compaction import (
     SUMMARY_MARKER_CLOSE,
@@ -43,7 +43,7 @@ from neutrix.compaction import (
     is_compact_marker,
     is_summary_marker,
 )
-from neutrix.config import SLOT_NAMES, Config, ConfigError, Slot, load_config
+from neutrix.config import SLOT_NAMES, Config, Slot
 from neutrix.context_files import expand_at_mentions
 from neutrix.context_manager import (
     ADVISOR_TAG_CLOSE,
@@ -1072,23 +1072,27 @@ class TerminalChat:
         return " | ".join(parts)
 
     def _cost_readout(self) -> str | None:
-        """Terse cumulative cost/usage for the status bar — ``$0.0123 · 12k↑ 3k↓``.
+        """Terse cumulative cost/usage for the status bar — v1.7.1 3-number view,
+        e.g. ``$0.0123 · 1.4k hit · 109 miss · 35 out`` (currency from config).
 
         ``None`` when there's no usage yet **or** the cost is unknown (an unpriced
         model): the status bar hides the readout rather than show a partial or
-        confusingly-absent dollar figure (Split #8 / Acceptance #6). The full
-        breakdown — including tokens for unpriced models — is always on ``/cost``.
+        confusingly-absent figure. The full breakdown — including tokens for
+        unpriced models — is always on ``/cost``.
         """
         ledger = self._ledger
         if ledger is None or not ledger.has_usage():
             return None
-        dollars = ledger.cost()
-        if dollars is None:  # (cost unknown) → hide the terse readout
+        amount = ledger.cost()
+        if amount is None:  # (cost unknown) → hide the terse readout
             return None
         u = ledger.total_usage()
-        up = format_token_count(u.input + u.cache_read + u.cache_write)
-        down = format_token_count(u.output)
-        return f"${dollars:.4f} · {up}↑ {down}↓"
+        return (
+            f"{ledger.currency}{amount:.4f} · "
+            f"{format_token_count(u.hit)} hit · "
+            f"{format_token_count(u.miss)} miss · "
+            f"{format_token_count(u.output)} out"
+        )
 
     def _above_input(self):
         """Content rendered directly above the input cursor."""
@@ -1253,6 +1257,7 @@ class TerminalChat:
             self._ledger = CostLedger.from_jsonl(self._session_writer.path)
         else:
             self._ledger = CostLedger()
+        self._ledger.price_table = self.config.price_table()  # v1.7.1: prices from config
         self._usage_written_count = len(self._ledger.entries)
         self.ctx.ledger = self._ledger
 
@@ -1551,7 +1556,7 @@ class TerminalChat:
             await self.view.print_notice(f"unknown command: /{cmd}. Try /help.", style="bold red")
             return
         if self._busy and cmd in {
-            "fast", "strong", "save", "load", "onboard", "compact", "rewind", "advise",
+            "fast", "strong", "save", "load", "compact", "rewind", "advise",
         }:
             await self.view.print_notice(
                 f"/{cmd} waits for the assistant to finish", style="yellow"
@@ -1579,7 +1584,6 @@ class TerminalChat:
                     "  /fast               switch to the fast slot",
                     "  /strong             switch to the strong slot",
                     "  /model              show current slot/provider/model",
-                    "  /onboard            re-enter onboarding (manage keys / slots)",
                     "  /save [PATH]        save session (default: sessions/<ts>.json)",
                     "  /load PATH          load session",
                     "  /clear              start a fresh conversation",
@@ -1599,27 +1603,29 @@ class TerminalChat:
         await self.view.print_plain(self._status_line())
 
     async def _cmd_cost(self, args: list[str]) -> None:
-        """Session usage / cost / timing (v1.7.0).
+        """Session usage · cost · timing (v1.7.1).
 
-        Renders from the :class:`CostLedger`: total tokens by the four classes,
-        dollar cost (or ``(cost unknown)`` for unpriced models), the three timing
-        buckets (API / tool / wall), and a per-model breakdown. Dollars are
-        computed on read, so the figure reflects the current price table.
+        Renders from the :class:`CostLedger`: the 3-number ``hit · miss · out``
+        view plus the full 4-class raw detail, cost in the config currency (or
+        ``(cost unknown)`` for unpriced models), the three timing buckets (API /
+        tool / wall), and a per-model breakdown. Costs compute on read from the
+        config price table.
         """
         ledger = self._ledger
         if ledger is None or not ledger.entries:
             await self.view.print_system("no usage recorded yet this session")
             return
         u = ledger.total_usage()
-        dollars = ledger.cost()
-        cost_str = "(cost unknown)" if dollars is None else f"${dollars:.4f}"
+        amount = ledger.cost()
+        cur = ledger.currency
+        cost_str = "(cost unknown)" if amount is None else f"{cur}{amount:.4f}"
         wall_s = max(0.0, time.monotonic() - self._session_started_at)
         lines = [
             "session usage · cost · timing:",
             f"  cost:    {cost_str}",
-            f"  tokens:  {u.input:,} in · {u.output:,} out · "
-            f"{u.cache_read:,} cache-read · {u.cache_write:,} cache-write "
-            f"(total {u.total:,})",
+            f"  tokens:  {u.hit:,} hit · {u.miss:,} miss · {u.output:,} out",
+            f"           (raw: {u.input:,} input · {u.cache_read:,} cache-read · "
+            f"{u.cache_write:,} cache-write · {u.output:,} output)",
             f"  timing:  {ledger.total_llm_ms() / 1000:.1f}s API · "
             f"{ledger.total_tool_ms() / 1000:.1f}s tool · {wall_s:.1f}s wall",
         ]
@@ -1627,10 +1633,12 @@ class TerminalChat:
         if len(by_model) > 1 or ledger.unpriced_models():
             lines.append("  by model:")
             for model, mu in by_model.items():
-                mc = pricing.cost(mu, model)
-                mc_str = "(cost unknown)" if mc is None else f"${mc:.4f}"
-                up = mu.input + mu.cache_read + mu.cache_write
-                lines.append(f"    {model}: {mc_str} · {up:,}↑ {mu.output:,}↓")
+                mc = ledger.model_cost(model)
+                mc_str = "(cost unknown)" if mc is None else f"{cur}{mc:.4f}"
+                lines.append(
+                    f"    {model}: {mc_str} · {mu.hit:,} hit · "
+                    f"{mu.miss:,} miss · {mu.output:,} out"
+                )
         await self.view.print_system("\n".join(lines))
 
     async def _cmd_advise(self, args: list[str]) -> None:
@@ -1923,6 +1931,7 @@ class TerminalChat:
         # v1.7.0: rebuild the cost ledger from the loaded file's usage lines,
         # re-inject it into the CM, and seed the cursor past the on-disk entries.
         self._ledger = CostLedger.from_jsonl(path)
+        self._ledger.price_table = self.config.price_table()  # v1.7.1: prices from config
         self._usage_written_count = len(self._ledger.entries)
         self.ctx.ledger = self._ledger
         await self.view.print_notice(
@@ -2029,21 +2038,6 @@ class TerminalChat:
             Text(f"[tool {record.index}] {record.name} full result:", style="bold")
         )
         await self.view.print_plain(record.result)
-
-    async def _cmd_onboard(self, args: list[str]) -> None:
-        from neutrix.onboard import run_onboarding
-
-        run_onboarding(self.config)
-        try:
-            self.config = load_config(self.config.path)
-        except ConfigError as exc:
-            await self.view.print_notice(f"config reload failed: {exc}", style="bold red")
-            return
-        await self.view.print_notice(
-            "back from onboarding. Use /fast or /strong to switch to a newly-bound slot; "
-            "current slot unchanged.",
-            style="green",
-        )
 
     def _cmd_quit(self, args: list[str]) -> None:
         self._running = False

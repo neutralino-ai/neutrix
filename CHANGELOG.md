@@ -4,6 +4,43 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.1] — 2026-05-31
+
+### Changed
+- **Pricing is now config-driven — no price data ships in neutrix code.** The
+  hand-estimated USD table in `pricing.py` is gone (its values were wrong — e.g.
+  `claude-opus-4-7` is $5/$25 per Mtok, not the estimated $15/$75 — and its
+  docstring overclaimed "seeded from LiteLLM"). Prices now live in the config YAML
+  `pricing:` block, keyed by the exact model string, with a `currency` display
+  symbol; `pricing.py` is pure mechanism (`cost(usage, price)`). A model absent
+  from the block renders `(cost unknown)`. Reprice by editing the YAML. The
+  default config template is pre-filled with real USD rates from LiteLLM's public
+  data — switch the symbol + numbers to CNY anytime.
+- **Cost readout is a 3-number `hit · miss · output` view** (cache-hit input ·
+  fresh+cache-write input · completion) in the status line, `/cost`, and the
+  per-model breakdown, with the config currency symbol — replacing the `↑`/`↓`
+  fold that hid cache traffic. `/cost` keeps the full 4-class detail line.
+  `hit + miss = total input`, matching DeepSeek's native counts.
+- **First-run bootstrap replaces the broken interactive `onboard`.** The shipped
+  config template is IHEP-only (empty key, frozen prices); a missing config is
+  written and the user told to add a key; a config present with an **empty key**
+  now prints "fill your key at `<path>` and re-run" and exits — no interactive
+  flow, no model needed.
+
+### Fixed
+- **DeepSeek cache hits were invisible on the direct provider.** `_usage_from_openai`
+  read only the OpenAI-standard `prompt_tokens_details.cached_tokens`; direct
+  `api.deepseek.com` reports the hit as the native `prompt_cache_hit_tokens` /
+  `prompt_cache_miss_tokens`. It now reads the first present of `cached_tokens` /
+  `cache_read_tokens` (IHEP gateway) / `prompt_cache_hit_tokens`, with the miss
+  from `prompt_cache_miss_tokens` else `prompt_tokens - hit`. Verified live.
+
+### Removed
+- **`/onboard` and `src/neutrix/onboard.py`** — the interactive onboarding TUI was
+  broken; the static example-config bootstrap above replaces it.
+
+See [docs/PRDs/v1.7.1-cost-fix.md](docs/PRDs/v1.7.1-cost-fix.md).
+
 ## [v1.7.0] — 2026-05-31
 
 ### Added

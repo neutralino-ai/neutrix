@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from neutrix import pricing
 from neutrix.cost_ledger import CostLedger
 from neutrix.llm import Usage
+from neutrix.pricing import Price, PriceTable
 
 
 def test_record_accumulates_usage_and_timing():
@@ -22,6 +22,7 @@ def test_record_accumulates_usage_and_timing():
 
 def test_cost_sums_priced_entries():
     led = CostLedger()
+    led.price_table = PriceTable(models={"claude-opus-4-7": Price(input=15.0, output=75.0)})
     led.record("claude-opus-4-7", Usage(input=1_000_000), 0, 0)  # $15
     led.record("claude-opus-4-7", Usage(output=1_000_000), 0, 0)  # $75
     assert led.cost() == 90.0
@@ -43,8 +44,9 @@ def test_all_unpriced_cost_is_none():
 
 def test_mixed_priced_and_unpriced_returns_partial_sum():
     led = CostLedger()
+    led.price_table = PriceTable(models={"claude-opus-4-7": Price(input=15.0)})
     led.record("claude-opus-4-7", Usage(input=1_000_000), 0, 0)  # $15
-    led.record("mystery", Usage(input=1_000_000), 0, 0)  # unknown → 0 contribution
+    led.record("mystery", Usage(input=1_000_000), 0, 0)  # unpriced → 0 contribution
     assert led.cost() == 15.0
     assert led.unpriced_models() == ["mystery"]
 
@@ -90,19 +92,18 @@ def test_from_jsonl_rebuilds_entries(tmp_path: Path):
     assert led.entries[0].usage.raw == {"prompt_tokens": 120}
 
 
-def test_reprice_on_table_change(monkeypatch, tmp_path: Path):
-    """Acceptance #5: dollars are computed on read, so editing the price table
-    reprices an existing (rebuilt-from-JSONL) session retroactively."""
+def test_reprice_on_table_change(tmp_path: Path):
+    """Dollars compute on read from the injected price table, so swapping the
+    table reprices an existing (rebuilt-from-JSONL) session retroactively."""
     p = tmp_path / "s.jsonl"
     line = {"type": "usage", "model": "claude-opus-4-7", "input": 1_000_000,
             "output": 0, "cache_read": 0, "cache_write": 0, "raw": {}}
     p.write_text(json.dumps(line), encoding="utf-8")
     led = CostLedger.from_jsonl(p)
+    led.price_table = PriceTable(models={"claude-opus-4-7": Price(input=15.0)})
     assert led.cost() == 15.0
-    monkeypatch.setitem(
-        pricing._PRICES, "claude-opus-4-7", pricing.ModelPrice(30.0, 75.0, 1.5, 18.75)
-    )
-    assert led.cost() == 30.0  # same ledger, new price
+    led.price_table = PriceTable(models={"claude-opus-4-7": Price(input=30.0)})
+    assert led.cost() == 30.0  # same ledger, new table
 
 
 def test_from_jsonl_tolerates_malformed_and_missing_fields(tmp_path: Path):

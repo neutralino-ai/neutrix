@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.7.1 splits — config pricing, 3-number cache, first-run bootstrap</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.7.1 splits — config pricing · 3-number cache · first-run bootstrap</h1>
+<p class="tagline">Fix the three issues live use of v1.7.0's cost feature surfaced: hand-estimated prices, cache tokens hidden behind <code>↑↓</code>, and a broken interactive <code>onboard</code>.</p>
+<p class="note"><strong>Agent-decided under the user's standing "you make decision yourself" delegation</strong> — the user steered by direct instruction across the design conversation and <strong>rejected</strong> a turn-by-turn AskUserQuestion, so these are recorded (not surfaced one-by-one). The price numbers and cache field shapes are <strong>verified against the live IHEP gateway and the real LiteLLM JSON</strong>, not assumed. See <code>docs/PRDs/v1.7.1-cost-fix.md</code>.</p>
+
+<h2>Split points</h2>
+
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">Where prices live</span><span class="badge decided">decided</span></div>
+<dl><dt>v1.7.0 bug</dt><dd><code>pricing.py</code> shipped a <strong>hand-estimated</strong> USD table whose docstring overclaimed "seeded from LiteLLM" — and was 3× off (<code>claude-opus-4-7</code> is really $5/$25 per Mtok, not the guessed $15/$75).</dd>
+<dt>Options</dt><dd>(a) vendor a LiteLLM JSON subset in the package + a <code>pricing_model</code> name-map; (b) <strong>put prices in the config YAML, keyed by the exact model string; zero price data in code</strong>; (c) add the <code>litellm</code> dependency.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>(b) — config YAML, user-directed</strong> ("write the price in yaml directly, no fixed code in neutrix"). A <code>pricing:</code> block: a <code>currency</code> symbol + a <code>models</code> map of <code>model → {input, output, cache_read, cache_write}</code> (per million tokens). <code>pricing.py</code> becomes pure mechanism (<code>cost(usage, price)</code>); no vendored data, no <code>litellm</code>, <strong>no name-mapping</strong> (the key <em>is</em> the slot's model string). Missing model → <code>(cost unknown)</code>. Reprice = edit the YAML ([[project-v2-v3-direction]]: LiteLLM data not dep — taken further: not even the data ships).</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Currency</span><span class="badge decided">decided</span></div>
+<dl><dt>History</dt><dd>User first asked CNY, then — after we found neither LiteLLM nor a reliable CNY source covers these models — reversed to <em>"use litellm and usd only"</em>.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>A config display symbol</strong> (default <code>$</code>); the numbers are whatever the user writes. Pre-filled with real <strong>USD</strong> rates (from LiteLLM's public JSON), switchable to <code>¥</code> by editing the symbol + numbers. No currency logic in code — the CNY-vs-USD question dissolves into config.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">3.</span><span class="name">Cache token model — 3 numbers</span><span class="badge decided">decided</span></div>
+<dl><dt>v1.7.0</dt><dd>Status line + per-model fold cache into one <code>↑</code> (input+cache); user "only sees up and down".</dd>
+<dt>Learned from</dt><dd><code>dr.sai-nano/notebooks/deepseek_cache_explained.ipynb</code>: DeepSeek reports <code>prompt_cache_hit_tokens</code> / <code>prompt_cache_miss_tokens</code> (hit+miss = prompt), no cache-write tier.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>Display <code>hit · miss · output</code></strong> (user-directed "3 numbers, merge to 1"): <code>hit = cache_read</code>; <code>miss = fresh input + cache_write</code>; <code>output</code>. <code>hit + miss = total input</code>, matching DeepSeek's native model. The 4 normalized fields + <code>raw</code> stay <strong>internal</strong> (accurate pricing — <code>cache_write</code> still priced at its config rate — and <strong>no JSONL/ledger churn</strong>, v1.7.0-compatible); only the display collapses to 3.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">4.</span><span class="name">Cache-capture robustness (the real v1.7.0 gap)</span><span class="badge decided">decided</span></div>
+<dl><dt>Verified live</dt><dd>IHEP gateway, DeepSeek warm call: <code>prompt_tokens=1517, cached_tokens=1408</code> (gateway populates the OpenAI-standard field + a top-level <code>cache_read_tokens</code>). Direct <code>api.deepseek.com</code>: the <em>native</em> <code>prompt_cache_hit_tokens</code> instead. Anthropic gateway: <code>cache_read_input_tokens</code> (auto-caches a large prefix) / <code>input_tokens</code> / <code>output_tokens</code> — consistent across <code>message_start</code> + <code>message_delta</code>.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>Follow the verified shapes.</strong> <code>_usage_from_openai</code> reads the hit from the first present of <code>prompt_tokens_details.cached_tokens</code> / <code>cache_read_tokens</code> / <code>prompt_cache_hit_tokens</code>, and the miss from <code>prompt_cache_miss_tokens</code> else <code>prompt − hit</code>. Anthropic unchanged. (v1.7.0's gateway path already worked; it missed only direct-DeepSeek's native fields.)</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">5.</span><span class="name">First-run bootstrap — replace the broken interactive onboard</span><span class="badge decided">decided</span></div>
+<dl><dt>Research</dt><dd>opencode's "free model without registration" = its <strong>own funded <code>zen</code> gateway</strong> (provider id <code>opencode</code>) serving allowlisted models (<code>kimi-k2-thinking</code>, <code>glm-4.6</code>) free/anonymous, rate-limited, paid by opencode under their ToS — <strong>not</strong> a client-side key trick (the client stores only <code>oauth</code>/<code>api</code> credentials). Not replicable without a funded proxy; free-riding it violates their ToS.</dd>
+<dt>Options</dt><dd>(a) fix the interactive <code>onboard</code> TUI; (b) an LLM-driven <code>init</code> skill (needs a model first → the bootstrap chicken-and-egg); (c) <strong>a static example config + a fill-the-key message, no interactivity, no model</strong>.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>(c) — user-directed.</strong> Writing a config is deterministic, so no model is needed and the chicken-and-egg dissolves. Ship an <strong>IHEP-only example config</strong> (empty <code>api_key</code>, <strong>frozen</strong> USD <code>pricing:</code> block); <code>cli.py</code> already writes it when config is missing — extend the <strong>empty-key</strong> case (currently the broken <code>run_onboarding</code> fallback) to print "fill your key at <code>&lt;path&gt;</code> and re-run" + exit. <strong>Delete</strong> <code>onboard.py</code> + <code>/onboard</code>. Interactivity was the broken part; copying a file + a message can't break.</dd></dl></div>
+
+<footer>v1.7.1 · 5 split points, agent-decided under the user's "decide yourself" delegation · prices in config YAML keyed by model (#1, no data in code) with a config currency symbol (#2, USD); 3-number <code>hit·miss·output</code> cache display (#3) on live-verified field shapes (#4); a static example-config first-run bootstrap that replaces the broken <code>onboard</code> (#5). See <code>docs/PRDs/v1.7.1-cost-fix.md</code>.</footer>
+</body></html>

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from neutrix import pricing
 from neutrix.llm import Usage
+from neutrix.pricing import PriceTable
 from neutrix.session_store import _read_lines
 
 
@@ -38,6 +39,14 @@ class CostLedger:
 
     def __init__(self) -> None:
         self.entries: list[LedgerEntry] = []
+        # v1.7.1: prices come from the user's config YAML, injected by
+        # terminal_chat after construction / resume. Empty table ⇒ no prices ⇒
+        # everything renders "(cost unknown)".
+        self.price_table: PriceTable = PriceTable()
+
+    @property
+    def currency(self) -> str:
+        return self.price_table.currency
 
     # ---------------------------------------------------------------- feed
     def record(
@@ -69,29 +78,34 @@ class CostLedger:
 
     def model_cost(self, model: str) -> float | None:
         usage = self.by_model().get(model)
-        if usage is None:
+        price = self.price_table.price_for(model)
+        if usage is None or price is None:
             return None
-        return pricing.cost(usage, model)
+        return pricing.cost(usage, price)
 
     def cost(self) -> float | None:
-        """Total dollar cost, or ``None`` when entries exist but **none** are
-        priced (→ surface ``"(cost unknown)"``). ``0.0`` when there are no
-        entries. A mix returns the partial sum of the priced turns; pair with
-        :meth:`unpriced_models` to footnote the gap."""
+        """Total cost in the configured currency, or ``None`` when entries exist
+        but **none** are priced (→ surface ``"(cost unknown)"``). ``0.0`` when
+        there are no entries. A mix returns the partial sum of the priced turns;
+        pair with :meth:`unpriced_models` to footnote the gap. Prices come from
+        the injected :attr:`price_table`, computed on read — editing the config
+        YAML reprices the next session."""
         if not self.entries:
             return 0.0
-        known = [
-            c for c in (pricing.cost(e.usage, e.model) for e in self.entries) if c is not None
-        ]
+        known: list[float] = []
+        for e in self.entries:
+            price = self.price_table.price_for(e.model)
+            if price is not None:
+                known.append(pricing.cost(e.usage, price))
         if not known:
             return None
         return sum(known)
 
     def unpriced_models(self) -> list[str]:
-        """Models in the ledger with no price-table entry (insertion-ordered)."""
+        """Models in the ledger absent from the config price table (insertion-ordered)."""
         out: list[str] = []
         for model in self.by_model():
-            if pricing.price_for(model) is None and model not in out:
+            if self.price_table.price_for(model) is None and model not in out:
                 out.append(model)
         return out
 

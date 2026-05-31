@@ -237,8 +237,35 @@ def test_save_config_persists_model_status(tmp_path):
     ms = reloaded.providers["ihep"].get("model_status") or {}
     assert ms.get("anthropic/claude-haiku-4-5") == "verified"
     assert ms.get("anthropic/claude-opus-4-7") == "failed"
-    # absent providers keep no model_status section
-    assert "model_status" not in (reloaded.providers["deepseek"] or {})
+    # the round-trip invents no phantom providers (template is IHEP-only, v1.7.1)
+    assert set(reloaded.providers) == {"ihep"}
+
+
+def test_main_empty_key_prints_fillkey_message_and_exits(monkeypatch, tmp_path, capsys):
+    """v1.7.1: a config present but with no usable slot (empty api_key) prints the
+    fill-key message and exits 1 — no interactive onboarding (removed)."""
+    path = tmp_path / "config.yaml"
+    path.write_text("ok")  # exists → the missing-config bootstrap path is skipped
+    config = Config(providers={}, slots={}, path=path)
+    monkeypatch.setattr(cli, "CONFIG_PATH", path)
+    monkeypatch.setattr(cli, "load_config", lambda: config)
+    monkeypatch.setattr(cli, "resolve_initial_slot", lambda _c: (None, None))
+    rc = cli.main([])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "api_key" in err and str(path) in err
+
+
+def test_default_config_has_pricing_block(tmp_path):
+    """v1.7.1: the shipped template carries the frozen pricing block; price_table()
+    parses it. (Prices live in config, not code.)"""
+    path = tmp_path / "config.yaml"
+    bootstrap_config(path)
+    pt = load_config(path).price_table()
+    assert pt.currency == "$"
+    assert pt.price_for("anthropic/claude-opus-4-7").input == 5.0
+    assert pt.price_for("anthropic/claude-haiku-4-5").output == 5.0
+    assert pt.price_for("not-listed") is None
 
 
 def test_save_config_drops_unknown_status_values(tmp_path):

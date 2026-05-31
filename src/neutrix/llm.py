@@ -93,6 +93,18 @@ class Usage:
     def total(self) -> int:
         return self.input + self.output + self.cache_read + self.cache_write
 
+    @property
+    def hit(self) -> int:
+        """Cache-HIT input tokens (served from cache). v1.7.1 3-number view."""
+        return self.cache_read
+
+    @property
+    def miss(self) -> int:
+        """Cache-MISS input tokens paid at ~full rate: fresh ``input`` plus
+        newly-created cache (``cache_write``). ``hit + miss == total input``,
+        matching DeepSeek's native ``prompt_cache_hit + prompt_cache_miss``."""
+        return self.input + self.cache_write
+
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             input=self.input + other.input,
@@ -103,20 +115,31 @@ class Usage:
 
 
 def _usage_from_openai(u: dict[str, Any]) -> Usage:
-    """Normalize an OpenAI ``usage`` payload.
+    """Normalize an OpenAI-compatible ``usage`` payload (v1.7.1: multi-field hit).
 
-    OpenAI's ``prompt_tokens`` INCLUDES the cached prefix
-    (``prompt_tokens_details.cached_tokens``), so fresh ``input`` subtracts it —
-    the cache-accounting asymmetry (verified against a real payload, not assumed).
+    The cache **hit** count is exposed under different names depending on the
+    backend (all verified live against the IHEP gateway / direct DeepSeek):
+    OpenAI-standard ``prompt_tokens_details.cached_tokens``; the IHEP gateway also
+    sets a top-level ``cache_read_tokens``; direct ``api.deepseek.com`` uses the
+    native ``prompt_cache_hit_tokens``. Take the first present. The **miss** (fresh
+    input) is DeepSeek's native ``prompt_cache_miss_tokens`` when present, else
+    ``prompt_tokens - hit`` — because ``prompt_tokens`` INCLUDES the cached prefix.
+    No cache-write tier on this path (``cache_write = 0``).
     """
     prompt = int(u.get("prompt_tokens") or 0)
     completion = int(u.get("completion_tokens") or 0)
     details = u.get("prompt_tokens_details") or {}
-    cached = int((details or {}).get("cached_tokens") or 0)
+    hit = (
+        int((details or {}).get("cached_tokens") or 0)
+        or int(u.get("cache_read_tokens") or 0)
+        or int(u.get("prompt_cache_hit_tokens") or 0)
+    )
+    miss_native = u.get("prompt_cache_miss_tokens")
+    miss = int(miss_native) if miss_native is not None else max(0, prompt - hit)
     return Usage(
-        input=max(0, prompt - cached),
+        input=miss,
         output=completion,
-        cache_read=cached,
+        cache_read=hit,
         cache_write=0,
         raw=dict(u),
     )
