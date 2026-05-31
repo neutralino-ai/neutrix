@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from io import StringIO
 from pathlib import Path
 from queue import Queue
@@ -15,12 +16,15 @@ from neutrix.context_manager import (
     ContextManager,
     UserMessageEvent,
 )
+from neutrix.cost_ledger import CostLedger
 from neutrix.executor import Executor
 from neutrix.llm import (
     INTERRUPTED_BY_USER_MARKER,
     LLMEvent,
     LLMResponse,
+    Usage,
 )
+from neutrix.session_store import SessionWriter, new_session_id
 from neutrix.store import ChatStore, ToolRecord
 from neutrix.terminal_chat import (
     HEARTBEAT_GLYPH,
@@ -917,3 +921,125 @@ def test_above_input_shows_streaming_preview(tmp_path):
     ctx.store.extend_assistant_stream("hello streaming world")
     rendered = _render(chat._above_input())
     assert "hello streaming world" in rendered
+
+
+# ---- v1.7.0: cost ledger surface + persistence -----------------------------
+
+
+def _priced_ctx(llm: Any) -> ContextManager:
+    """A ctx whose slot model is in the price table, so cost renders a dollar
+    figure (not "(cost unknown)")."""
+    return ContextManager(
+        slot=Slot(
+            name="strong",
+            provider="ihep",
+            model="anthropic/claude-opus-4-7",
+            base_url="https://example.test/v1",
+            api_key="sk-test",
+        ),
+        llm=llm,
+        executor=Executor(),
+        store=ChatStore(),
+        system_prompt="system prompt",
+        use_tools=False,
+        messages=[{"role": "system", "content": "system prompt"}],
+    )
+
+
+def _assistant_usage(text: str, usage: Usage) -> LLMEvent:
+    return LLMEvent(
+        "assistant",
+        LLMResponse(message={"role": "assistant", "content": text},
+                    finish_reason="stop", usage=usage),
+    )
+
+
+def test_persist_new_usage_flushes_and_cursor_is_idempotent(tmp_path: Path) -> None:
+    ctx = _priced_ctx(FakeLLM())
+    chat, _out, _ = _make_chat(ctx, tmp_path, [])
+    chat._setup_session_writer()
+    assert chat._ledger is not None
+    assert chat.ctx.ledger is chat._ledger  # injected into the CM
+    chat._ledger.record("claude-opus-4-7", Usage(input=100, output=50), 10.0, 0.0)
+    chat._persist_new_usage()
+    chat._persist_new_usage()  # cursor guards against re-writing
+    led = CostLedger.from_jsonl(chat._session_writer.path)
+    assert len(led.entries) == 1
+    assert led.entries[0].usage.input == 100
+
+
+@pytest.mark.asyncio
+async def test_turn_completion_flush_persists_final_turn_without_render_loop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The explicit turn-completion flush persists the final turn's usage even
+    when the changes() render loop never runs — the advisor's stranding guard
+    (Split #11). Drives one turn directly, with no render watcher and no
+    shutdown flush, so only _process_user_turn's explicit flush could persist it.
+    """
+    llm = FakeLLM([[_assistant_usage("hi", Usage(input=120, output=30))]])
+    ctx = _priced_ctx(llm)
+    chat, _out, _ = _make_chat(ctx, tmp_path, [])
+    chat._setup_session_writer()
+
+    async def _noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(chat, "_maybe_run_advisor", _noop)  # don't build a real client
+    chat._input_queue = asyncio.Queue()
+    chat.store.enqueue_user("hi")
+    chat._input_queue.put_nowait("hi")
+    await chat._input_queue.get()  # balance the task_done() in _process_user_turn
+
+    await chat._process_user_turn("hi")  # render watcher is NOT running
+
+    led = CostLedger.from_jsonl(chat._session_writer.path)
+    assert len(led.entries) == 1  # only the explicit turn-completion flush could write this
+    assert led.entries[0].usage.input == 120
+    assert led.cost() is not None
+
+
+def test_setup_writer_rebuilds_ledger_on_resume(tmp_path: Path) -> None:
+    sid = new_session_id()
+    seed = SessionWriter(os.getcwd(), sid, home=tmp_path)
+    seed.append_usage(
+        model="claude-opus-4-7", usage=Usage(input=1_000_000, output=0), llm_ms=100.0
+    )
+    ctx = _priced_ctx(FakeLLM())
+    chat, _out, _ = _make_chat(ctx, tmp_path, [])
+    chat._resume_session_id = sid
+    chat._setup_session_writer()
+    assert chat._ledger is not None
+    assert len(chat._ledger.entries) == 1
+    assert chat._ledger.cost() == 15.0
+    assert chat._usage_written_count == 1  # won't re-write the loaded entry
+    assert chat.ctx.ledger is chat._ledger
+
+
+def test_cost_readout_shows_dollars_and_hides_when_unknown(tmp_path: Path) -> None:
+    ctx = _priced_ctx(FakeLLM())
+    chat, _out, _ = _make_chat(ctx, tmp_path, [])
+    chat._ledger = CostLedger()
+    assert chat._cost_readout() is None  # no usage yet → hidden
+    chat._ledger.record("claude-opus-4-7", Usage(input=12_400, output=3_100), 0, 0)
+    readout = chat._cost_readout()
+    assert readout is not None and readout.startswith("$")
+    assert "↑" in readout and "↓" in readout
+    # An unpriced model → cost unknown → readout hidden (Acceptance #6).
+    chat._ledger = CostLedger()
+    chat._ledger.record("mystery-model", Usage(input=1000, output=500), 0, 0)
+    assert chat._cost_readout() is None
+
+
+@pytest.mark.asyncio
+async def test_cmd_cost_renders_totals_and_empty(tmp_path: Path) -> None:
+    ctx = _priced_ctx(FakeLLM())
+    chat, output, _ = _make_chat(ctx, tmp_path, [])
+    chat._ledger = CostLedger()
+    await chat._cmd_cost([])
+    assert "no usage recorded" in output.getvalue()
+    chat._ledger.record("claude-opus-4-7", Usage(input=1_000_000, output=0), 1000.0, 0.0)
+    await chat._cmd_cost([])
+    out = output.getvalue()
+    assert "$15.0000" in out
+    assert "1,000,000 in" in out

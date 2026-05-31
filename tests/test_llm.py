@@ -5,7 +5,9 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from neutrix.config import Slot
 from neutrix.llm import (
@@ -15,9 +17,12 @@ from neutrix.llm import (
     MISSING_TOOL_RESULT,
     LLMResponse,
     OpenAIChatLLM,
+    Usage,
     _ensure_sdk_compliant,
     _ensure_tool_result_pairing,
     _repair_empty_assistants,
+    _usage_from_anthropic,
+    _usage_from_openai,
 )
 
 
@@ -693,3 +698,252 @@ def test_ensure_sdk_compliant_composes_pairing_and_empty_repair():
     )
     # purity
     assert out is not messages
+
+
+# ---- v1.7.0 usage / cost capture -------------------------------------------
+
+
+def _usage_chunk(usage: dict[str, Any]) -> SimpleNamespace:
+    """An OpenAI final chunk: empty ``choices``, a ``usage`` payload."""
+    return SimpleNamespace(choices=[], usage=usage)
+
+
+def _anthropic_event_chunk(event: dict[str, Any]) -> SimpleNamespace:
+    """An anthropic-gateway chunk: no OpenAI choice, event in ``model_extra``."""
+    return SimpleNamespace(choices=None, model_extra=event)
+
+
+class _ProbingCompletions:
+    """First create() (with include_usage) raises 400; the retry (without) wins."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self.chunks = chunks
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        if "stream_options" in kwargs:
+            req = httpx.Request("POST", "https://example.test/v1/chat/completions")
+            raise BadRequestError(
+                "include_usage unsupported",
+                response=httpx.Response(400, request=req),
+                body=None,
+            )
+        return FakeStream(list(self.chunks))
+
+
+class _Always400Completions:
+    """create() 400s on every call — a genuine error unrelated to include_usage."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls += 1
+        req = httpx.Request("POST", "https://example.test/v1/chat/completions")
+        raise BadRequestError(
+            "unknown model", response=httpx.Response(400, request=req), body=None
+        )
+
+
+def test_usage_normalization_cache_accounting_asymmetry():
+    """The silent-corruption guard: OpenAI's prompt_tokens INCLUDES cached (fresh
+    input subtracts it); Anthropic reports cache SEPARATELY (no subtraction)."""
+    oa = _usage_from_openai(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 40},
+        }
+    )
+    assert (oa.input, oa.cache_read, oa.output) == (60, 40, 10)
+    assert oa.raw["prompt_tokens"] == 100  # raw kept as source of truth
+    an = _usage_from_anthropic(
+        {
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 40,
+            "cache_creation_input_tokens": 5,
+        }
+    )
+    assert (an.input, an.cache_read, an.cache_write, an.output) == (100, 40, 5, 10)
+    assert (oa + Usage(input=1)).input == 61  # __add__ sums the four classes
+    assert an.total == 155
+
+
+@pytest.mark.asyncio
+async def test_openai_usage_captured_onto_llmresponse():
+    llm = OpenAIChatLLM(_slot())
+    chunks = [
+        _content_chunk("hi", finish_reason="stop"),
+        _usage_chunk(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {"cached_tokens": 30},
+            }
+        ),
+    ]
+    completions = FakeCompletions(chunks)
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="m", messages=[{"role": "user", "content": "x"}]
+        )
+    ]
+    resp = next(e.data for e in events if e.kind == "assistant")
+    assert resp.usage is not None
+    assert (resp.usage.input, resp.usage.cache_read, resp.usage.output) == (70, 30, 20)
+    assert completions.kwargs.get("stream_options") == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_usage_captured_and_no_include_usage_sent():
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    chunks = [
+        _anthropic_event_chunk(
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 200,
+                        "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 10,
+                        "output_tokens": 1,
+                    }
+                },
+            }
+        ),
+        _anthropic_event_chunk(
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}
+        ),
+        _anthropic_event_chunk(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hi"},
+            }
+        ),
+        _anthropic_event_chunk(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 42},
+            }
+        ),
+    ]
+    completions = FakeCompletions(chunks)
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[{"role": "user", "content": "x"}],
+        )
+    ]
+    resp = next(e.data for e in events if e.kind == "assistant")
+    assert resp.usage is not None
+    # Anthropic input is NOT reduced by cache; output is the message_delta total.
+    assert (resp.usage.input, resp.usage.cache_read, resp.usage.cache_write) == (
+        200,
+        50,
+        10,
+    )
+    assert resp.usage.output == 42
+    assert "stream_options" not in (completions.kwargs or {})
+
+
+class _GatewayUsage:
+    """Mimics the IHEP anthropic gateway's ``chunk.usage`` (verified live): an
+    OpenAI ``CompletionUsage`` whose standard fields are ``null`` but whose
+    ``model_extra`` (surfaced by ``model_dump``) carries the Anthropic counts."""
+
+    def __init__(self, merged: dict[str, Any]) -> None:
+        self._merged = merged
+
+    def model_dump(self) -> dict[str, Any]:
+        return dict(self._merged)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_gateway_usage_on_chunk_usage_not_misread_as_openai():
+    """Regression for the live-caught silent-corruption bug (v1.7.0 Acceptance
+    #3): the IHEP anthropic gateway puts the Anthropic counts as ``model_extra``
+    ON ``chunk.usage`` while its OpenAI fields are ``null``. Routing usage by
+    presence sent that object to ``_usage_from_openai`` → all-zeros. The fix
+    routes by PROTOCOL (the slot's gateway flag). This test would have failed
+    before the fix (input/output == 0)."""
+    llm = OpenAIChatLLM(_ihep_claude_slot())
+    merged = {
+        "completion_tokens": None,
+        "prompt_tokens": None,
+        "total_tokens": None,
+        "completion_tokens_details": None,
+        "prompt_tokens_details": None,
+        "input_tokens": 200,
+        "cache_read_input_tokens": 50,
+        "cache_creation_input_tokens": 10,
+        "output_tokens": 42,
+    }
+    chunks = [
+        _anthropic_event_chunk(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hi"},
+            }
+        ),
+        SimpleNamespace(choices=[], usage=_GatewayUsage(merged)),
+    ]
+    completions = FakeCompletions(chunks)
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="anthropic/claude-opus-4-7",
+            messages=[{"role": "user", "content": "x"}],
+        )
+    ]
+    resp = next(e.data for e in events if e.kind == "assistant")
+    assert resp.usage is not None
+    assert (resp.usage.input, resp.usage.cache_read, resp.usage.cache_write) == (200, 50, 10)
+    assert resp.usage.output == 42
+    # raw keeps the FULL provider payload (incl. the null OpenAI fields).
+    assert resp.usage.raw["input_tokens"] == 200
+    assert "stream_options" not in (completions.kwargs or {})
+
+
+@pytest.mark.asyncio
+async def test_include_usage_probe_retries_without_on_400_no_double_yield():
+    llm = OpenAIChatLLM(_slot())
+    completions = _ProbingCompletions([_content_chunk("hi", finish_reason="stop")])
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    events = [
+        e
+        async for e in llm.stream_response(
+            model="m", messages=[{"role": "user", "content": "x"}]
+        )
+    ]
+    tokens = [e.data for e in events if e.kind == "token"]
+    assert tokens == ["hi"]  # exactly once — the retry did NOT double-yield
+    assert len(completions.calls) == 2
+    assert "stream_options" in completions.calls[0]
+    assert "stream_options" not in completions.calls[1]
+    assert llm._include_usage_supported is False  # cached → next turn skips probe
+
+
+@pytest.mark.asyncio
+async def test_genuine_400_propagates_after_include_usage_retry():
+    llm = OpenAIChatLLM(_slot())
+    completions = _Always400Completions()
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    with pytest.raises(BadRequestError):
+        _ = [
+            e
+            async for e in llm.stream_response(
+                model="m", messages=[{"role": "user", "content": "x"}]
+            )
+        ]
+    assert completions.calls == 2  # probed, retried without, then the real error raised

@@ -26,12 +26,15 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from neutrix.store import MessageRecord, Task, openai_to_record, record_to_openai
 from neutrix.transcript import _task_from_dict, _task_to_dict
+
+if TYPE_CHECKING:  # only for the annotation — keep the heavy llm import out of runtime
+    from neutrix.llm import Usage
 
 _MESSAGE_TYPES = frozenset({"user", "assistant", "tool", "system"})
 _MAX_DIR_NAME = 200
@@ -131,6 +134,41 @@ class SessionWriter:
             "tasks": [_task_to_dict(t) for t in tasks],
             "timestamp": self._now(),
         })
+
+    def append_usage(
+        self,
+        *,
+        model: str,
+        usage: Usage,
+        llm_ms: float | None = None,
+        tool_ms: float | None = None,
+    ) -> None:
+        """Append one per-turn usage line (v1.7.0, Split #11).
+
+        A dedicated ``{"type": "usage", …}`` line — not message-line extras —
+        bundling the model, the normalized 4 token classes, the untouched
+        provider ``raw`` payload (source of truth for repricing), and the v1.5.2
+        ``llm_ms``/``tool_ms`` timing. ``load_session`` ignores this line type;
+        :meth:`CostLedger.from_jsonl` consumes it on resume. **Dollars are never
+        stored** — the ledger computes them on read so a price-table change
+        reprices past sessions.
+        """
+        line: dict[str, Any] = {
+            "type": "usage",
+            "model": model,
+            "input": usage.input,
+            "output": usage.output,
+            "cache_read": usage.cache_read,
+            "cache_write": usage.cache_write,
+            "raw": usage.raw,
+            "timestamp": self._now(),
+            "sessionId": self.session_id,
+        }
+        if llm_ms is not None:
+            line["llm_ms"] = round(llm_ms, 1)
+        if tool_ms is not None:
+            line["tool_ms"] = round(tool_ms, 1)
+        self._write_line(line)
 
 
 def _read_lines(path: str | Path) -> list[dict[str, Any]]:

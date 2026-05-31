@@ -4,6 +4,47 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.0] — 2026-05-31
+
+### Added
+- **Token usage, dollar cost, and timing tracking.** neutrix now captures API
+  token usage from **both** stream protocols (the OpenAI final-chunk `usage` via a
+  probe-once `stream_options.include_usage`; the IHEP anthropic gateway's Messages
+  SSE), normalizes it to four provider-agnostic classes
+  (`input`/`output`/`cache_read`/`cache_write`), and surfaces per-session
+  cumulative usage, cost, and timing.
+- **`/cost` command** (Claude Code has none): session token totals by class,
+  dollar cost (or `(cost unknown)` for an unpriced model), API/tool/wall timing,
+  and a per-model breakdown. A terse cumulative readout (`$0.0123 · 12k↑ 3k↓`) also
+  rides the live status bar while a turn is active — hidden when idle or when cost
+  is unknown (quiet by design, per the no-inline-hints rule).
+- **`pricing.py`** — a curated per-million price table (4 classes, cache priced
+  distinctly) seeded from LiteLLM's `model_prices_and_context_window.json` as
+  *data* (not the `litellm` dependency); an unknown model yields `(cost unknown)`
+  with tokens still shown.
+- **`CostLedger`** (`cost_ledger.py`) — a session-scoped, **headless** accumulator
+  fed once per assistant turn (it *observes* the loop, never drives it, keeping the
+  `ContextManager` pure for the v3 RL-env vision). Raw per-turn token counts persist
+  to the v1.5.2 session JSONL as a dedicated `{"type": "usage"}` line; **dollars are
+  computed on read** so a price-table correction reprices past sessions, and the
+  ledger rebuilds from the JSONL on `--continue`/`/resume`/`/load`.
+
+### Fixed
+- **Anthropic-gateway usage was silently normalized to all-zeros** — caught by the
+  live cache-accounting verification *before* ship, not after. The IHEP gateway
+  delivers Anthropic counts (`input_tokens`/`output_tokens`/`cache_*`) as
+  `model_extra` *on* `chunk.usage` while its OpenAI fields are `null`; routing usage
+  by *presence* sent that payload to the OpenAI normalizer → `input = output = 0`.
+  Usage is now routed by **protocol** (the slot's gateway flag), with a regression
+  test encoding the real payload shape.
+
+### Notes
+- **Parallel tools + background Bash remain deferred** out of the pre-v2 band (see
+  the roadmap's "Beyond v2 & descoped"); cost/timing is the last PRD before the
+  v2.0.0 lock.
+
+See [docs/PRDs/v1.7.0-cost-timing.md](docs/PRDs/v1.7.0-cost-timing.md).
+
 ## [v1.6.2] — 2026-05-31
 
 ### Fixed

@@ -120,3 +120,47 @@ def test_bad_lines_skipped(tmp_path):
         fh.write("not json\n\n")
     _raw, records, _tasks = load_session(w.path)
     assert len(records) == 1 and records[0].content == "good"
+
+
+# ---- v1.7.0: dedicated usage line (Split #11) ------------------------------
+
+
+def test_append_usage_line_round_trips_and_load_ignores_it(tmp_path):
+    from neutrix.cost_ledger import CostLedger
+    from neutrix.llm import Usage
+
+    sid = new_session_id()
+    w = SessionWriter("/proj", sid, home=tmp_path)
+    w.append_message(_user("hi"))
+    w.append_usage(
+        model="claude-opus-4-7",
+        usage=Usage(input=100, output=50, cache_read=20, raw={"prompt_tokens": 120}),
+        llm_ms=1234.5,
+        tool_ms=12.0,
+    )
+    w.append_message(_assistant("there"))
+
+    # load_session ignores the usage line — the message round-trip is unaffected.
+    _raw, records, _tasks = load_session(w.path)
+    assert [r.role for r in records] == ["user", "assistant"]
+
+    # CostLedger.from_jsonl consumes exactly the usage line.
+    led = CostLedger.from_jsonl(w.path)
+    assert len(led.entries) == 1
+    e = led.entries[0]
+    assert e.model == "claude-opus-4-7"
+    assert (e.usage.input, e.usage.output, e.usage.cache_read) == (100, 50, 20)
+    assert e.usage.raw == {"prompt_tokens": 120}
+    assert e.llm_ms == 1234.5 and e.tool_ms == 12.0
+
+
+def test_append_usage_never_stores_dollars_and_omits_absent_timing(tmp_path):
+    from neutrix.llm import Usage
+
+    sid = new_session_id()
+    w = SessionWriter("/proj", sid, home=tmp_path)
+    w.append_usage(model="m", usage=Usage(input=1))
+    line = json.loads(w.path.read_text(encoding="utf-8").splitlines()[0])
+    assert line["type"] == "usage"
+    assert "llm_ms" not in line and "tool_ms" not in line  # absent timing omitted
+    assert "cost" not in line and "dollars" not in line  # dollars are NEVER persisted

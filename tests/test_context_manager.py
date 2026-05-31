@@ -18,11 +18,13 @@ from neutrix.context_manager import (
     build_task_reminder,
     is_task_reminder,
 )
+from neutrix.cost_ledger import CostLedger
 from neutrix.executor import Executor
 from neutrix.llm import (
     INTERRUPTED_BY_USER_MARKER,
     LLMEvent,
     LLMResponse,
+    Usage,
 )
 from neutrix.store import ChatStore, MessageRecord
 
@@ -727,3 +729,85 @@ async def test_streaming_pending_holds_partial_midstream():
     # keep-partial-on-cancel still holds, now sourced from store.pending.
     assert ctx.messages[-2] == {"role": "assistant", "content": "partial"}
     assert ctx.store.pending_assistant_text is None
+
+
+# ---- v1.7.0: cost ledger feed ---------------------------------------------
+
+
+def _assistant_text_usage(text: str, usage: Usage) -> LLMEvent:
+    return LLMEvent(
+        "assistant",
+        LLMResponse(
+            message={"role": "assistant", "content": text},
+            finish_reason="stop",
+            usage=usage,
+        ),
+    )
+
+
+def _assistant_tool_usage(name: str, args: str, usage: Usage, call_id: str = "c1") -> LLMEvent:
+    return LLMEvent(
+        "assistant",
+        LLMResponse(
+            message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": args},
+                    }
+                ],
+            },
+            finish_reason="tool_calls",
+            usage=usage,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_completed_turn_usage_and_timing():
+    usage = Usage(input=100, output=50, cache_read=20)
+    llm = FakeLLM([[_assistant_text_usage("hello", usage)]])
+    ctx = _make_ctx(llm, use_tools=False)
+    ctx.ledger = CostLedger()
+    await ctx.handle_event(UserMessageEvent("hi"))
+    assert len(ctx.ledger.entries) == 1
+    e = ctx.ledger.entries[0]
+    assert e.model == "test-model"
+    assert (e.usage.input, e.usage.output, e.usage.cache_read) == (100, 50, 20)
+    assert e.tool_ms == 0.0  # no tools this turn
+    assert e.llm_ms >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_ledger_none_is_headless_noop():
+    # Default (no ledger): the loop runs unchanged and nothing crashes — the
+    # v3-headless invariant (the CM enriches the ledger, never depends on it).
+    llm = FakeLLM([[_assistant_text("hello")]])
+    ctx = _make_ctx(llm, use_tools=False)
+    assert ctx.ledger is None
+    await ctx.handle_event(UserMessageEvent("hi"))
+    assert ctx.state == State.IDLE
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_each_round_of_a_tool_turn(monkeypatch):
+    monkeypatch.setattr(
+        "neutrix.executor.dispatch", lambda name, arguments, **_: f"ran {name}"
+    )
+    llm = FakeLLM(
+        [
+            [_assistant_tool_usage("echo", "{}", Usage(input=200, output=10))],
+            [_assistant_text_usage("done", Usage(input=50, output=20))],
+        ]
+    )
+    ctx = _make_ctx(llm, use_tools=True)
+    ctx.ledger = CostLedger()
+    await ctx.handle_event(UserMessageEvent("run echo"))
+    # Two LLM rounds → two ledger entries; usage accumulates across both.
+    assert len(ctx.ledger.entries) == 2
+    assert ctx.ledger.total_usage().input == 250
+    assert ctx.ledger.total_usage().output == 30
+    assert ctx.ledger.entries[1].tool_ms == 0.0  # final round dispatched no tools

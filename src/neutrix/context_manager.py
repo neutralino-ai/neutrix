@@ -61,7 +61,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from loguru import logger
 
@@ -79,9 +79,13 @@ from neutrix.llm import (
     INTERRUPTED_BY_USER_MARKER,
     LLMEvent,
     LLMResponse,
+    Usage,
 )
 from neutrix.store import ChatStore, CompactionEvent, MessageRecord, Task
 from neutrix.tools import get_schemas
+
+if TYPE_CHECKING:  # the CM only *calls* ledger.record — observed, never imported at runtime
+    from neutrix.cost_ledger import CostLedger
 
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Keep it simple."
 
@@ -237,6 +241,10 @@ class ContextManager:
     # chat, which passes neither.
     tool_names: frozenset[str] | None = None
     max_rounds: int | None = None
+    # v1.7.0: optional cost/usage observer. Default None ⇒ the loop is untouched
+    # (v3-headless: the CM *enriches* the ledger per completed turn, never
+    # branches on it). terminal_chat owns the ledger and injects it here.
+    ledger: CostLedger | None = None
     state: State = field(default=State.IDLE, init=False)
     last_progress_at: float | None = field(default=None, init=False)
     # v1.5.0: wall-clock start of the current busy phase (this LLM round / this
@@ -249,6 +257,9 @@ class ContextManager:
     # single state holder — v0.10.3). It drives the live preview AND is what
     # _do_cancel commits on a mid-stream cancel (keep-partial). Started/extended
     # in _call_llm; cleared in the same beat as the committed append.
+    # v1.7.0: usage from the current round's LLMResponse, stashed in _call_llm
+    # and fed to the ledger at turn completion (with measured llm_ms/tool_ms).
+    _last_usage: Usage | None = field(default=None, init=False, repr=False)
     _drive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _llm_timeout_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
@@ -715,9 +726,14 @@ class ContextManager:
                 # watcher never sees both the record and a stale preview.
                 self.store.clear_pending_assistant_text()
                 rounds += 1
+                # v1.7.0: API time for this round = round start (phase_started_at,
+                # set at AWAITING_LLM entry) → now; usage was stashed in _call_llm.
+                llm_ms = (time.monotonic() - (self.phase_started_at or time.monotonic())) * 1000
+                round_usage = self._last_usage
 
                 tool_calls = _extract_tool_calls(assistant_msg)
                 if not tool_calls:
+                    self._record_turn(round_usage, llm_ms, 0.0)
                     return
 
                 # Runaway guard (v0.10.0): an unattended subagent caps its
@@ -730,15 +746,26 @@ class ContextManager:
                     logger.warning(
                         "drive loop hit max_rounds={} — stopping", self.max_rounds
                     )
+                    self._record_turn(round_usage, llm_ms, 0.0)
                     return
 
                 self.state = State.AWAITING_EXECUTOR
-                self.phase_started_at = time.monotonic()
+                tool_phase_start = time.monotonic()
+                self.phase_started_at = tool_phase_start
                 try:
                     await self._dispatch_tools(tool_calls)
                 except asyncio.CancelledError:
+                    self._record_turn(
+                        round_usage, llm_ms, (time.monotonic() - tool_phase_start) * 1000
+                    )
                     self._consume_cancel()
                     return
+                # v1.7.0: book the turn (usage + API + tool time) once tools
+                # settle — BEFORE the CANCELLING check, so a cancel mid-loop still
+                # records the turn that already ran.
+                self._record_turn(
+                    round_usage, llm_ms, (time.monotonic() - tool_phase_start) * 1000
+                )
 
                 if self.state == State.CANCELLING:
                     return
@@ -833,6 +860,7 @@ class ContextManager:
         """
         tools = get_schemas(self.tool_names) if self.effective_tools_enabled() else None
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": None}
+        self._last_usage = None  # v1.7.0: this round's usage, set when the terminal event lands
         self.store.start_assistant_stream()
         async for event in self.llm.stream_response(
             model=self.slot.model,
@@ -852,9 +880,21 @@ class ContextManager:
                 payload = event.data
                 if isinstance(payload, LLMResponse):
                     assistant_msg = payload.message
+                    self._last_usage = payload.usage
                 elif isinstance(payload, dict):
                     assistant_msg = payload
         return assistant_msg
+
+    def _record_turn(self, usage: Usage | None, llm_ms: float, tool_ms: float) -> None:
+        """Feed one completed turn to the cost ledger, if one is attached.
+
+        A no-op when ``self.ledger is None`` — the core loop never depends on
+        the ledger's presence (v3-headless). Records once per assistant turn:
+        the round's usage, the API time (``llm_ms``) and the tool-dispatch time
+        (``tool_ms``, 0 when the turn ended without tool calls).
+        """
+        if self.ledger is not None:
+            self.ledger.record(self.slot.model, usage, llm_ms, tool_ms)
 
     async def _dispatch_tools(self, tool_calls: list[dict[str, str]]) -> None:
         """Drive the executor's tool-event stream and apply each event to messages.

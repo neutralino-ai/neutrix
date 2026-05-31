@@ -27,12 +27,12 @@ Two responsibilities live here:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from neutrix.config import Slot
 
@@ -73,9 +73,76 @@ _ANTHROPIC_EVENT_TYPES = frozenset(
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Normalized token usage for one assistant turn (v1.7.0).
+
+    Four provider-agnostic classes: ``input`` is FRESH (non-cached) input,
+    ``cache_read``/``cache_write`` the cache tiers, ``output`` the completion.
+    ``raw`` keeps the untouched provider payload as the source of truth, so a
+    later price-table correction can reprice old turns — the ledger recomputes
+    dollars on read and never stores them.
+    """
+
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        return self.input + self.output + self.cache_read + self.cache_write
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(
+            input=self.input + other.input,
+            output=self.output + other.output,
+            cache_read=self.cache_read + other.cache_read,
+            cache_write=self.cache_write + other.cache_write,
+        )
+
+
+def _usage_from_openai(u: dict[str, Any]) -> Usage:
+    """Normalize an OpenAI ``usage`` payload.
+
+    OpenAI's ``prompt_tokens`` INCLUDES the cached prefix
+    (``prompt_tokens_details.cached_tokens``), so fresh ``input`` subtracts it —
+    the cache-accounting asymmetry (verified against a real payload, not assumed).
+    """
+    prompt = int(u.get("prompt_tokens") or 0)
+    completion = int(u.get("completion_tokens") or 0)
+    details = u.get("prompt_tokens_details") or {}
+    cached = int((details or {}).get("cached_tokens") or 0)
+    return Usage(
+        input=max(0, prompt - cached),
+        output=completion,
+        cache_read=cached,
+        cache_write=0,
+        raw=dict(u),
+    )
+
+
+def _usage_from_anthropic(u: dict[str, Any]) -> Usage:
+    """Normalize an Anthropic ``usage`` payload.
+
+    Anthropic reports ``input_tokens`` SEPARATELY from the cache tiers (no
+    subtraction) — the opposite of OpenAI, the silent-corruption risk the
+    cache-accounting split flags.
+    """
+    return Usage(
+        input=int(u.get("input_tokens") or 0),
+        output=int(u.get("output_tokens") or 0),
+        cache_read=int(u.get("cache_read_input_tokens") or 0),
+        cache_write=int(u.get("cache_creation_input_tokens") or 0),
+        raw=dict(u),
+    )
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     message: dict[str, Any]
     finish_reason: str | None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)
@@ -273,10 +340,15 @@ class OpenAIChatLLM:
         self.slot = slot
         self._client = self._build_client(slot)
         self._active_stream: Any = None
+        # v1.7.0: per-slot capability cache for stream_options.include_usage.
+        # None = unprobed; True/False set after the first OpenAI-path turn so the
+        # 400-retry probe runs at most once per slot, not every turn.
+        self._include_usage_supported: bool | None = None
 
     def switch(self, slot: Slot) -> None:
         self.slot = slot
         self._client = self._build_client(slot)
+        self._include_usage_supported = None
 
     def _build_client(self, slot: Slot) -> AsyncOpenAI:
         # v1.4.9: explicit transport timeout so a dead/half-closed connection
@@ -312,15 +384,55 @@ class OpenAIChatLLM:
             kwargs["extra_body"] = {"system": system_text}
         if tools:
             kwargs["tools"] = tools
-
-        stream = await self._client.chat.completions.create(**kwargs)
+        # v1.7.0: ask for token usage on the OpenAI path (the anthropic gateway
+        # carries usage in the SSE regardless). Probe at most once per slot —
+        # treat ANY 400 while include_usage was set as "unsupported" (gateways
+        # return opaque 400s; don't parse the body), retry once without it, and
+        # cache the verdict. The retry is at create(), before any token is
+        # yielded, so it can never double-emit.
+        is_anthropic = self._uses_anthropic_messages_gateway()
+        probe_usage = (
+            not is_anthropic
+            and self._include_usage_supported is not False
+        )
+        if probe_usage:
+            kwargs["stream_options"] = {"include_usage": True}
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+        except BadRequestError:
+            if not probe_usage:
+                raise
+            self._include_usage_supported = False
+            kwargs.pop("stream_options", None)
+            stream = await self._client.chat.completions.create(**kwargs)
+        else:
+            if probe_usage:
+                self._include_usage_supported = True
         self._active_stream = stream
 
         content_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        openai_usage: dict[str, Any] | None = None
+        anthropic_usage: dict[str, int] = {}
+        anthropic_usage_raw: dict[str, Any] = {}
         try:
             async for chunk in stream:
+                # v1.7.0: capture the per-chunk ``usage`` by PROTOCOL, not by
+                # presence. The IHEP anthropic gateway (verified live) puts the
+                # Anthropic fields (input_tokens/output_tokens/cache_*) as
+                # model_extra ON ``chunk.usage`` while its OpenAI fields
+                # (prompt_tokens/completion_tokens) are null — so routing it to
+                # the OpenAI normalizer silently yields all-zeros. Gate on the
+                # slot's protocol: anthropic gateway → keep the full payload for
+                # the anthropic normalizer; OpenAI path → the final-chunk usage.
+                cu = getattr(chunk, "usage", None)
+                if cu is not None:
+                    cu_dict = self._usage_dict(cu)
+                    if is_anthropic:
+                        anthropic_usage_raw = cu_dict
+                    else:
+                        openai_usage = cu_dict
                 choice = self._first_choice(chunk)
                 if choice is None:
                     # v1.6.1: the IHEP gateway streams Anthropic Messages SSE for
@@ -329,6 +441,7 @@ class OpenAIChatLLM:
                     # tool_use / stop_reason onto the SAME accumulators.
                     event = self._anthropic_event(chunk)
                     if event is not None:
+                        self._fold_anthropic_usage(event, anthropic_usage)
                         text, a_reason = self._apply_anthropic_event(
                             event, content_parts, tool_calls_by_index
                         )
@@ -358,9 +471,22 @@ class OpenAIChatLLM:
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
 
+        usage: Usage | None = None
+        if is_anthropic:
+            # Prefer the full chunk.usage payload (gateway delivers usage there,
+            # carrying the complete provider counts as raw); fall back to the
+            # message_start/message_delta fold if that's the only usage source.
+            anthropic_src = anthropic_usage_raw or anthropic_usage
+            if anthropic_src:
+                usage = _usage_from_anthropic(anthropic_src)
+        elif openai_usage:
+            usage = _usage_from_openai(openai_usage)
+
         yield LLMEvent(
             "assistant",
-            LLMResponse(message=assistant_msg, finish_reason=finish_reason),
+            LLMResponse(
+                message=assistant_msg, finish_reason=finish_reason, usage=usage
+            ),
         )
 
     def stop(self) -> None:
@@ -506,6 +632,47 @@ class OpenAIChatLLM:
             if isinstance(stop, str) and stop:
                 return None, _ANTHROPIC_STOP_REASON.get(stop, "stop")
         return None, None
+
+    def _usage_dict(self, usage: Any) -> dict[str, Any]:
+        """Coerce an SDK ``CompletionUsage`` (or a bare dict) to a plain dict."""
+        if isinstance(usage, dict):
+            return usage
+        if hasattr(usage, "model_dump"):
+            try:
+                return usage.model_dump()
+            except Exception:  # pragma: no cover - defensive
+                return {}
+        return {}
+
+    def _fold_anthropic_usage(
+        self, event: dict[str, Any], acc: dict[str, int]
+    ) -> None:
+        """Accumulate Anthropic usage off ``message_start`` / ``message_delta``.
+
+        ``message_start.message.usage`` carries input + cache tiers (and an
+        initial output); ``message_delta.usage.output_tokens`` is the cumulative
+        final output. ``>0`` guards mirror CC's ``updateUsage`` so a trailing 0
+        can't clobber an earlier real value. Keys match
+        :func:`_usage_from_anthropic`.
+        """
+        etype = event.get("type")
+        if etype == "message_start":
+            msg = self._read(event, "message", {}) or {}
+            u = self._read(msg, "usage", {}) or {}
+            for key in (
+                "input_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "output_tokens",
+            ):
+                val = self._read(u, key)
+                if isinstance(val, int) and val > 0:
+                    acc[key] = val
+        elif etype == "message_delta":
+            u = self._read(event, "usage", {}) or {}
+            out = self._read(u, "output_tokens")
+            if isinstance(out, int) and out > 0:
+                acc["output_tokens"] = out
 
     def _first_choice(self, completion: Any) -> Any | None:
         choices = self._read(completion, "choices", []) or []

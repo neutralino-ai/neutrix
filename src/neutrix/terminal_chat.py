@@ -35,7 +35,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
 
-from neutrix import transcript
+from neutrix import pricing, transcript
 from neutrix.advisor import Advisor
 from neutrix.compaction import (
     SUMMARY_MARKER_CLOSE,
@@ -60,6 +60,7 @@ from neutrix.context_manager import (
     is_goal_reminder,
     is_task_reminder,
 )
+from neutrix.cost_ledger import CostLedger
 from neutrix.session_store import SessionWriter, list_sessions, new_session_id
 from neutrix.skills import discover_skills, render_skill, skills_signature
 from neutrix.store import ChatStore, MessageRecord, Task, ToolRecord
@@ -282,6 +283,7 @@ def format_heartbeat(
     stall_threshold_s: float = HEARTBEAT_STALL_FLOOR_S,
     phase_started_at: float | None = None,
     now: float | None = None,
+    cost_readout: str | None = None,
 ) -> list[tuple[str, str]]:
     """Render the status bar above the input as prompt_toolkit fragments.
 
@@ -336,6 +338,11 @@ def format_heartbeat(
                 parts.append(f"⚠ {int(age)}s no tokens")
             elif age >= PROGRESS_AGE_FLOOR_S:
                 parts.append(f"last token {int(age)}s ago")
+    # v1.7.0: a terse cumulative cost/usage tail on the live status bar (quiet —
+    # no idle line; only while a turn is active and only once priced usage
+    # exists). ``None`` when there's no usage or cost is unknown.
+    if cost_readout:
+        parts.append(cost_readout)
     label = " · ".join(parts)
     visible = tick % 2 == 0
     glyph_style = HEARTBEAT_STALLED_GLYPH_STYLE if is_stalled else HEARTBEAT_GLYPH_STYLE
@@ -911,6 +918,14 @@ class TerminalChat:
         self._session_writer: SessionWriter | None = None
         self._session_written_count: int = 0
         self._resume_session_id: str | None = None
+        # v1.7.0 cost/usage: a session-scoped ledger the CM feeds per turn. Owned
+        # here (the UI surface), injected into ctx in _setup_session_writer, and
+        # persisted to the session JSONL via its own cursor (independent of the
+        # message cursor). Rebuilt from JSONL on resume. ``_session_started_at``
+        # anchors the wall-clock for /cost (process-session, not the original).
+        self._ledger: CostLedger | None = None
+        self._usage_written_count: int = 0
+        self._session_started_at: float = time.monotonic()
         # Base dir for session logs (None → real ~/.cache/neutrix); tests set a
         # tmp dir so they never write to the real cache.
         self._session_home: str | Path | None = None
@@ -951,6 +966,7 @@ class TerminalChat:
             # unrendered records the worker just appended.
             await self._render_new_records()
             self._persist_new_records()
+            self._persist_new_usage()
 
     async def _input_loop(self) -> None:
         while self._running:
@@ -1012,6 +1028,11 @@ class TerminalChat:
         # snapshot wins on resume).
         if self._session_writer is not None:
             self._session_writer.append_tasks(self.store.tasks)
+        # v1.7.0: explicit usage flush at turn completion — the drive has fully
+        # returned, so every ledger.record() for this turn has fired. Belt to the
+        # changes()-loop suspenders so the final turn's usage can never be stranded
+        # by a future await reordering (Split #11 / advisor catch).
+        self._persist_new_usage()
         # v0.10.4: turn-end Advisor hook — awaited, runs while IDLE between
         # turns (the user keeps typing into the queue meanwhile). v1.5.0:
         # flag it so the status bar shows "Advisor · Ns" during the window.
@@ -1045,7 +1066,29 @@ class TerminalChat:
             parts.append("allow-all")
         if self._busy:
             parts.append("working")
+        readout = self._cost_readout()
+        if readout:
+            parts.append(readout)
         return " | ".join(parts)
+
+    def _cost_readout(self) -> str | None:
+        """Terse cumulative cost/usage for the status bar — ``$0.0123 · 12k↑ 3k↓``.
+
+        ``None`` when there's no usage yet **or** the cost is unknown (an unpriced
+        model): the status bar hides the readout rather than show a partial or
+        confusingly-absent dollar figure (Split #8 / Acceptance #6). The full
+        breakdown — including tokens for unpriced models — is always on ``/cost``.
+        """
+        ledger = self._ledger
+        if ledger is None or not ledger.has_usage():
+            return None
+        dollars = ledger.cost()
+        if dollars is None:  # (cost unknown) → hide the terse readout
+            return None
+        u = ledger.total_usage()
+        up = format_token_count(u.input + u.cache_read + u.cache_write)
+        down = format_token_count(u.output)
+        return f"${dollars:.4f} · {up}↑ {down}↓"
 
     def _above_input(self):
         """Content rendered directly above the input cursor."""
@@ -1056,6 +1099,7 @@ class TerminalChat:
             last_progress_at=self.ctx.last_progress_at,
             stall_threshold_s=stall_threshold_for(self.ctx.slot.llm_timeout_s),
             phase_started_at=self.ctx.phase_started_at,
+            cost_readout=self._cost_readout(),
         )
         # v1.5.0: the turn-end Advisor runs while the CM is IDLE, so the
         # state-driven heartbeat can't show it — render it from a chat-side flag.
@@ -1188,16 +1232,29 @@ class TerminalChat:
         async for _ in self.store.changes():
             await self._render_new_records()
             self._persist_new_records()
+            self._persist_new_usage()
             self._invalidate_app()
 
     def _setup_session_writer(self) -> None:
         """Create the session log writer (v1.5.2). On resume, append to the
-        resumed file and skip the records already in it."""
+        resumed file and skip the records already in it.
+
+        v1.7.0: build the cost ledger here too — rebuilt from the resumed file's
+        ``usage`` lines so cumulative cost survives a restart — inject it into the
+        CM (the per-turn observer), and seed the usage cursor past the entries
+        already on disk so resume doesn't re-write them.
+        """
         sid = self._resume_session_id or new_session_id()
         self._session_writer = SessionWriter(os.getcwd(), sid, home=self._session_home)
         self._session_written_count = (
             len(self.store.messages) if self._resume_session_id else 0
         )
+        if self._resume_session_id:
+            self._ledger = CostLedger.from_jsonl(self._session_writer.path)
+        else:
+            self._ledger = CostLedger()
+        self._usage_written_count = len(self._ledger.entries)
+        self.ctx.ledger = self._ledger
 
     def _persist_new_records(self) -> None:
         """Append store records past the writer's cursor to the session log.
@@ -1216,6 +1273,25 @@ class TerminalChat:
         while self._session_written_count < len(records):
             self._session_writer.append_message(records[self._session_written_count])
             self._session_written_count += 1
+
+    def _persist_new_usage(self) -> None:
+        """Append ledger entries past the usage cursor to the session log (v1.7.0).
+
+        A dedicated cursor, independent of the message cursor (one ledger entry
+        per assistant turn ≠ one message). Called both on the ``store.changes()``
+        tick (for liveness during a turn) **and** explicitly at turn completion
+        (so a future ``await`` reordering between the assistant append and
+        ``ledger.record()`` can't strand the final turn's usage — Split #11).
+        """
+        if self._session_writer is None or self._ledger is None:
+            return
+        entries = self._ledger.entries
+        while self._usage_written_count < len(entries):
+            e = entries[self._usage_written_count]
+            self._session_writer.append_usage(
+                model=e.model, usage=e.usage, llm_ms=e.llm_ms, tool_ms=e.tool_ms
+            )
+            self._usage_written_count += 1
 
     async def _render_initial_transcript(self) -> None:
         """Render every record currently in the store, once at startup."""
@@ -1498,6 +1574,7 @@ class TerminalChat:
                     "  /init               survey the repo and write a CLAUDE.md",
                     "  /allow              toggle auto ↔ allow-all permissions",
                     "  /status             show slot, model, tool state, message count",
+                    "  /cost               session token usage, dollar cost, and timing",
                     "  /tasks              list tracked tasks (read-only)",
                     "  /fast               switch to the fast slot",
                     "  /strong             switch to the strong slot",
@@ -1520,6 +1597,41 @@ class TerminalChat:
 
     async def _cmd_status(self, args: list[str]) -> None:
         await self.view.print_plain(self._status_line())
+
+    async def _cmd_cost(self, args: list[str]) -> None:
+        """Session usage / cost / timing (v1.7.0).
+
+        Renders from the :class:`CostLedger`: total tokens by the four classes,
+        dollar cost (or ``(cost unknown)`` for unpriced models), the three timing
+        buckets (API / tool / wall), and a per-model breakdown. Dollars are
+        computed on read, so the figure reflects the current price table.
+        """
+        ledger = self._ledger
+        if ledger is None or not ledger.entries:
+            await self.view.print_system("no usage recorded yet this session")
+            return
+        u = ledger.total_usage()
+        dollars = ledger.cost()
+        cost_str = "(cost unknown)" if dollars is None else f"${dollars:.4f}"
+        wall_s = max(0.0, time.monotonic() - self._session_started_at)
+        lines = [
+            "session usage · cost · timing:",
+            f"  cost:    {cost_str}",
+            f"  tokens:  {u.input:,} in · {u.output:,} out · "
+            f"{u.cache_read:,} cache-read · {u.cache_write:,} cache-write "
+            f"(total {u.total:,})",
+            f"  timing:  {ledger.total_llm_ms() / 1000:.1f}s API · "
+            f"{ledger.total_tool_ms() / 1000:.1f}s tool · {wall_s:.1f}s wall",
+        ]
+        by_model = ledger.by_model()
+        if len(by_model) > 1 or ledger.unpriced_models():
+            lines.append("  by model:")
+            for model, mu in by_model.items():
+                mc = pricing.cost(mu, model)
+                mc_str = "(cost unknown)" if mc is None else f"${mc:.4f}"
+                up = mu.input + mu.cache_read + mu.cache_write
+                lines.append(f"    {model}: {mc_str} · {up:,}↑ {mu.output:,}↓")
+        await self.view.print_system("\n".join(lines))
 
     async def _cmd_advise(self, args: list[str]) -> None:
         """On-demand Advisor run (v0.10.4) — bypasses the periodic trigger."""
@@ -1808,6 +1920,11 @@ class TerminalChat:
             os.getcwd(), session_id, home=self._session_home
         )
         self._session_written_count = len(self.store.messages)
+        # v1.7.0: rebuild the cost ledger from the loaded file's usage lines,
+        # re-inject it into the CM, and seed the cursor past the on-disk entries.
+        self._ledger = CostLedger.from_jsonl(path)
+        self._usage_written_count = len(self._ledger.entries)
+        self.ctx.ledger = self._ledger
         await self.view.print_notice(
             f"resumed {session_id[:8]} ({len(raw_messages)} msgs, "
             f"{len(tasks)} tasks); current slot unchanged",

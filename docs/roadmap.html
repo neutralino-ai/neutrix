@@ -222,8 +222,8 @@
       Seal the v2 surface: a dependable TUI coding agent that is genuinely <strong>handy
       and practical for real work — concretely, fast and autonomous enough to speed up
       OMILREC</strong>. Solid CC-shaped tools, project context, skills/commands, a
-      non-blocking Executor safety layer, resume, autonomous <code>/goal</code>, parallel
-      tools, and cost/timing. SemVer re-locked for 2.x. <strong>Deliberately descoped
+      non-blocking Executor safety layer, resume, autonomous <code>/goal</code>, and
+      cost/timing (parallel tools deferred). SemVer re-locked for 2.x. <strong>Deliberately descoped
       from full Claude-Code parity</strong> (user-directed 2026-05-30, "keep it simple,
       otherwise we never ship") — see Descoped below.
     </small>
@@ -232,33 +232,25 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.8.0</span>
+  <span class="ver"><a href="PRDs/v1.7.0-cost-timing.md">v1.7.0</a></span>
   <span class="theme">
-    Usage, cost &amp; timing
+    Usage, cost &amp; timing — the last PRD before v2
     <small>
-      Capture API <code>usage</code> (cache read / miss / output), per-message tokens +
-      running total, wall + active time, and cost via LiteLLM's pricing JSON (its
-      <em>data</em>, not the dep) — builds on the v1.5.2 per-turn
-      <code>llm_ms</code>/<code>tool_ms</code>. <code>/cost</code> + a status-line
-      readout. Matters for budgeting long autonomous runs. Optional
-      ccusage-compatible JSONL emission stays opt-in.
+      Capture API <code>usage</code> off BOTH stream shapes (OpenAI final-chunk via a
+      probe-once <code>include_usage</code>; the anthropic gateway's), normalize to 4
+      token classes — the per-provider cache accounting <strong>live-verified</strong>
+      against a real payload per backend (which caught a silent-corruption routing
+      bug: the gateway carries Anthropic counts as <code>model_extra</code> on
+      <code>chunk.usage</code> with null OpenAI fields, so usage is now routed by
+      protocol, not presence). Price via LiteLLM's pricing JSON (its <em>data</em>,
+      not the dep) with graceful unknowns. A headless session <code>CostLedger</code>
+      persists raw per-turn tokens to the v1.5.2 JSONL as a dedicated <code>usage</code>
+      line and reprices on read; surfaced via a new <code>/cost</code> + a terse
+      status-line readout. <strong>Parallel tools + background Bash deferred</strong>
+      (see Beyond). (<a href="splits/v1.7.0-cost-timing.html">11 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
-</div>
-
-<div class="entry">
-  <span class="ver">v1.7.0</span>
-  <span class="theme">
-    Parallel tools + background Bash
-    <small>
-      Run a round's multiple <code>tool_use</code> blocks concurrently
-      (<code>asyncio.gather</code>, ordered results) instead of sequentially — direct
-      wall-clock speedup on multi-file work; the heartbeat beats the in-flight set in
-      unison. Plus background <code>Bash</code> (<code>run_in_background</code>) + a poll.
-    </small>
-  </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
@@ -898,6 +890,22 @@
   Claude&nbsp;Code clone — so these leave the v2 lock and reopen only if real OMILREC work
   demands them.
 </p>
+
+<div class="entry">
+  <span class="ver">defer</span>
+  <span class="theme">
+    Parallel tools + background Bash
+    <small>
+      Was the old v1.7.0. <strong>Deferred out of the pre-v2 band</strong> (2026-05-31,
+      user-delegated): concurrent <code>tool_use</code> dispatch is "an unused
+      optimization" (<code>executor.py</code> v0.9.3 — models rarely batch calls), and
+      background <code>Bash</code> (registry + capture + poll + kill + lifecycle) is a
+      subsystem against "keep it simple." Cost/timing took the v1.7.0 slot. Reopen
+      post-v2 only if real OMILREC use demands it.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">deferred</span></span>
+</div>
 
 <div class="entry">
   <span class="ver">v3.x</span>
