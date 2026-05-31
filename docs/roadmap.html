@@ -189,251 +189,14 @@
 </p>
 
 <p class="priority-legend">
-  Render order is by <strong>priority tier</strong>, then by logical
-  sequence within each tier:
+  Ordered by <strong>version, newest first</strong>; the priority tag marks
+  urgency:
   <span class="badge p0">P0</span> blocks daily use right now;
   <span class="badge p1">P1</span> important for the v1.0 lock;
   <span class="badge p2">P2</span> nice to have pre-v1.0;
   <span class="badge p3">P3</span> deferred to post-v1.0 (v1.x).
 </p>
 
-<h2>P0 — daily-blocking / user-reported urgent</h2>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.5-llm-error-surface.md">v0.9.5</a></span>
-  <span class="theme">
-    LLM error surface (stalled / timeout / inline error)
-    <small>
-      User-reported during v0.9.4 dogfooding: when the LLM API hangs
-      silently, the heartbeat keeps breathing but neither neutrix
-      nor the LLM is making progress, and the user has no signal
-      until the SDK's ~10-minute default timeout fires. Two layers:
-      ~50&nbsp;s of silence → heartbeat palette swap to red +
-      <code>● LLM (stalled)</code> label (UI hint, no abort);
-      ~300&nbsp;s → background watchdog fires
-      <code>cm.cancel(reason='timeout')</code>, transcript records
-      <code>[LLM timeout after 300s]</code>. Per-slot tunable via
-      a new <code>llm_timeout_s</code> YAML field (default 300&nbsp;s);
-      the stall hint is derived as <code>max(10, timeout/6)</code>.
-      Forward-compatible with v0.10.1 streaming
-      (<a href="splits/v0.9.5-llm-error-surface.html">12 split-point
-      decisions</a>; 9 Alternative / 3 Follow CC; thresholds revised
-      at acceptance for slow models).
-    </small>
-  </span>
-  <span class="badge shipped">shipped</span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.6-emergency-compact.md">v0.9.6</a></span>
-  <span class="theme">
-    Emergency mechanical <code>/compact</code>
-    <small>
-      User-reported urgent. A slash command that drops the oldest
-      50 % of <code>ContextManager.messages</code> mechanically —
-      no LLM summarization, no automatic trigger, no configurable
-      ratio. Tool-round-boundary aware. The bridge that keeps users
-      working until smart compaction lands at v0.10.5.
-      (<a href="splits/v0.9.6-emergency-compact.html">12 split-point
-      decisions</a>; 1 Follow CC / 8 Alternative / 3 No CC analog.)
-    </small>
-  </span>
-  <span class="badge shipped">shipped</span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.7-rewind.md">v0.9.7</a></span>
-  <span class="theme">
-    Rewind / branch from prior turn
-    <small>
-      User-reported urgent. <code>/rewind N</code> destructively drops the
-      last N user turns (Follow CC) — tool-round-boundary safe — and prints a
-      forward <code>↶ rewound</code> notice (the append-only renderer can't
-      restyle past turns, so the skeleton's retroactive <code>[rewound]</code>
-      marker became a forward notice — split #7 scope change).
-      <code>Up</code>/<code>Down</code> recall prior user turns into the draft,
-      decoupled from rewind (recall only edits the buffer — split #2).
-      Implemented + tested (suite 224); 4 split forks flagged for review.
-      (<a href="splits/v0.9.7-rewind.html">10 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.9.8-liveness-motion.md">v0.9.8</a></span>
-  <span class="theme">
-    Liveness motion — blink, not brightness
-    <small>
-      User-reported: the v0.9.4/v0.9.5 breathing dot still read as
-      stuck at ~5&nbsp;Hz on a <code>tmux-256color</code> terminal.
-      Root cause — 256-color exposes only ~22 distinct grays (the
-      xterm 24-step ramp <code>#080808..#eeeeee</code>), so a
-      brightness fade bands regardless of refresh; the v0.9.5 jump to
-      120&nbsp;Hz couldn't help because the palette, not the clock,
-      is the ceiling. Fix: animate the dot's <em>presence</em>, not
-      its brightness — a single <code>●</code> that winks on/off every
-      600&nbsp;ms, following CC's tool-use loader
-      (<code>ToolUseLoader</code> + <code>useBlink</code>). Red when
-      stalled; strict period; the turn always opens on a visible dot.
-      Re-affirms v0.9.4 #2, replaces #13, reverses v0.9.5's
-      120&nbsp;Hz. (<a href="splits/v0.9.8-liveness-motion.html">6
-      split-point decisions</a>, all converging on CC's tool-loader
-      wink.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.0-subagent.md">v0.10.0</a></span>
-  <span class="theme">
-    Subagent framework (<code>Agent</code> tool)
-    <small>
-      Context-explode structural fix. <code>Agent(description, prompt)</code>
-      spawns a fresh-context worker that reuses <code>ContextManager</code>,
-      runs to completion, and returns only its final text — the parent's
-      context grows by one tool-result, not the worker's transcript. Worker
-      tools omit <code>Agent</code> (no recursion); 100k result cap; 25-round
-      runaway cap; Esc stops the burn via a cross-loop <code>threading.Event</code>
-      (cancel reaches the parent through the v0.9.3 path). Renders as a normal
-      tool result — the dedicated folded block moves to v0.10.2 (split #5).
-      Implemented + tested (suite 248). (<a href="splits/v0.10.0-subagent.html">12 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<h2>P1 — important for the v1.0 lock</h2>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.1-streaming-steer.md">v0.10.1</a></span>
-  <span class="theme">
-    Re-enable streaming with cancel-as-steer
-    <small>
-      <code>stream_response</code> back to <code>stream=True</code>
-      (restored from v0.9.2, merged with v0.9.3's pairing layer): token
-      deltas + index-keyed tool_calls + eager <code>stop()</code> stream
-      close. On Esc the partial assistant text is <em>kept</em> — stashed
-      during the round and committed before <code>[interrupted by user]</code>
-      so a steer carries prior intent. Live token rendering deferred to v1.x
-      (append-only scrollback; the heartbeat stays the liveness signal —
-      split #3). Suite 253. (<a href="splits/v0.10.1-streaming-steer.html">6 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.2-visibility-parity.md">v0.10.2</a></span>
-  <span class="theme">
-    Visibility parity — show what the LLM sees
-    <small>
-      Ground-truthing showed only one channel was hidden: <strong>tool
-      schemas</strong> → now a folded <code>[tools]</code> block at session
-      start (<code>/show tools</code> expands). Long system prompts fold
-      (<code>[system]</code>); subagent results get a <code>[subagent]</code>
-      label. Adds <code>.claude/rules/visibility-parity.md</code>, an
-      <code>LLMRoundBundle</code> snapshot, and an invariant test iterating the
-      bundle's channels. Fold = expand-by-append (no in-place
-      <code>Ctrl+E</code> toggle — append-only renderer, split #1). Suite 261.
-      (<a href="splits/v0.10.2-visibility-parity.html">5 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.3-tuiview-purify.md">v0.10.3</a></span>
-  <span class="theme">
-    TUIView as pure renderer + FakeView swap-test
-    <small>
-      The folded-tool-result tray moved off the view into
-      <code>ChatStore.folded_tool_results</code>; <code>ToolRecord</code> is now
-      pure data in <code>store</code> (rendering moved to view functions). A
-      store-only <code>FakeView</code> + AST import-boundary test prove a view
-      needs nothing but the store — de-risking v0.10.4's store-only Advisor. The
-      skeleton's module-level import grep was infeasible (orchestrator lives in
-      the module) → scoped to FakeView (split #1). Suite 270.
-      (<a href="splits/v0.10.3-tuiview-purify.html">4 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.4-smart-advisor.md">v0.10.4</a></span>
-  <span class="theme">
-    Smart Advisor — third actor with LLM-driven task judgment
-    <small>
-      A third actor (own cheap LLM call on the <code>fast</code> slot) consulted
-      at turn-end (every 5 turns, or <code>/advise</code>): revises the task list
-      via the Task tools, or injects a judged <code>&lt;advisor&gt;</code>
-      suggestion the main LLM sees next turn. <code>run_once</code> is
-      side-effect-free; injection routes through a <code>ContextManager</code>
-      method (single-mutator preserved). Run-lock + session cap; skipped after a
-      cancelled turn. Idle trigger deferred (split #1). Suite 283.
-      (<a href="splits/v0.10.4-smart-advisor.html">7 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v0.10.5-compaction.md">v0.10.5</a></span>
-  <span class="theme">
-    Smart conversation compaction
-    <small>
-      <code>/compact</code> + an automatic 75%-of-window threshold now summarize
-      the older segment (one LLM call) into a folded <code>&lt;system-summary&gt;</code>
-      (<code>/show summary</code>), keeping the recent ~50% verbatim, round-safe.
-      Plus the >1M hardening from the planning memory: token-budget cut,
-      reactive prompt-too-long catch+retry, and in-message tool-result
-      truncation. <code>Slot.max_context_tokens</code> gates the auto-trigger.
-      The v1.0 gate. Suite 296. (<a href="splits/v0.10.5-compaction.html">7 split-point decisions</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<h2>v1.0 lock</h2>
-
-<div class="entry">
-  <span class="ver"><a href="PRDs/v1.0.0-lock.md">v1.0.0</a></span>
-  <span class="theme">
-    Sealed v1.0 surface
-    <small>
-      The cumulative result of the v0.9.x lifecycle arc + the v0.10.x band
-      (subagents, streaming, visibility parity, renderer purity, Smart Advisor,
-      smart compaction), tagged as the v1.0 product. SemVer frozen: post-1.0
-      behavior changes to the stable surface bump appropriately; internal
-      refactors stay free. Polish + post-1.0 scope (markdown, cost tracking,
-      skills, MCP, hooks, web frontend, parallel/recursive subagents) land as
-      v1.x. Suite 297. (<a href="PRDs/v1.0.0-lock.md">lock PRD</a>.)
-    </small>
-  </span>
-  <span class="badges">
-    <span class="badge shipped">shipped</span>
-  </span>
-</div>
-
-<h2>v2 — a practical coding agent (built for the OMILREC speedup)</h2>
 <p class="note" style="color:var(--dim);font-size:13px;margin:0 0 14px;">
   A band of minor releases building to a <strong>v2.0.0 lock</strong>, mirroring how
   v0.10.x built to v1.0.0. <strong>Goal (user-directed 2026-05-30): a practical,
@@ -449,66 +212,165 @@
   <code>~/.cache/neutrix/</code>; ccusage-compatible JSONL emission is opt-in (v1.8.0).
 </p>
 
+<h2>Releases — newest first</h2>
+
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.1.0-coding-tools.md">v1.1.0</a></span>
+  <span class="ver">v2.0.0</span>
   <span class="theme">
-    Coding tools (CC-shaped)
+    Lock — a practical, reliable terminal coding agent
     <small>
-      Replace <code>read_file/write_file/list_dir/run_shell</code> with
-      <code>Read</code>/<code>Edit</code>/<code>Write</code>/<code>Grep</code>/<code>Glob</code>/<code>Bash</code>:
-      line-range Read, surgical str-replace Edit (read-before-edit enforced via
-      the Executor), ripgrep-or-Python Grep, Glob, Bash (timeout + tree-kill).
-      (<a href="splits/v1.1.0-coding-tools.html">7 split-point decisions</a>.)
+      Seal the v2 surface: a dependable TUI coding agent that is genuinely <strong>handy
+      and practical for real work — concretely, fast and autonomous enough to speed up
+      OMILREC</strong>. Solid CC-shaped tools, project context, skills/commands, a
+      non-blocking Executor safety layer, resume, autonomous <code>/goal</code>, parallel
+      tools, and cost/timing. SemVer re-locked for 2.x. <strong>Deliberately descoped
+      from full Claude-Code parity</strong> (user-directed 2026-05-30, "keep it simple,
+      otherwise we never ship") — see Descoped below.
     </small>
   </span>
-  <span class="badges"><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">target</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver">v1.2.0</span>
+  <span class="ver">v1.8.0</span>
   <span class="theme">
-    Project context — <code>CLAUDE.md</code> / <code>AGENTS.md</code> + <code>@</code>-mentions + <code>/init</code>
+    Usage, cost &amp; timing
     <small>
-      CC's killer coding feature, currently absent: auto-load project + user
-      memory files into the system prompt, <code>@path</code> file-mentions pull
-      files into context, <code>/init</code> generates a <code>CLAUDE.md</code>
-      by surveying the repo. <code>.claude/</code>-compatible — drops into a CC
-      project and inherits its CLAUDE.md.
-      (<a href="splits/v1.2.0-project-context.html">5 split-point decisions</a>.) Suite 321.
+      Capture API <code>usage</code> (cache read / miss / output), per-message tokens +
+      running total, wall + active time, and cost via LiteLLM's pricing JSON (its
+      <em>data</em>, not the dep) — builds on the v1.5.2 per-turn
+      <code>llm_ms</code>/<code>tool_ms</code>. <code>/cost</code> + a status-line
+      readout. Matters for budgeting long autonomous runs. Optional
+      ccusage-compatible JSONL emission stays opt-in.
     </small>
   </span>
-  <span class="badges"><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver">v1.3.0</span>
+  <span class="ver">v1.7.0</span>
   <span class="theme">
-    Skills + slash-command framework + hot-reload
+    Parallel tools + background Bash
     <small>
-      Markdown skills/commands from <code>.claude/skills</code> + <code>.claude/commands</code>
-      (frontmatter; <code>/name</code> enqueues the body with <code>$ARGUMENTS</code>),
-      mtime-poll hot-reload (no new dep — lean ethos), and custom subagent types
-      from <code>.claude/agents</code> (extends the v0.10.0 general-purpose-only
-      set). User #4. (<a href="splits/v1.3.0-skills.html">4 split-point decisions</a>.) Suite 331.
+      Run a round's multiple <code>tool_use</code> blocks concurrently
+      (<code>asyncio.gather</code>, ordered results) instead of sequentially — direct
+      wall-clock speedup on multi-file work; the heartbeat beats the in-flight set in
+      unison. Plus background <code>Bash</code> (<code>run_in_background</code>) + a poll.
     </small>
   </span>
-  <span class="badges"><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver">v1.4.0</span>
+  <span class="ver"><a href="PRDs/v1.6.2-tool-timeout.md">v1.6.2</a></span>
   <span class="theme">
-    Permissions (auto / allow-all)
+    Hotfix — <code>Bash</code> tool_use timeout (deadlock + calibration)
     <small>
-      allow/deny/ask rules from <code>.claude/settings.json</code>, gated in the
-      Executor. Two modes, default <strong>auto</strong> (block destructive Bash
-      — <code>rm -rf</code>, force-push, <code>dd</code>, <code>curl|sh</code>, … —
-      with a notice); <code>/allow</code> → allow-all. <strong>No plan mode</strong>
-      (user-directed); interactive approval deferred to AskUserQuestion.
-      (<a href="splits/v1.4.0-permissions.html">4 split-point decisions</a>.) Suite 343.
+      The <code>Bash</code> tool already had a <code>timeout</code> schema param, but
+      its timeout path could hang the turn forever: <code>proc.kill()</code> killed
+      only the direct child, then a bare <code>communicate()</code> blocked on a
+      leaked grandchild holding the stdout pipe. Now the whole process group is
+      tree-killed (reusing <code>_tree_kill</code>) with a bounded drain — it can
+      never re-block. Default raised 30 s → 120 s (30 s spuriously killed
+      <code>pytest</code>/builds), capped at 600 s with a clamp note, partial output
+      kept. Scope Bash-only, mirroring CC (user decision); pure-compute tools stay
+      unprotected. (<a href="splits/v1.6.2-tool-timeout.html">8 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.6.1-anthropic-stream.md">v1.6.1</a></span>
+  <span class="theme">
+    Hotfix — <code>anthropic/*</code> streaming + empty-turn poison
+    <small>
+      P0 live fix (user hit it mid-OMILREC). Two linked bugs: (1) the IHEP gateway
+      streams the <strong>Anthropic Messages SSE protocol</strong> for
+      <code>anthropic/*</code> models, but neutrix only parsed OpenAI chunks → opus
+      produced nothing — now parsed off <code>chunk.model_extra</code> (text +
+      tool_use, no new dep); (2) a <code>content:null</code>-no-tool_calls assistant
+      turn poisoned the next request on strict backends (gpt-5.5, the anthropic
+      gateway) → an <code>_ensure_sdk_compliant</code> umbrella (pairing +
+      empty-block repair) heals it. Diagnosis confirmed live + by the user.
+      (<a href="splits/v1.6.1-anthropic-stream.html">8 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.6.0-goal-loop.md">v1.6.0</a></span>
+  <span class="theme">
+    <code>/goal</code> — autonomous multi-step loop
+    <small>
+      The practical-autonomy headline: a neutrix-native <code>/goal</code> so the agent
+      grinds a multi-step objective ("optimize this until the benchmark passes") across
+      turns without re-prompting — the core feature for unattended OMILREC speedup runs.
+      Loop in the chat worker (the CM stays single-turn); done = a
+      <code>&lt;&lt;GOAL_COMPLETE&gt;&gt;</code> sentinel (soft) + a 25-step cap (hard
+      guarantee); each continuation is a folded <code>&lt;system-reminder&gt;</code> turn;
+      Esc or a typed message reasserts control; in-memory (not resumed).
+      (<a href="splits/v1.6.0-goal-loop.html">7 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.5.4-retire-ask-user.md">v1.5.4</a></span>
+  <span class="theme">
+    Retire AskUserQuestion (defer to v3)
+    <small>
+      Removes the v1.4.8 AskUserQuestion tool and its entire interactive-input
+      apparatus (the tool, <code>prompts.py</code>, the bidirectional
+      <code>dispatch_all</code> generator, the CM <code>ask_user</code> port,
+      <code>terminal_chat._ask_user</code>). v2 has no human-in-the-loop tool — the
+      agent always proceeds autonomously. A recurring instability source (the v1.4.8
+      park regression, the v1.5.1 hang) and a net deletion; <code>dispatch_all</code>
+      reverts to a plain async generator. The concept defers to v3 (interactive
+      feedback fits the RL-env). User-directed: "v2 shall not take askuser."
+      (<a href="splits/v1.5.4-retire-ask-user.html">5 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.5.3-permission-executor-only.md">v1.5.3</a></span>
+  <span class="theme">
+    Permission as an Executor-only safety layer
+    <small>
+      Removes the v1.4.8 interactive permission prompt that parked the turn (every
+      <code>auto</code>-flagged destructive Bash awaited a human up to 300&nbsp;s). The
+      Executor is now a deterministic safety layer: <code>decide()</code> returns
+      <code>allow</code>/<code>deny</code> only, a detected-dangerous action is
+      <strong>denied directly</strong> (returns a <code>[denied]</code> tool_result and
+      the round continues — the LLM adapts), and the ContextManager + Advisor carry zero
+      permission semantics ("like an industrial agent" — user-directed). The
+      <code>needs_user_input</code> channel survives only for the AskUserQuestion tool;
+      <code>/allow</code> stays as the explicit bypass.
+      (<a href="splits/v1.5.3-permission-executor-only.html">6 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">v1.5.2</span>
+  <span class="theme">
+    Conversation resume (<code>--continue</code> / <code>/resume</code>)
+    <small>
+      Auto-persist every turn as JSONL (per-entry timestamps) so a killed session
+      survives: <code>--continue</code> reloads the most recent, <code>--resume</code>/<code>/resume</code>
+      pick one (restore messages + tasks via <code>ReplaceHistoryEvent</code>). Written to
+      <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> — <strong>NOT ~/.claude</strong>
+      (user-directed; <code>$NEUTRIX_SESSION_HOME</code> overrides). CC's JSONL shape, minus
+      ccusage-compat. The neutrix-native <code>/goal</code> loop is a separate later release.
+      (<a href="splits/v1.5.2-session-resume.html">7 split-point decisions</a>.) Suite 404.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
@@ -607,205 +469,296 @@
 </div>
 
 <div class="entry">
-  <span class="ver">v1.5.2</span>
+  <span class="ver">v1.4.0</span>
   <span class="theme">
-    Conversation resume (<code>--continue</code> / <code>/resume</code>)
+    Permissions (auto / allow-all)
     <small>
-      Auto-persist every turn as JSONL (per-entry timestamps) so a killed session
-      survives: <code>--continue</code> reloads the most recent, <code>--resume</code>/<code>/resume</code>
-      pick one (restore messages + tasks via <code>ReplaceHistoryEvent</code>). Written to
-      <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> — <strong>NOT ~/.claude</strong>
-      (user-directed; <code>$NEUTRIX_SESSION_HOME</code> overrides). CC's JSONL shape, minus
-      ccusage-compat. The neutrix-native <code>/goal</code> loop is a separate later release.
-      (<a href="splits/v1.5.2-session-resume.html">7 split-point decisions</a>.) Suite 404.
+      allow/deny/ask rules from <code>.claude/settings.json</code>, gated in the
+      Executor. Two modes, default <strong>auto</strong> (block destructive Bash
+      — <code>rm -rf</code>, force-push, <code>dd</code>, <code>curl|sh</code>, … —
+      with a notice); <code>/allow</code> → allow-all. <strong>No plan mode</strong>
+      (user-directed); interactive approval deferred to AskUserQuestion.
+      (<a href="splits/v1.4.0-permissions.html">4 split-point decisions</a>.) Suite 343.
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.5.3-permission-executor-only.md">v1.5.3</a></span>
+  <span class="ver">v1.3.0</span>
   <span class="theme">
-    Permission as an Executor-only safety layer
+    Skills + slash-command framework + hot-reload
     <small>
-      Removes the v1.4.8 interactive permission prompt that parked the turn (every
-      <code>auto</code>-flagged destructive Bash awaited a human up to 300&nbsp;s). The
-      Executor is now a deterministic safety layer: <code>decide()</code> returns
-      <code>allow</code>/<code>deny</code> only, a detected-dangerous action is
-      <strong>denied directly</strong> (returns a <code>[denied]</code> tool_result and
-      the round continues — the LLM adapts), and the ContextManager + Advisor carry zero
-      permission semantics ("like an industrial agent" — user-directed). The
-      <code>needs_user_input</code> channel survives only for the AskUserQuestion tool;
-      <code>/allow</code> stays as the explicit bypass.
-      (<a href="splits/v1.5.3-permission-executor-only.html">6 split-point decisions</a>.)
+      Markdown skills/commands from <code>.claude/skills</code> + <code>.claude/commands</code>
+      (frontmatter; <code>/name</code> enqueues the body with <code>$ARGUMENTS</code>),
+      mtime-poll hot-reload (no new dep — lean ethos), and custom subagent types
+      from <code>.claude/agents</code> (extends the v0.10.0 general-purpose-only
+      set). User #4. (<a href="splits/v1.3.0-skills.html">4 split-point decisions</a>.) Suite 331.
     </small>
   </span>
-  <span class="badges"><span class="badge p0">P0</span><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.5.4-retire-ask-user.md">v1.5.4</a></span>
+  <span class="ver">v1.2.0</span>
   <span class="theme">
-    Retire AskUserQuestion (defer to v3)
+    Project context — <code>CLAUDE.md</code> / <code>AGENTS.md</code> + <code>@</code>-mentions + <code>/init</code>
     <small>
-      Removes the v1.4.8 AskUserQuestion tool and its entire interactive-input
-      apparatus (the tool, <code>prompts.py</code>, the bidirectional
-      <code>dispatch_all</code> generator, the CM <code>ask_user</code> port,
-      <code>terminal_chat._ask_user</code>). v2 has no human-in-the-loop tool — the
-      agent always proceeds autonomously. A recurring instability source (the v1.4.8
-      park regression, the v1.5.1 hang) and a net deletion; <code>dispatch_all</code>
-      reverts to a plain async generator. The concept defers to v3 (interactive
-      feedback fits the RL-env). User-directed: "v2 shall not take askuser."
-      (<a href="splits/v1.5.4-retire-ask-user.html">5 split-point decisions</a>.)
+      CC's killer coding feature, currently absent: auto-load project + user
+      memory files into the system prompt, <code>@path</code> file-mentions pull
+      files into context, <code>/init</code> generates a <code>CLAUDE.md</code>
+      by surveying the repo. <code>.claude/</code>-compatible — drops into a CC
+      project and inherits its CLAUDE.md.
+      (<a href="splits/v1.2.0-project-context.html">5 split-point decisions</a>.) Suite 321.
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.6.0-goal-loop.md">v1.6.0</a></span>
+  <span class="ver"><a href="PRDs/v1.1.0-coding-tools.md">v1.1.0</a></span>
   <span class="theme">
-    <code>/goal</code> — autonomous multi-step loop
+    Coding tools (CC-shaped)
     <small>
-      The practical-autonomy headline: a neutrix-native <code>/goal</code> so the agent
-      grinds a multi-step objective ("optimize this until the benchmark passes") across
-      turns without re-prompting — the core feature for unattended OMILREC speedup runs.
-      Loop in the chat worker (the CM stays single-turn); done = a
-      <code>&lt;&lt;GOAL_COMPLETE&gt;&gt;</code> sentinel (soft) + a 25-step cap (hard
-      guarantee); each continuation is a folded <code>&lt;system-reminder&gt;</code> turn;
-      Esc or a typed message reasserts control; in-memory (not resumed).
-      (<a href="splits/v1.6.0-goal-loop.html">7 split-point decisions</a>.)
+      Replace <code>read_file/write_file/list_dir/run_shell</code> with
+      <code>Read</code>/<code>Edit</code>/<code>Write</code>/<code>Grep</code>/<code>Glob</code>/<code>Bash</code>:
+      line-range Read, surgical str-replace Edit (read-before-edit enforced via
+      the Executor), ripgrep-or-Python Grep, Glob, Bash (timeout + tree-kill).
+      (<a href="splits/v1.1.0-coding-tools.html">7 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge shipped">shipped</span></span>
+  <span class="badges"><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.6.1-anthropic-stream.md">v1.6.1</a></span>
+  <span class="ver"><a href="PRDs/v1.0.0-lock.md">v1.0.0</a></span>
   <span class="theme">
-    Hotfix — <code>anthropic/*</code> streaming + empty-turn poison
+    Sealed v1.0 surface
     <small>
-      P0 live fix (user hit it mid-OMILREC). Two linked bugs: (1) the IHEP gateway
-      streams the <strong>Anthropic Messages SSE protocol</strong> for
-      <code>anthropic/*</code> models, but neutrix only parsed OpenAI chunks → opus
-      produced nothing — now parsed off <code>chunk.model_extra</code> (text +
-      tool_use, no new dep); (2) a <code>content:null</code>-no-tool_calls assistant
-      turn poisoned the next request on strict backends (gpt-5.5, the anthropic
-      gateway) → an <code>_ensure_sdk_compliant</code> umbrella (pairing +
-      empty-block repair) heals it. Diagnosis confirmed live + by the user.
-      (<a href="splits/v1.6.1-anthropic-stream.html">8 split-point decisions</a>.)
+      The cumulative result of the v0.9.x lifecycle arc + the v0.10.x band
+      (subagents, streaming, visibility parity, renderer purity, Smart Advisor,
+      smart compaction), tagged as the v1.0 product. SemVer frozen: post-1.0
+      behavior changes to the stable surface bump appropriately; internal
+      refactors stay free. Polish + post-1.0 scope (markdown, cost tracking,
+      skills, MCP, hooks, web frontend, parallel/recursive subagents) land as
+      v1.x. Suite 297. (<a href="PRDs/v1.0.0-lock.md">lock PRD</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P0</span><span class="badge shipped">shipped</span></span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver">v1.7.0</span>
+  <span class="ver"><a href="PRDs/v0.10.5-compaction.md">v0.10.5</a></span>
   <span class="theme">
-    Parallel tools + background Bash
+    Smart conversation compaction
     <small>
-      Run a round's multiple <code>tool_use</code> blocks concurrently
-      (<code>asyncio.gather</code>, ordered results) instead of sequentially — direct
-      wall-clock speedup on multi-file work; the heartbeat beats the in-flight set in
-      unison. Plus background <code>Bash</code> (<code>run_in_background</code>) + a poll.
+      <code>/compact</code> + an automatic 75%-of-window threshold now summarize
+      the older segment (one LLM call) into a folded <code>&lt;system-summary&gt;</code>
+      (<code>/show summary</code>), keeping the recent ~50% verbatim, round-safe.
+      Plus the >1M hardening from the planning memory: token-budget cut,
+      reactive prompt-too-long catch+retry, and in-message tool-result
+      truncation. <code>Slot.max_context_tokens</code> gates the auto-trigger.
+      The v1.0 gate. Suite 296. (<a href="splits/v0.10.5-compaction.html">7 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver">v1.8.0</span>
+  <span class="ver"><a href="PRDs/v0.10.4-smart-advisor.md">v0.10.4</a></span>
   <span class="theme">
-    Usage, cost &amp; timing
+    Smart Advisor — third actor with LLM-driven task judgment
     <small>
-      Capture API <code>usage</code> (cache read / miss / output), per-message tokens +
-      running total, wall + active time, and cost via LiteLLM's pricing JSON (its
-      <em>data</em>, not the dep) — builds on the v1.5.2 per-turn
-      <code>llm_ms</code>/<code>tool_ms</code>. <code>/cost</code> + a status-line
-      readout. Matters for budgeting long autonomous runs. Optional
-      ccusage-compatible JSONL emission stays opt-in.
+      A third actor (own cheap LLM call on the <code>fast</code> slot) consulted
+      at turn-end (every 5 turns, or <code>/advise</code>): revises the task list
+      via the Task tools, or injects a judged <code>&lt;advisor&gt;</code>
+      suggestion the main LLM sees next turn. <code>run_once</code> is
+      side-effect-free; injection routes through a <code>ContextManager</code>
+      method (single-mutator preserved). Run-lock + session cap; skipped after a
+      cancelled turn. Idle trigger deferred (split #1). Suite 283.
+      (<a href="splits/v0.10.4-smart-advisor.html">7 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">planned</span></span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
 </div>
 
 <div class="entry">
-  <span class="ver">v2.0.0</span>
+  <span class="ver"><a href="PRDs/v0.10.3-tuiview-purify.md">v0.10.3</a></span>
   <span class="theme">
-    Lock — a practical, reliable terminal coding agent
+    TUIView as pure renderer + FakeView swap-test
     <small>
-      Seal the v2 surface: a dependable TUI coding agent that is genuinely <strong>handy
-      and practical for real work — concretely, fast and autonomous enough to speed up
-      OMILREC</strong>. Solid CC-shaped tools, project context, skills/commands, a
-      non-blocking Executor safety layer, resume, autonomous <code>/goal</code>, parallel
-      tools, and cost/timing. SemVer re-locked for 2.x. <strong>Deliberately descoped
-      from full Claude-Code parity</strong> (user-directed 2026-05-30, "keep it simple,
-      otherwise we never ship") — see Descoped below.
+      The folded-tool-result tray moved off the view into
+      <code>ChatStore.folded_tool_results</code>; <code>ToolRecord</code> is now
+      pure data in <code>store</code> (rendering moved to view functions). A
+      store-only <code>FakeView</code> + AST import-boundary test prove a view
+      needs nothing but the store — de-risking v0.10.4's store-only Advisor. The
+      skeleton's module-level import grep was infeasible (orchestrator lives in
+      the module) → scoped to FakeView (split #1). Suite 270.
+      (<a href="splits/v0.10.3-tuiview-purify.html">4 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p1">P1</span><span class="badge planned">target</span></span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
 </div>
 
-<h2>Descoped from the v2 path</h2>
-<p class="note">
-  User-directed 2026-05-30: <em>"keep it simple, otherwise we never ship; neutrix needs
-  to be practical for the OMILREC speedup."</em> The goal is a practical tool, not a
-  Claude&nbsp;Code clone — so these leave the v2 lock and reopen only if real OMILREC work
-  demands them.
-</p>
 <div class="entry">
-  <span class="ver">cut</span>
+  <span class="ver"><a href="PRDs/v0.10.2-visibility-parity.md">v0.10.2</a></span>
   <span class="theme">
-    Parity features removed from v2
+    Visibility parity — show what the LLM sees
     <small>
-      <strong>Hooks</strong> (settings.json PreToolUse/PostToolUse/Stop) ·
-      <strong>MCP</strong> (external <code>mcp__</code> tools) ·
-      <strong>Multimodal input</strong> (image/PDF/notebook) ·
-      <strong>Anthropic-native backend + thinking display</strong> ·
-      <strong>Sandbox</strong> (filesystem/network restrictions) ·
-      <strong>Cross-session memory</strong> ·
-      <strong>Background / scheduled / remote agents</strong> (cron, remote triggers,
-      teammates). The OpenAI-compatible client already spans providers;
-      <code>.claude/</code> discovery (read-only) stays.
+      Ground-truthing showed only one channel was hidden: <strong>tool
+      schemas</strong> → now a folded <code>[tools]</code> block at session
+      start (<code>/show tools</code> expands). Long system prompts fold
+      (<code>[system]</code>); subagent results get a <code>[subagent]</code>
+      label. Adds <code>.claude/rules/visibility-parity.md</code>, an
+      <code>LLMRoundBundle</code> snapshot, and an invariant test iterating the
+      bundle's channels. Fold = expand-by-append (no in-place
+      <code>Ctrl+E</code> toggle — append-only renderer, split #1). Suite 261.
+      (<a href="splits/v0.10.2-visibility-parity.html">5 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge planned">cut</span></span>
-</div>
-<div class="entry">
-  <span class="ver">defer</span>
-  <span class="theme">
-    Useful but not blocking the lock — reopen on demand
-    <small>
-      <strong>Web fetch / search</strong> (doc lookup mid-task) ·
-      <strong>LSP</strong> (go-to-def / find-refs — real value for C++/Python
-      navigation, but heavy; reopen if navigation becomes the bottleneck). Pulled into
-      the v2 path only if OMILREC use shows they're needed.
-    </small>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
   </span>
-  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">deferred</span></span>
 </div>
 
-<h2>v3 — vision</h2>
 <div class="entry">
-  <span class="ver">v3.x</span>
+  <span class="ver"><a href="PRDs/v0.10.1-streaming-steer.md">v0.10.1</a></span>
   <span class="theme">
-    RL-framework compatibility (tunable system prompt)
+    Re-enable streaming with cancel-as-steer
     <small>
-      Make neutrix's agent loop usable as an <strong>RL environment</strong> so
-      the system prompt (and policy) can be tuned by an agent-RL framework: a
-      headless, seedable run interface (reset / step / reward hook) decoupled from
-      the TUI — the v0.10.3 store-purity + FakeView swap-test are the groundwork
-      — with the system prompt a first-class, externally-injected parameter.
-      Captured now so v2 architecture choices keep the loop cleanly headless.
-      Interactive human-feedback — the retired v1.5.4 AskUserQuestion — belongs here
-      too: modelling human input in a seedable loop is an RL-env concern, not a v2
-      feature.
+      <code>stream_response</code> back to <code>stream=True</code>
+      (restored from v0.9.2, merged with v0.9.3's pairing layer): token
+      deltas + index-keyed tool_calls + eager <code>stop()</code> stream
+      close. On Esc the partial assistant text is <em>kept</em> — stashed
+      during the round and committed before <code>[interrupted by user]</code>
+      so a steer carries prior intent. Live token rendering deferred to v1.x
+      (append-only scrollback; the heartbeat stays the liveness signal —
+      split #3). Suite 253. (<a href="splits/v0.10.1-streaming-steer.html">6 split-point decisions</a>.)
     </small>
   </span>
-  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">vision</span></span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
 </div>
 
-<h2>Shipped</h2>
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.10.0-subagent.md">v0.10.0</a></span>
+  <span class="theme">
+    Subagent framework (<code>Agent</code> tool)
+    <small>
+      Context-explode structural fix. <code>Agent(description, prompt)</code>
+      spawns a fresh-context worker that reuses <code>ContextManager</code>,
+      runs to completion, and returns only its final text — the parent's
+      context grows by one tool-result, not the worker's transcript. Worker
+      tools omit <code>Agent</code> (no recursion); 100k result cap; 25-round
+      runaway cap; Esc stops the burn via a cross-loop <code>threading.Event</code>
+      (cancel reaches the parent through the v0.9.3 path). Renders as a normal
+      tool result — the dedicated folded block moves to v0.10.2 (split #5).
+      Implemented + tested (suite 248). (<a href="splits/v0.10.0-subagent.html">12 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.8-liveness-motion.md">v0.9.8</a></span>
+  <span class="theme">
+    Liveness motion — blink, not brightness
+    <small>
+      User-reported: the v0.9.4/v0.9.5 breathing dot still read as
+      stuck at ~5&nbsp;Hz on a <code>tmux-256color</code> terminal.
+      Root cause — 256-color exposes only ~22 distinct grays (the
+      xterm 24-step ramp <code>#080808..#eeeeee</code>), so a
+      brightness fade bands regardless of refresh; the v0.9.5 jump to
+      120&nbsp;Hz couldn't help because the palette, not the clock,
+      is the ceiling. Fix: animate the dot's <em>presence</em>, not
+      its brightness — a single <code>●</code> that winks on/off every
+      600&nbsp;ms, following CC's tool-use loader
+      (<code>ToolUseLoader</code> + <code>useBlink</code>). Red when
+      stalled; strict period; the turn always opens on a visible dot.
+      Re-affirms v0.9.4 #2, replaces #13, reverses v0.9.5's
+      120&nbsp;Hz. (<a href="splits/v0.9.8-liveness-motion.html">6
+      split-point decisions</a>, all converging on CC's tool-loader
+      wink.)
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.7-rewind.md">v0.9.7</a></span>
+  <span class="theme">
+    Rewind / branch from prior turn
+    <small>
+      User-reported urgent. <code>/rewind N</code> destructively drops the
+      last N user turns (Follow CC) — tool-round-boundary safe — and prints a
+      forward <code>↶ rewound</code> notice (the append-only renderer can't
+      restyle past turns, so the skeleton's retroactive <code>[rewound]</code>
+      marker became a forward notice — split #7 scope change).
+      <code>Up</code>/<code>Down</code> recall prior user turns into the draft,
+      decoupled from rewind (recall only edits the buffer — split #2).
+      Implemented + tested (suite 224); 4 split forks flagged for review.
+      (<a href="splits/v0.9.7-rewind.html">10 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges">
+    <span class="badge shipped">shipped</span>
+  </span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.6-emergency-compact.md">v0.9.6</a></span>
+  <span class="theme">
+    Emergency mechanical <code>/compact</code>
+    <small>
+      User-reported urgent. A slash command that drops the oldest
+      50 % of <code>ContextManager.messages</code> mechanically —
+      no LLM summarization, no automatic trigger, no configurable
+      ratio. Tool-round-boundary aware. The bridge that keeps users
+      working until smart compaction lands at v0.10.5.
+      (<a href="splits/v0.9.6-emergency-compact.html">12 split-point
+      decisions</a>; 1 Follow CC / 8 Alternative / 3 No CC analog.)
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v0.9.5-llm-error-surface.md">v0.9.5</a></span>
+  <span class="theme">
+    LLM error surface (stalled / timeout / inline error)
+    <small>
+      User-reported during v0.9.4 dogfooding: when the LLM API hangs
+      silently, the heartbeat keeps breathing but neither neutrix
+      nor the LLM is making progress, and the user has no signal
+      until the SDK's ~10-minute default timeout fires. Two layers:
+      ~50&nbsp;s of silence → heartbeat palette swap to red +
+      <code>● LLM (stalled)</code> label (UI hint, no abort);
+      ~300&nbsp;s → background watchdog fires
+      <code>cm.cancel(reason='timeout')</code>, transcript records
+      <code>[LLM timeout after 300s]</code>. Per-slot tunable via
+      a new <code>llm_timeout_s</code> YAML field (default 300&nbsp;s);
+      the stall hint is derived as <code>max(10, timeout/6)</code>.
+      Forward-compatible with v0.10.1 streaming
+      (<a href="splits/v0.9.5-llm-error-surface.html">12 split-point
+      decisions</a>; 9 Alternative / 3 Follow CC; thresholds revised
+      at acceptance for slow models).
+    </small>
+  </span>
+  <span class="badge shipped">shipped</span>
+</div>
 
 <div class="entry">
   <span class="ver"><a href="PRDs/v0.9.4-heartbeat.md">v0.9.4</a></span>
@@ -936,6 +889,67 @@
     <li>v0.1.0 — initial release (no PRD)</li>
   </ul>
 </details>
+
+<h2>Beyond v2 &amp; descoped</h2>
+
+<p class="note">
+  User-directed 2026-05-30: <em>"keep it simple, otherwise we never ship; neutrix needs
+  to be practical for the OMILREC speedup."</em> The goal is a practical tool, not a
+  Claude&nbsp;Code clone — so these leave the v2 lock and reopen only if real OMILREC work
+  demands them.
+</p>
+
+<div class="entry">
+  <span class="ver">v3.x</span>
+  <span class="theme">
+    RL-framework compatibility (tunable system prompt)
+    <small>
+      Make neutrix's agent loop usable as an <strong>RL environment</strong> so
+      the system prompt (and policy) can be tuned by an agent-RL framework: a
+      headless, seedable run interface (reset / step / reward hook) decoupled from
+      the TUI — the v0.10.3 store-purity + FakeView swap-test are the groundwork
+      — with the system prompt a first-class, externally-injected parameter.
+      Captured now so v2 architecture choices keep the loop cleanly headless.
+      Interactive human-feedback — the retired v1.5.4 AskUserQuestion — belongs here
+      too: modelling human input in a seedable loop is an RL-env concern, not a v2
+      feature.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">vision</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">cut</span>
+  <span class="theme">
+    Parity features removed from v2
+    <small>
+      <strong>Hooks</strong> (settings.json PreToolUse/PostToolUse/Stop) ·
+      <strong>MCP</strong> (external <code>mcp__</code> tools) ·
+      <strong>Multimodal input</strong> (image/PDF/notebook) ·
+      <strong>Anthropic-native backend + thinking display</strong> ·
+      <strong>Sandbox</strong> (filesystem/network restrictions) ·
+      <strong>Cross-session memory</strong> ·
+      <strong>Background / scheduled / remote agents</strong> (cron, remote triggers,
+      teammates). The OpenAI-compatible client already spans providers;
+      <code>.claude/</code> discovery (read-only) stays.
+    </small>
+  </span>
+  <span class="badges"><span class="badge planned">cut</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver">defer</span>
+  <span class="theme">
+    Useful but not blocking the lock — reopen on demand
+    <small>
+      <strong>Web fetch / search</strong> (doc lookup mid-task) ·
+      <strong>LSP</strong> (go-to-def / find-refs — real value for C++/Python
+      navigation, but heavy; reopen if navigation becomes the bottleneck). Pulled into
+      the v2 path only if OMILREC use shows they're needed.
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge planned">deferred</span></span>
+</div>
 
 <footer>
   Each shipped version is a git tag; <code>setuptools_scm</code>
