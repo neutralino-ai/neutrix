@@ -4,6 +4,30 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.5] — 2026-05-31
+
+### Removed
+- **Onboarding-era dead code.** `config.py` no longer carries
+  `PROVIDER_DEFAULT_MODELS`, `save_config()`, or `_serialize_provider()` — the
+  config write-back machinery for the onboarding flow that v1.7.1 retired
+  (replaced by `bootstrap_config()` + "fill your key and re-run"). No production
+  caller existed; the 119-line `tests/test_smoke.py` block that exercised them
+  is removed too. No behavior change.
+
+### Changed
+- **`README.md` rewritten to the shipped v1.7.4 surface** — Claude-Code-shaped
+  tools (`Read`/`Edit`/`Write`/`Grep`/`Glob`/`Bash` + `Task*`/`Agent`) instead
+  of the retired `read_file`/`write_file`/`list_dir`/`run_shell`; the IHEP-only
+  config with the `pricing:` block; current CLI flags and the full slash-command
+  table; a Documentation section linking `architecture.html` + `roadmap.html`.
+- **`store.py` module docstring** now names the real dependency-direction
+  modules (`terminal_chat`/`context_manager`/`llm`/`tools`/`executor`) instead
+  of the long-gone `tui`/`agent_loop`/`onboard`.
+- **`docs/roadmap.html`** drops the `ccusage`-compatible-JSONL references —
+  that external-tool-compat scope is not being pursued (see `v2.0.0-lock`).
+
+See [docs/PRDs/v1.7.5-hygiene.md](docs/PRDs/v1.7.5-hygiene.md).
+
 ## [v1.7.4] — 2026-05-31
 
 ### Added

@@ -15,21 +15,6 @@ from neutrix.pricing import Price, PriceTable
 CONFIG_PATH = Path("~/.config/neutrix/config.yaml").expanduser()
 SLOT_NAMES: tuple[str, ...] = ("fast", "strong")
 
-PROVIDER_DEFAULT_MODELS: dict[str, list[str]] = {
-    "ihep": [
-        "anthropic/claude-haiku-4-5",
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-sonnet-4-6",
-        "openai/gpt-5.5",
-        "deepseek-ai/deepseek-v4-pro",
-        "deepseek-ai/deepseek-v4-flash",
-        "zhipu/glm-5.1",
-        "moonshot/kimi-k2.6",
-    ],
-    "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
-    "glm": ["glm-5.1", "glm-5.1-highspeed"],
-}
-
 DEFAULT_CONFIG = """\
 # neutrix config — paste your IHEP gateway api_key below, then re-run `neutrix`.
 # Two named slots, `fast` and `strong`, point at (provider, model) pairs.
@@ -189,28 +174,6 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     return Config(providers=providers, slots=slots, path=path, pricing=pricing)
 
 
-def save_config(
-    config: Config,
-    *,
-    fast: dict[str, str] | None = None,
-    strong: dict[str, str] | None = None,
-    path: Path | None = None,
-) -> Path:
-    """Round-trippable YAML write-back. Loses any comments in the existing file."""
-    out = path or config.path
-    data: dict[str, Any] = {
-        "providers": {
-            name: _serialize_provider(prov)
-            for name, prov in config.providers.items()
-        },
-        "fast": fast if fast is not None else (config.slots.get("fast") or {}),
-        "strong": strong if strong is not None else (config.slots.get("strong") or {}),
-    }
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    return out
-
-
 def _to_float(value: Any) -> float:
     """Coerce a config price value to float; ``None`` / non-numeric → ``0.0``."""
     try:
@@ -270,19 +233,6 @@ def _read_max_context_tokens(
             f"got {value}"
         )
     return value
-
-
-def _serialize_provider(prov: Any) -> dict[str, Any]:
-    """Provider entries write `model_status` only when non-empty."""
-    prov = prov or {}
-    out: dict[str, Any] = {
-        "base_url": prov.get("base_url", ""),
-        "api_key": prov.get("api_key", ""),
-    }
-    status = prov.get("model_status") or {}
-    if status:
-        out["model_status"] = {k: v for k, v in status.items() if v in ("verified", "failed")}
-    return out
 
 
 def resolve_initial_slot(config: Config) -> tuple[Slot | None, Slot | None]:

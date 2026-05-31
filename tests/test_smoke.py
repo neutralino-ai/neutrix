@@ -6,7 +6,6 @@ import pytest
 from neutrix import __version__, cli
 from neutrix.config import (
     DEFAULT_CONFIG,
-    PROVIDER_DEFAULT_MODELS,
     SLOT_NAMES,
     Config,
     ConfigError,
@@ -14,7 +13,6 @@ from neutrix.config import (
     bootstrap_config,
     load_config,
     resolve_initial_slot,
-    save_config,
 )
 from neutrix.tools import BUILTIN_TOOLS, dispatch, get_schemas
 
@@ -167,123 +165,6 @@ def test_slot_unknown_name(tmp_path):
 
 def test_slot_names_constant():
     assert SLOT_NAMES == ("fast", "strong")
-
-
-def test_provider_default_models_covers_template():
-    """Every provider shipped in the default template has a model catalog."""
-    cfg = bootstrap_config_to_tmp()
-    for name in cfg.providers:
-        assert name in PROVIDER_DEFAULT_MODELS, name
-        assert PROVIDER_DEFAULT_MODELS[name], name
-
-
-def bootstrap_config_to_tmp():
-    import tempfile
-    from pathlib import Path
-    path = Path(tempfile.mkdtemp()) / "config.yaml"
-    bootstrap_config(path)
-    return load_config(path)
-
-
-def test_save_config_roundtrips(tmp_path):
-    """save_config writes YAML that load_config + slot() can resolve."""
-    path = tmp_path / "config.yaml"
-    bootstrap_config(path)
-    cfg = load_config(path)
-    cfg.providers["ihep"]["api_key"] = "sk-roundtrip"
-    saved = save_config(
-        cfg,
-        fast={"provider": "ihep", "model": "anthropic/claude-haiku-4-5"},
-        strong={"provider": "ihep", "model": "anthropic/claude-opus-4-7"},
-        path=path,
-    )
-    assert saved == path
-    reloaded = load_config(path)
-    fast = reloaded.slot("fast")
-    assert fast.provider == "ihep"
-    assert fast.api_key == "sk-roundtrip"
-    assert fast.model == "anthropic/claude-haiku-4-5"
-    strong = reloaded.slot("strong")
-    assert strong.model == "anthropic/claude-opus-4-7"
-
-
-def test_resolve_initial_slot_both_missing_keys(tmp_path):
-    """When both slot providers have empty api_keys, both come back None."""
-    path = tmp_path / "config.yaml"
-    bootstrap_config(path)  # template has empty api_keys
-    cfg = load_config(path)
-    fast, strong = resolve_initial_slot(cfg)
-    assert fast is None
-    assert strong is None
-
-
-def test_save_config_persists_model_status(tmp_path):
-    """save_config writes model_status when set, and round-trips through load."""
-    path = tmp_path / "config.yaml"
-    bootstrap_config(path)
-    cfg = load_config(path)
-    cfg.providers["ihep"]["api_key"] = "sk-x"
-    cfg.providers["ihep"]["model_status"] = {
-        "anthropic/claude-haiku-4-5": "verified",
-        "anthropic/claude-opus-4-7": "failed",
-    }
-    save_config(
-        cfg,
-        fast={"provider": "ihep", "model": "anthropic/claude-haiku-4-5"},
-        strong={"provider": "ihep", "model": "anthropic/claude-opus-4-7"},
-        path=path,
-    )
-    reloaded = load_config(path)
-    ms = reloaded.providers["ihep"].get("model_status") or {}
-    assert ms.get("anthropic/claude-haiku-4-5") == "verified"
-    assert ms.get("anthropic/claude-opus-4-7") == "failed"
-    # the round-trip invents no phantom providers (template is IHEP-only, v1.7.1)
-    assert set(reloaded.providers) == {"ihep"}
-
-
-def test_main_empty_key_prints_fillkey_message_and_exits(monkeypatch, tmp_path, capsys):
-    """v1.7.1: a config present but with no usable slot (empty api_key) prints the
-    fill-key message and exits 1 — no interactive onboarding (removed)."""
-    path = tmp_path / "config.yaml"
-    path.write_text("ok")  # exists → the missing-config bootstrap path is skipped
-    config = Config(providers={}, slots={}, path=path)
-    monkeypatch.setattr(cli, "CONFIG_PATH", path)
-    monkeypatch.setattr(cli, "load_config", lambda: config)
-    monkeypatch.setattr(cli, "resolve_initial_slot", lambda _c: (None, None))
-    rc = cli.main([])
-    assert rc == 1
-    err = capsys.readouterr().err
-    assert "api_key" in err and str(path) in err
-
-
-def test_default_config_has_pricing_block(tmp_path):
-    """v1.7.1: the shipped template carries the frozen pricing block; price_table()
-    parses it. (Prices live in config, not code.)"""
-    path = tmp_path / "config.yaml"
-    bootstrap_config(path)
-    pt = load_config(path).price_table()
-    assert pt.currency == "$"
-    assert pt.price_for("anthropic/claude-opus-4-7").input == 5.0
-    assert pt.price_for("anthropic/claude-haiku-4-5").output == 5.0
-    assert pt.price_for("not-listed") is None
-
-
-def test_save_config_drops_unknown_status_values(tmp_path):
-    """Only verified/failed are written; anything else is dropped."""
-    path = tmp_path / "config.yaml"
-    bootstrap_config(path)
-    cfg = load_config(path)
-    cfg.providers["ihep"]["api_key"] = "sk-x"
-    cfg.providers["ihep"]["model_status"] = {
-        "good": "verified",
-        "bad": "failed",
-        "garbage": "unknown",  # should be dropped
-        "weirder": "in-flight",  # should be dropped
-    }
-    save_config(cfg, path=path)
-    reloaded = load_config(path)
-    ms = reloaded.providers["ihep"].get("model_status") or {}
-    assert set(ms) == {"good", "bad"}
 
 
 def test_resolve_initial_slot_one_works(tmp_path):

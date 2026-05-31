@@ -209,7 +209,7 @@
   <code>.claude/settings.json</code> (permissions) — so it drops into a CC project and
   inherits the config. It <strong>never writes into <code>~/.claude</code></strong>
   (user-directed): neutrix-owned state (session logs, …) lives under
-  <code>~/.cache/neutrix/</code>; ccusage-compatible JSONL emission is opt-in (v1.8.0).
+  <code>~/.cache/neutrix/</code>.
 </p>
 
 <h2>Releases — newest first</h2>
@@ -229,6 +229,22 @@
     </small>
   </span>
   <span class="badges"><span class="badge p1">P1</span><span class="badge planned">target</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.7.5-hygiene.md">v1.7.5</a></span>
+  <span class="theme">
+    Project hygiene — dead code, README refresh, doc consistency
+    <small>
+      Removes the onboarding-era dead code from <code>config.py</code>
+      (<code>save_config</code>/<code>PROVIDER_DEFAULT_MODELS</code>/<code>_serialize_provider</code>,
+      retired with the v1.7.1 bootstrap flow) and its tests; rewrites
+      <code>README.md</code> to the shipped tool/config/command surface; fixes
+      <code>store.py</code>'s stale dependency docstring; drops the <code>ccusage</code>
+      references here. No behavior change. (<a href="PRDs/v1.7.5-hygiene.md">PRD</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p3">P3</span><span class="badge shipped">shipped</span></span>
 </div>
 
 <div class="entry">
@@ -431,8 +447,8 @@
       survives: <code>--continue</code> reloads the most recent, <code>--resume</code>/<code>/resume</code>
       pick one (restore messages + tasks via <code>ReplaceHistoryEvent</code>). Written to
       <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> — <strong>NOT ~/.claude</strong>
-      (user-directed; <code>$NEUTRIX_SESSION_HOME</code> overrides). CC's JSONL shape, minus
-      ccusage-compat. The neutrix-native <code>/goal</code> loop is a separate later release.
+      (user-directed; <code>$NEUTRIX_SESSION_HOME</code> overrides). CC's JSONL shape. The
+      neutrix-native <code>/goal</code> loop shipped separately (v1.6.0).
       (<a href="splits/v1.5.2-session-resume.html">7 split-point decisions</a>.) Suite 404.
     </small>
   </span>

@@ -8,8 +8,8 @@ ChatStore is the single owner of:
 
 Any renderer (terminal, future web, tests) reads from this store and
 awaits :py:meth:`ChatStore.changes` to know when to refresh. This module
-imports nothing from ``tui``, ``terminal_chat``, ``agent_loop``, ``llm``,
-``tools``, or ``onboard`` — the dependency arrow points outward only.
+imports nothing from ``terminal_chat``, ``context_manager``, ``llm``,
+``tools``, or ``executor`` — the dependency arrow points outward only.
 """
 from __future__ import annotations
 
