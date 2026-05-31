@@ -4,6 +4,24 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.4] — 2026-05-31
+
+### Added
+- **`docs/architecture.html`** — a how-it-works companion to `docs/roadmap.html`:
+  the real hub-and-spoke component graph (`ui ↔ store ↔ CM ↔ {LLM, Executor,
+  Advisor}`, with `ChatStore` as the single source of truth + its `changes()`
+  notifier), the `ContextManager` state machine, and four end-to-end function
+  walkthroughs — **cancel, rewind, save/load, goal** — with symbol-based code
+  citations (not line numbers, which rot). Docs-only; no behavior change.
+
+### Changed
+- `CLAUDE.md`'s "Living documents" note no longer claims `roadmap.html` is the
+  *single* living document — the roadmap (direction + per-release decisions) and
+  `architecture.html` (how it works now) are both living docs; the roadmap links
+  to the architecture doc.
+
+See [docs/PRDs/v1.7.4-architecture-doc.md](docs/PRDs/v1.7.4-architecture-doc.md).
+
 ## [v1.7.3] — 2026-05-31
 
 ### Fixed

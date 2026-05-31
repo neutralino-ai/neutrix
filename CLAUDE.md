@@ -81,10 +81,13 @@ keep abstractions earned by use, keep features earned by the PRD.
 
 ## Living documents — keep `docs/roadmap.html` up to date (required workflow)
 
-`docs/roadmap.html` is the project's single user-visible living document: the
-roadmap (where the project is going) and — as the v2 surface settles — the
-current architecture and the per-feature design decisions. **Keeping it current
-is a required workflow step, not optional housekeeping:**
+`docs/roadmap.html` and `docs/architecture.html` are the project's user-visible
+living documents: the roadmap (where the project is going, plus per-release design
+decisions) and the architecture doc (how the current system is wired —
+`ui ↔ store ↔ CM ↔ {LLM, Executor, Advisor}` + the load-bearing flows: cancel,
+rewind, save/load, goal). The roadmap links to the architecture doc; neither may
+contradict reality. **Keeping both current is a required workflow step, not
+optional housekeeping:**
 
 - **On PRD acceptance** (Phase 1, step 7): add or revise the release's roadmap
   entry.

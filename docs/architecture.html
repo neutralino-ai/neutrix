@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>neutrix — architecture (how it works now)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:34px 0 12px;font-weight:600;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .card h3{margin:0 0 8px;font-size:15px;}
+  .card dl{display:grid;grid-template-columns:120px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .card dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .card dd{margin:0 0 8px;}
+  pre{background:#f1f0eb;border:1px solid var(--border);border-radius:6px;padding:16px;overflow-x:auto;font:12.5px/1.4 ui-monospace,Menlo,monospace;color:#2a2a2a;}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  .sym{color:var(--alt);font-weight:600;}
+  ol{padding-left:20px;}ol li{margin:3px 0;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+  a{color:var(--accent);}
+</style></head><body>
+<h1>neutrix — architecture (how it works now)</h1>
+<p class="tagline">The how-it-works companion to <a href="roadmap.html">roadmap.html</a> (which is where the project is <em>going</em>). This is how the current v2-surface code is wired, as of v1.7.x.</p>
+<p class="note">Code references are <strong>symbol-based</strong> (<code>module.py › Symbol</code>), not line numbers — line numbers rot, symbols survive edits. The module docstrings remain the authoritative low-level detail; this is the map.</p>
+
+<h2>The shape in one sentence</h2>
+<p>A user-facing UI and a headless conversation engine, joined by one typed store: <strong><code>ui ↔ store ↔ CM ↔ { LLM, Executor, Advisor }</code></strong>. But the real graph is <strong>hub-and-spoke, not a chain</strong>: the UI sends typed <em>events</em> straight to the engine <em>and separately</em> subscribes to the store's change notifier to render; the engine is the only writer of conversation state into the store; the Executor writes tool results back into it too.</p>
+
+<h2>Component graph (the real edges)</h2>
+<pre>
+   ┌─────────────────────────── TerminalChat  (UI) ───────────────────────────┐
+   │  _input_loop → enqueue          _render_watcher  ← ChatStore.changes()    │
+   │  _run_command  (/slash)         _persist_new_records / _persist_new_usage │
+   │  _heartbeat_ticker              _maybe_run_advisor  (turn-end)            │
+   └─────────┬───────────────────────────────▲────────────────────────┬───────┘
+             │  handle_event(Event)           │  changes()  (one        │  runs the
+             │  UserMessage/Cancel/SlotSwitch/ │  async notifier:        │  Advisor on a
+             │  Clear/ReplaceHistory           │  render + persist)      │  separate
+             ▼                                 │                         ▼  fast-slot client
+   ┌──────────────── ContextManager (CM) ──────┴──────┐          ┌──── Advisor ─────┐
+   │  State machine (IDLE / AWAITING_LLM /             │  append  │  consulted while │
+   │  AWAITING_EXECUTOR / CANCELLING) · _drive loop    │─────────►│  the CM is IDLE  │
+   │  the ONLY writer of conversation state ──────────►│  records └──────────────────┘
+   └──┬──────────────────┬──────────────────┬──────────┘                 │
+      │  stream_response  │  dispatch_all    │  ledger.record() (observe) ▼
+      ▼                   ▼                  ▼                     ┌────────────┐
+ ┌──────────────┐   ┌──────────────┐   ┌────────────┐             │  ChatStore │
+ │ OpenAIChatLLM│   │   Executor   │   │ CostLedger │             │  ───────── │
+ │ (HTTP/stream)│   │   (tools)    │   └────────────┘             │  the SINGLE│
+ └──────────────┘   └──────┬───────┘                              │  source of │
+                           └──────────── executor.store ─────────►│  truth     │
+                                          (tool results)          └────────────┘
+</pre>
+<div class="card"><dl>
+<dt>store</dt><dd><span class="sym">store.py › ChatStore</span> — the single source of truth (typed <code>MessageRecord</code>s, pending stream text, pending tool calls, tasks, the queued-input panel). <span class="sym">ChatStore.changes()</span> is the one async notifier the UI subscribes to; every mutation calls <code>_notify()</code> (and v1.7.2's <span class="sym">ChatStore.notify()</span> pokes it without a mutation, for compaction liveness).</dd>
+<dt>UI → CM</dt><dd>The UI sends typed events via <span class="sym">context_manager.py › ContextManager.handle_event()</span> — <code>UserMessageEvent</code>, <code>CancelEvent</code>, <code>SlotSwitchEvent</code>, <code>ClearEvent</code>, <code>ReplaceHistoryEvent</code>. This is a <em>direct</em> call, distinct from the render path.</dd>
+<dt>UI ← store</dt><dd><span class="sym">terminal_chat.py › TerminalChat._render_watcher()</span> iterates <code>store.changes()</code> and renders new records append-only; the same loop persists them (<code>_persist_new_records</code> / <code>_persist_new_usage</code>).</dd>
+<dt>CM → engine</dt><dd>Per round the CM calls <span class="sym">OpenAIChatLLM.stream_response()</span>, dispatches tools via <span class="sym">Executor.dispatch_all()</span>, writes records to the store, and — if attached — feeds <span class="sym">CostLedger.record()</span> (observe-only; the loop never depends on it, keeping the CM headless for the v3 RL-env goal).</dd>
+<dt>Executor → store</dt><dd>The Executor holds <code>executor.store</code> so tool results (and <code>Task*</code> tools running on its dispatch thread) land in the same store.</dd>
+<dt>Advisor</dt><dd><span class="sym">terminal_chat.py › TerminalChat._maybe_run_advisor()</span> consults a third actor at turn-end on a <em>separate</em> fast-slot client (never the shared <code>ctx.llm</code>), while the CM is IDLE.</dd>
+</dl></div>
+
+<h2>The CM state machine</h2>
+<p>One driver loop, <span class="sym">ContextManager._drive()</span>, walks LLM rounds until the conversation settles:</p>
+<pre>
+  IDLE ──user_message──► AWAITING_LLM ──assistant, no tool_calls──► IDLE
+                              │  assistant WITH tool_calls
+                              ▼
+                       AWAITING_EXECUTOR ──all tools done──► AWAITING_LLM
+                              ▲ │
+            (any state) ──────┘ └── CANCELLING ──► IDLE   (short-circuit)
+</pre>
+<p>Each round: <span class="sym">_call_llm()</span> streams a turn (a no-progress watchdog cancels a genuinely stalled round; a prompt-too-long error triggers one compaction-and-retry), the assistant message is appended, and if it carries <code>tool_calls</code> they dispatch before looping. Threshold compaction runs once at the top of a turn (<span class="sym">_maybe_auto_compact()</span>); both it and the manual path set <span class="sym">_compacting</span> so the heartbeat shows a live "Compacting" indicator (v1.7.2).</p>
+
+<h2>Four functions, end to end</h2>
+
+<div class="card"><h3>1 · cancel <span style="color:var(--dim);font-weight:400">(keep-partial + append-marker)</span></h3>
+<ol>
+<li>Esc in the input area fires the draft key binding's <code>cancel_hook</code> → <span class="sym">TerminalChat.try_cancel_current_stream()</span>.</li>
+<li>→ <span class="sym">ContextManager.cancel()</span> emits a <code>CancelEvent</code>; <span class="sym">handle_event()</span> routes it to <span class="sym">_do_cancel()</span>.</li>
+<li><span class="sym">_do_cancel()</span>: <span class="sym">Executor.cancel()</span> tree-kills any running subprocess; <span class="sym">OpenAIChatLLM.stop()</span> closes the active stream; the in-flight assistant text in <code>store.pending_assistant_text</code> is <strong>kept</strong> (committed as a real turn); then <span class="sym">llm.py › INTERRUPTED_BY_USER_MARKER</span> is appended as its own turn. State → <code>CANCELLING</code>, which <span class="sym">_drive()</span> short-circuits. The CM <em>consumes</em> the <code>CancelledError</code> so the awaiting handler returns normally (v0.9.2/v0.9.3 append-marker semantics, not history rollback).</li>
+</ol></div>
+
+<div class="card"><h3>2 · rewind <span style="color:var(--dim);font-weight:400">(/rewind, round-safe)</span></h3>
+<ol>
+<li><code>/rewind [N]</code> → <span class="sym">TerminalChat._cmd_rewind()</span> → <span class="sym">ContextManager.rewind_to(message_index)</span>.</li>
+<li><span class="sym">_safe_rewind_index()</span> snaps the cut to a <strong>tool-round boundary</strong> — a rewind never bisects a round, leaving a dangling <code>assistant</code> with unanswered <code>tool_calls</code> or an orphan <code>role:tool</code>.</li>
+<li>History is rebuilt through the same <span class="sym">ReplaceHistoryEvent</span> seam that <code>/load</code> and resume use. Dropped user prompts are recallable with <strong>Up/Down</strong> in the input (<span class="sym">recallable_user_turns()</span> / the draft key bindings). (v0.9.7)</li>
+</ol></div>
+
+<div class="card"><h3>3 · save / load <span style="color:var(--dim);font-weight:400">(two distinct mechanisms)</span></h3>
+<ol>
+<li><strong>Explicit single-file export</strong>: <code>/save [PATH]</code> / <code>/load PATH</code> → <span class="sym">transcript.py › save()</span> / <span class="sym">load()</span> — one portable JSON file.</li>
+<li><strong>Automatic resume</strong>: every settled turn is appended as a JSONL line under <code>~/.cache/neutrix/sessions/&lt;cwd&gt;/&lt;uuid&gt;.jsonl</code> (neutrix's own cache, <em>never</em> <code>~/.claude</code>) by <span class="sym">session_store.py › SessionWriter</span>. <code>--continue</code> loads the most recent, <code>/resume</code> a picker; both restore via <span class="sym">session_store.load_session()</span> → <span class="sym">ReplaceHistoryEvent</span>, and rebuild the cost ledger via <span class="sym">CostLedger.from_jsonl()</span> (v1.7.0).</li>
+<li>Both restore paths share the <span class="sym">ReplaceHistoryEvent</span> seam — the same one rewind uses.</li>
+</ol></div>
+
+<div class="card"><h3>4 · goal <span style="color:var(--dim);font-weight:400">(/goal autonomous loop)</span></h3>
+<ol>
+<li><code>/goal &lt;text&gt;</code> → <span class="sym">TerminalChat._cmd_goal()</span> sets <code>_goal</code> and puts a <span class="sym">_GOAL_KICK</span> sentinel on the worker queue to unblock the idle loop.</li>
+<li>After each turn settles, <span class="sym">_run_goal_continuations()</span> drives the next turn autonomously until <strong>done / step cap (<code>GOAL_MAX_STEPS</code>) / interrupt</strong>; the live region shows <code>◎ goal · step N/MAX</code>.</li>
+<li>A user message typed mid-goal sets <code>_goal_interrupt</code> — the loop releases on its next check (the user is taking over). In-memory only; not resumed across sessions. (v1.6.0)</li>
+</ol></div>
+
+<footer>neutrix architecture · as of v1.7.x · companion to <a href="roadmap.html">roadmap.html</a> + the <a href="PRDs/">PRDs</a>. Spec: <a href="PRDs/v1.7.4-architecture-doc.md">v1.7.4-architecture-doc.md</a>. Citations are symbol-based; verify against the module docstrings.</footer>
+</body></html>
