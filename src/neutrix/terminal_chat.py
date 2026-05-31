@@ -124,7 +124,10 @@ _TASK_PANEL_ORDER = {"in_progress": 0, "pending": 1, "completed": 2}
 
 WORD_RE = re.compile(r"\S+")
 SYSTEM_STYLE = "dim yellow"
-USER_STYLE = "cyan"
+# v1.7.2: a fg/bg PAIR so real user prompts are instantly findable in scrollback.
+# Span background (not a full-width bar — append-only scrollback makes padded
+# bars ragged on resize). 256-color-safe; cyan-on-dark-grey reads without clash.
+USER_STYLE = "cyan on grey19"
 ASSISTANT_STYLE = "white"
 # v0.10.2 visibility parity: fold the system prompt only when it's long enough
 # to dominate session start; short prompts (incl. the default) stay inline.
@@ -241,6 +244,7 @@ async def heartbeat_loop(
     sleep_seconds: float = HEARTBEAT_BLINK_INTERVAL_MS / 1000,
     sleep_fn: Callable[[float], Awaitable[None]] | None = None,
     on_enter_busy: Callable[[], None] | None = None,
+    compacting_supplier: Callable[[], bool] | None = None,
 ) -> None:
     """Drive the heartbeat: wink while busy, wait on store changes when idle.
 
@@ -260,14 +264,22 @@ async def heartbeat_loop(
     """
     if sleep_fn is None:
         sleep_fn = asyncio.sleep
+
+    def _busy() -> bool:
+        # v1.7.2: compaction counts as busy for liveness even while the CM state
+        # stays IDLE, so the heartbeat animates during a (slow) /compact.
+        return state_supplier() != State.IDLE or (
+            compacting_supplier is not None and compacting_supplier()
+        )
+
     changes = store.changes()
     try:
         while True:
-            while state_supplier() == State.IDLE:
+            while not _busy():
                 await changes.__anext__()
             if on_enter_busy is not None:
                 on_enter_busy()
-            while state_supplier() != State.IDLE:
+            while _busy():
                 await sleep_fn(sleep_seconds)
                 on_tick()
     finally:
@@ -284,6 +296,7 @@ def format_heartbeat(
     phase_started_at: float | None = None,
     now: float | None = None,
     cost_readout: str | None = None,
+    compacting: bool = False,
 ) -> list[tuple[str, str]]:
     """Render the status bar above the input as prompt_toolkit fragments.
 
@@ -307,7 +320,7 @@ def format_heartbeat(
     (CC parity: a tool legitimately produces no tokens — a long ``Exec: Bash``
     reads as alive, not stalled). ``now`` is injectable for tests.
     """
-    if state == State.IDLE:
+    if state == State.IDLE and not compacting:
         return []
     if now is None:
         now = time.monotonic()
@@ -317,7 +330,9 @@ def format_heartbeat(
         and (now - last_progress_at) > stall_threshold_s
     )
     parts: list[str] = []
-    if state == State.AWAITING_LLM:
+    if compacting:
+        parts.append("Compacting")
+    elif state == State.AWAITING_LLM:
         parts.append("LLM")
     elif state == State.AWAITING_EXECUTOR:
         pending = store.pending_tool_calls
@@ -1104,6 +1119,7 @@ class TerminalChat:
             stall_threshold_s=stall_threshold_for(self.ctx.slot.llm_timeout_s),
             phase_started_at=self.ctx.phase_started_at,
             cost_readout=self._cost_readout(),
+            compacting=self.ctx._compacting,
         )
         # v1.5.0: the turn-end Advisor runs while the CM is IDLE, so the
         # state-driven heartbeat can't show it — render it from a chat-side flag.
@@ -1205,6 +1221,7 @@ class TerminalChat:
             store=self.store,
             on_tick=on_tick,
             on_enter_busy=on_enter_busy,
+            compacting_supplier=lambda: self.ctx._compacting,  # v1.7.2: animate during /compact
         )
 
     async def _skills_poller(self) -> None:

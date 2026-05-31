@@ -232,7 +232,7 @@
 </div>
 
 <div class="entry">
-  <span class="ver"><a href="PRDs/v1.7.2-architecture-doc.md">v1.7.2</a></span>
+  <span class="ver"><a href="PRDs/v1.7.3-architecture-doc.md">v1.7.3</a></span>
   <span class="theme">
     Architecture document (<code>docs/architecture.html</code>)
     <small>
@@ -240,10 +240,29 @@
       (<code>ui ↔ store ↔ CM ↔ {LLM, Executor, Advisor}</code>, hub-and-spoke) + the
       CM state machine + four function walkthroughs (cancel, rewind, save/load,
       goal) with symbol-based citations. Docs-only; updates <code>CLAUDE.md</code>'s
-      "single living document" note. (<a href="PRDs/v1.7.2-architecture-doc.md">PRD</a>.)
+      "single living document" note. (<a href="PRDs/v1.7.3-architecture-doc.md">PRD</a>.)
     </small>
   </span>
   <span class="badges"><span class="badge p3">P3</span><span class="badge planned">planned</span></span>
+</div>
+
+<div class="entry">
+  <span class="ver"><a href="PRDs/v1.7.2-ux-polish.md">v1.7.2</a></span>
+  <span class="theme">
+    UX: user-message background · compaction heartbeat
+    <small>
+      Two transcript/liveness fixes from live use. Real user prompts get a
+      <strong>non-black span background</strong> (a fg/bg pair on <code>USER_STYLE</code>;
+      no full-width bar — ragged in append-only scrollback) so they're easy to
+      spot. And <code>/compact</code> stops <strong>looking dead</strong>: it runs an
+      LLM (<code>smart_compact</code>) while IDLE with no heartbeat — a CM
+      <code>_compacting</code> flag now drives an animating "Compacting · Ns"
+      indicator (honored by the ticker + <code>format_heartbeat</code> + the
+      above-input render, both compact paths). Shipping now.
+      (<a href="splits/v1.7.2-ux-polish.html">2 split-point decisions</a>.)
+    </small>
+  </span>
+  <span class="badges"><span class="badge p2">P2</span><span class="badge planned">target</span></span>
 </div>
 
 <div class="entry">

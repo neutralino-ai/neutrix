@@ -57,8 +57,9 @@ not optional.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -260,6 +261,9 @@ class ContextManager:
     # v1.7.0: usage from the current round's LLMResponse, stashed in _call_llm
     # and fed to the ledger at turn completion (with measured llm_ms/tool_ms).
     _last_usage: Usage | None = field(default=None, init=False, repr=False)
+    # v1.7.2: True while a (possibly slow, LLM-backed) compaction runs, so the
+    # heartbeat shows "Compacting" liveness even though the CM state stays IDLE.
+    _compacting: bool = field(default=False, init=False)
     _drive_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _llm_timeout_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
@@ -377,6 +381,26 @@ class ContextManager:
 
     # ---------------------------------------------------------------- compact
 
+    @contextlib.contextmanager
+    def _compaction_liveness(self) -> Iterator[None]:
+        """Mark a (possibly slow, LLM-backed) compaction as live (v1.7.2).
+
+        Sets ``_compacting`` + ``phase_started_at`` so the heartbeat animates a
+        "Compacting · Ns" indicator while the CM state stays IDLE, and pokes the
+        store on entry/exit so the idle heartbeat ticker (parked on
+        ``store.changes()``) wakes — compaction itself doesn't mutate the store
+        until it finishes.
+        """
+        self._compacting = True
+        self.phase_started_at = time.monotonic()
+        self.store.notify()
+        try:
+            yield
+        finally:
+            self._compacting = False
+            self.phase_started_at = None
+            self.store.notify()
+
     async def compact(self) -> CompactionOutcome:
         """Mechanically drop the oldest ~50 % of history (v0.9.6).
 
@@ -396,12 +420,13 @@ class ContextManager:
         # v0.10.5: prefer summary-based compaction (one LLM call on the active
         # slot, run while IDLE here); fall back to the mechanical drop if the
         # summary is empty/fails, so /compact always does something useful.
-        new_messages, outcome = await smart_compact(
-            self.messages,
-            llm=self.llm,
-            model=self.slot.model,
-            max_context_tokens=self.slot.max_context_tokens,
-        )
+        with self._compaction_liveness():  # v1.7.2: heartbeat while the LLM summarizes
+            new_messages, outcome = await smart_compact(
+                self.messages,
+                llm=self.llm,
+                model=self.slot.model,
+                max_context_tokens=self.slot.max_context_tokens,
+            )
         kind = "summary"
         if not outcome.did_compact:
             new_messages, outcome = compact_messages(self.messages)
@@ -446,12 +471,13 @@ class ContextManager:
             self.messages, max_context_tokens=self.slot.max_context_tokens
         ):
             return
-        new_messages, outcome = await smart_compact(
-            self.messages,
-            llm=self.llm,
-            model=self.slot.model,
-            max_context_tokens=self.slot.max_context_tokens,
-        )
+        with self._compaction_liveness():  # v1.7.2: heartbeat while the LLM summarizes
+            new_messages, outcome = await smart_compact(
+                self.messages,
+                llm=self.llm,
+                model=self.slot.model,
+                max_context_tokens=self.slot.max_context_tokens,
+            )
         if outcome.did_compact:
             self._apply_compaction(new_messages, outcome, kind="summary")
 

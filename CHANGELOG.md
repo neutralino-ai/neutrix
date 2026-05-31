@@ -4,6 +4,28 @@ All notable changes to neutrix. Format: [Keep a Changelog](https://keepachangelo
 Versioning: [SemVer](https://semver.org/) with the pre-1.0 rule that minor
 bumps may include breaking changes (see [release-workflow rule](.claude/rules/release-workflow.md)).
 
+## [v1.7.2] — 2026-05-31
+
+### Changed
+- **User messages render on a background** (`USER_STYLE` = `cyan on grey19`) so
+  real prompts are instantly findable in dense scrollback. A text-span background,
+  not a full-width bar (append-only scrollback makes padded bars ragged on
+  resize). Injected user-role turns (task / goal / advisor / summary markers) are
+  unaffected — they render via the system style.
+
+### Fixed
+- **`/compact` no longer looks dead.** `compact()` runs an LLM summary
+  (`smart_compact`) while the CM is IDLE, and the status-bar heartbeat is empty
+  when IDLE — so the bar went blank during the multi-second compaction. A CM
+  `_compacting` flag now drives an animating "Compacting · Ns" heartbeat, honored
+  in all three places that gate on busy-ness — the heartbeat ticker (woken via a
+  new `ChatStore.notify()` poke, since compaction doesn't mutate the store),
+  `format_heartbeat`, and the above-input render — on **both** the manual
+  `/compact` and the automatic threshold-compaction paths. Verified live against
+  the gateway (`Compacting · 0s…3s`, then clears).
+
+See [docs/PRDs/v1.7.2-ux-polish.md](docs/PRDs/v1.7.2-ux-polish.md).
+
 ## [v1.7.1] — 2026-05-31
 
 ### Changed

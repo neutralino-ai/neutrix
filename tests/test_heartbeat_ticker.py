@@ -57,6 +57,65 @@ async def test_ticker_increments_while_busy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ticker_animates_while_compacting_even_when_idle() -> None:
+    """v1.7.2: compaction counts as busy — the ticker animates (on_tick fires)
+    though the CM state is IDLE, so a slow /compact doesn't look frozen."""
+    store = ChatStore()
+    compacting = [True]
+    timestamps: list[float] = []
+    task = asyncio.create_task(
+        heartbeat_loop(
+            lambda: State.IDLE,
+            store,
+            lambda: timestamps.append(time.monotonic()),
+            sleep_seconds=0.1,
+            sleep_fn=asyncio.sleep,
+            compacting_supplier=lambda: compacting[0],
+        )
+    )
+    try:
+        await asyncio.sleep(0.4)
+        assert len(timestamps) >= 3  # animating despite IDLE state
+        # once compaction ends the ticker parks (no further ticks)
+        compacting[0] = False
+        await asyncio.sleep(0.05)  # let the loop observe not-busy and park on changes()
+        n = len(timestamps)
+        await asyncio.sleep(0.3)
+        assert len(timestamps) == n
+    finally:
+        await _cancel(task)
+
+
+@pytest.mark.asyncio
+async def test_ticker_wakes_when_compaction_starts_via_store_notify() -> None:
+    """v1.7.2 (the frozen-ticker guard): the ticker parks on changes() while idle;
+    compaction starting must poke the store (store.notify) to wake it — otherwise
+    the heartbeat stays present-but-frozen. Mirrors what _compaction_liveness does."""
+    store = ChatStore()
+    compacting = [False]
+    timestamps: list[float] = []
+    task = asyncio.create_task(
+        heartbeat_loop(
+            lambda: State.IDLE,
+            store,
+            lambda: timestamps.append(time.monotonic()),
+            sleep_seconds=0.1,
+            sleep_fn=asyncio.sleep,
+            compacting_supplier=lambda: compacting[0],
+        )
+    )
+    try:
+        await asyncio.sleep(0.2)
+        assert timestamps == []  # parked: idle + not compacting
+        compacting[0] = True  # compaction starts...
+        store.notify()  # ...and pokes the store (what _compaction_liveness does)
+        await asyncio.sleep(0.3)
+        assert len(timestamps) >= 2  # woke from the park and is animating
+    finally:
+        await _cancel(task)
+
+
+@pytest.mark.asyncio
 async def test_ticker_idle_when_state_idle() -> None:
     """While CM is IDLE, on_tick never fires."""
     store = ChatStore()

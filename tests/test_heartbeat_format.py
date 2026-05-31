@@ -43,6 +43,20 @@ def test_idle_returns_empty() -> None:
     assert format_heartbeat(State.IDLE, ChatStore(), 0) == []
 
 
+def test_compacting_shows_label_even_when_idle() -> None:
+    """v1.7.2: compacting=True overrides the IDLE early-return and labels the
+    actor "Compacting" — so a (slow, IDLE-state) /compact doesn't look dead."""
+    frags = format_heartbeat(
+        State.IDLE, ChatStore(), 0, compacting=True, phase_started_at=time.monotonic()
+    )
+    assert frags  # non-empty even though state is IDLE
+    assert "Compacting" in frags[1][1]
+
+
+def test_idle_without_compacting_still_empty() -> None:
+    assert format_heartbeat(State.IDLE, ChatStore(), 0, compacting=False) == []
+
+
 def test_awaiting_llm_label() -> None:
     fragments = format_heartbeat(State.AWAITING_LLM, ChatStore(), 0)
     text = "".join(t for _s, t in fragments)

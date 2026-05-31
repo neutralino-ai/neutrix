@@ -811,3 +811,40 @@ async def test_ledger_records_each_round_of_a_tool_turn(monkeypatch):
     assert ctx.ledger.total_usage().input == 250
     assert ctx.ledger.total_usage().output == 30
     assert ctx.ledger.entries[1].tool_ms == 0.0  # final round dispatched no tools
+
+
+# ---- v1.7.2: compaction liveness ------------------------------------------
+
+
+def test_compaction_liveness_flag_phase_and_store_poke():
+    """_compaction_liveness flips _compacting + sets phase_started_at + pokes the
+    store on enter/exit, so the idle heartbeat ticker wakes to animate."""
+    ctx = _make_ctx(FakeLLM([]), use_tools=False)
+    assert ctx._compacting is False
+    pokes: list[bool] = []
+    ctx.store.notify = lambda: pokes.append(ctx._compacting)  # flag value at poke time
+    with ctx._compaction_liveness():
+        assert ctx._compacting is True
+        assert ctx.phase_started_at is not None
+    assert ctx._compacting is False
+    assert ctx.phase_started_at is None
+    assert pokes == [True, False]  # poked on entry (compacting) + exit (settled)
+
+
+@pytest.mark.asyncio
+async def test_compact_sets_compacting_flag_during_smart_compact(monkeypatch):
+    """compact() wraps the smart_compact LLM call in the liveness, so _compacting
+    is True while it runs and cleared after (v1.7.2)."""
+    from neutrix.compaction import CompactionOutcome
+
+    ctx = _make_ctx(FakeLLM([]), use_tools=False)
+    seen: dict[str, bool] = {}
+
+    async def fake_smart(messages, **_kw):
+        seen["during"] = ctx._compacting
+        return list(messages), CompactionOutcome(False, 0, 0)
+
+    monkeypatch.setattr("neutrix.context_manager.smart_compact", fake_smart)
+    await ctx.compact()
+    assert seen["during"] is True  # flag set while smart_compact ran
+    assert ctx._compacting is False  # cleared after

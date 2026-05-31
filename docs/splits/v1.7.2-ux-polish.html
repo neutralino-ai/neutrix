@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>v1.7.2 splits — user-message background &amp; compaction heartbeat</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{--fg:#1a1a1a;--muted:#6a6a6a;--dim:#9a9a9a;--bg:#fafaf7;--card:#fff;--border:#e3e3dc;--accent:#b14a00;--decided:#2f7d32;--alt:#7a4ea8;--flag:#b14a00;}
+  html{background:var(--bg);}body{font:15px/1.55 system-ui,sans-serif;color:var(--fg);max-width:920px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:24px;margin:0 0 4px;}.tagline{color:var(--muted);font-size:14px;margin:0 0 8px;}.note{color:var(--dim);font-size:13px;margin:0 0 24px;}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:32px 0 12px;font-weight:600;}
+  .split{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px 18px;margin:0 0 14px;}
+  .split .head{display:grid;grid-template-columns:36px 1fr auto;gap:12px;align-items:baseline;margin-bottom:10px;}
+  .split .num{font-weight:600;color:var(--muted);}.split .name{font-weight:600;}
+  .badge{font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:3px 8px;border-radius:3px;font-weight:600;white-space:nowrap;}
+  .badge.decided{color:var(--decided);background:#e8f3e9;}
+  .split dl{display:grid;grid-template-columns:130px 1fr;gap:4px 16px;margin:0;font-size:14px;}
+  .split dt{color:var(--muted);font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:5px;}
+  .split dd{margin:0 0 8px;}.split .decision{color:var(--decided);}.split .decision.alt{color:var(--alt);}
+  code{font:13px/1 ui-monospace,Menlo,monospace;background:#f1f0eb;padding:1px 4px;border-radius:3px;}
+  footer{color:var(--dim);font-size:12px;margin-top:48px;border-top:1px solid var(--border);padding-top:16px;}
+</style></head><body>
+<h1>v1.7.2 splits — user-message background &amp; compaction heartbeat</h1>
+<p class="tagline">Two transcript/liveness UX fixes: make user messages easy to spot (a non-black background) and stop <code>/compact</code> from looking dead (a heartbeat while it works).</p>
+<p class="note"><strong>Agent-decided under the user's standing "decide yourself" delegation</strong> ([[feedback-investigate-decide]]) — CC surveyed (<code>/datafs/users/dingxf/anthropic/cc2/src</code>), advisor-reviewed. <strong>Backlog spec</strong>: ships as v1.7.2 (the next ascending tag); the still-unbuilt arch doc bumped to v1.7.3 ([[feedback-versioning]]). See <code>docs/PRDs/v1.7.2-ux-polish.md</code>.</p>
+
+<h2>Split points</h2>
+
+<div class="split"><div class="head"><span class="num">1.</span><span class="name">User-message visual treatment — a background</span><span class="badge decided">decided</span></div>
+<dl><dt>Now</dt><dd>User turns render with <code>USER_STYLE = "cyan"</code> (foreground only, via <code>terminal_chat › ChatView.print_user_now</code>); they blend into the assistant/system text in dense scrollback.</dd>
+<dt>CC</dt><dd>CC styles user/command turns with a <em>foreground color</em> + prefix (Ink <code>Text color=…</code>, e.g. <code>components/messages/UserCommandMessage.tsx</code> <code>color="subtle"</code>), <strong>not</strong> a background.</dd>
+<dt>Options</dt><dd>(a) <strong>span background</strong> — add <code>on &lt;color&gt;</code> to <code>USER_STYLE</code> (colors the message text); (b) <strong>full-width bar</strong> — pad each line to the console width so the bg is a clean rectangle; (c) just a brighter fg / a prefix glyph.</dd>
+<dt class="decision alt">Decision</dt><dd class="decision alt"><strong>(a) span background — User-directed</strong> ("bkg color different than black"). Add a fg/bg <strong>pair</strong> to <code>USER_STYLE</code> (a readable combo like <code>cyan on grey19</code> / <code>white on grey23</code> — NOT a clashy <code>on blue</code>; exact pair is PRD-level + tweakable). <strong>Full-width bar (b) rejected:</strong> the renderer is append-only scrollback (v0.6.8) — padded lines don't reflow on resize, leaving ragged colored rectangles (the "ugly" the user rejects, [[feedback-ui-hints]]); for the common 1–2 line prompt the span bg looks identical anyway (YAGNI — revisit only if multi-line raggedness actually bothers). Applies to <strong>real user prompts only</strong> — the <code>role=="user" → print_user</code> branch sits below the task-reminder / goal / advisor / summary-marker special-cases, so it naturally excludes injected user-role turns.</dd></dl></div>
+
+<div class="split"><div class="head"><span class="num">2.</span><span class="name">Compaction liveness — a heartbeat while compacting</span><span class="badge decided">decided</span></div>
+<dl><dt>Now</dt><dd><code>ContextManager.compact()</code> runs <code>smart_compact</code> — <strong>an LLM call</strong> — but sets <strong>no state</strong>; it runs while the CM is <code>IDLE</code> (the <code>/compact</code> command refuses while busy). The status bar (<code>format_heartbeat</code>) returns <code>[]</code> when <code>IDLE</code>, so during the (slow) compaction the bar is empty → "looks dead".</dd>
+<dt>CC</dt><dd>CC sets a dedicated status <code>setSDKStatus('compacting')</code> (<code>commands/compact/compact.ts</code>) and shows a "Compacting conversation" spinner (<code>screens/REPL.tsx</code>) — i.e. compaction is a recognized busy/liveness state.</dd>
+<dt>Options</dt><dd>(a) a <strong>CM <code>_compacting</code> flag</strong> surfaced to the liveness UI; (b) a new <strong><code>State.COMPACTING</code></strong> in the state machine.</dd>
+<dt class="decision">Decision</dt><dd class="decision"><strong>(a) a CM <code>_compacting</code> flag — Follow CC's semantics.</strong> Mirrors the existing <code>_advisor_busy</code> precedent (another "busy while CM is <code>IDLE</code>" liveness handled by a flag, not a State); a new State wouldn't unify anything (advisor stays a flag) and would force a cancel/guard audit. The serial input loop makes re-entrant <code>/compact</code> structurally impossible, so nothing needs <code>is_busy()</code> to flip during compaction → flag is safe. <strong>The flag must register as busy in THREE places</strong> or the heartbeat ships present-but-frozen (still dead-looking): the <code>_heartbeat_ticker</code> run/blink condition (today <code>state != IDLE</code>), <code>format_heartbeat</code>'s early-return + an actor branch ("Compacting · Ns" off <code>phase_started_at</code>), and <code>_above_input</code> passing the signal. Set the flag around the <code>smart_compact</code> call on <strong>both</strong> paths: manual <code>compact()</code> and auto <code>_maybe_auto_compact()</code> (inside <code>_drive</code>). <strong>Verify with a live <code>/compact</code> watch</strong> — a <code>format_heartbeat</code> unit test won't catch a frozen ticker.</dd></dl></div>
+
+<footer>v1.7.2 · 2 split points, agent-decided under "decide yourself" · user messages get a span background via a fg/bg pair on <code>USER_STYLE</code>, real-prompts-only, no full-width bar (#1); compaction surfaces a <code>_compacting</code> flag honored by the ticker + <code>format_heartbeat</code> + <code>_above_input</code> on both compact paths, verified by a live watch (#2). See <code>docs/PRDs/v1.7.2-ux-polish.md</code>.</footer>
+</body></html>

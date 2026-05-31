@@ -1056,3 +1056,13 @@ async def test_cmd_cost_renders_totals_and_empty(tmp_path: Path) -> None:
     out = output.getvalue()
     assert "$5.0000" in out  # 1M input * $5/Mtok
     assert "1,000,000 miss" in out
+
+
+def test_user_style_has_a_background() -> None:
+    """v1.7.2: real user prompts render on a non-black background (a fg/bg pair)
+    so they're easy to spot in scrollback."""
+    from neutrix.terminal_chat import USER_STYLE
+
+    assert " on " in USER_STYLE  # a rich "<fg> on <bg>" pair
+    bg = USER_STYLE.split(" on ", 1)[1].strip()
+    assert bg and bg.lower() != "black"  # a real, non-black background

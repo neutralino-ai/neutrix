@@ -425,6 +425,15 @@ class ChatStore:
         finally:
             self._subscribers.discard(event)
 
+    def notify(self) -> None:
+        """Wake all ``changes()`` subscribers without mutating the store (v1.7.2).
+
+        For liveness signals that aren't message mutations — e.g. compaction
+        starting/ending, which otherwise wouldn't touch the store, so the idle
+        heartbeat ticker (parked on ``changes()``) would never wake to animate.
+        """
+        self._notify()
+
     # ---------------------------------------------------------- internal
 
     def _notify(self) -> None:
